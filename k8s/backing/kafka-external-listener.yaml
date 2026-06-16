@@ -1,0 +1,31 @@
+# External Kafka listener for Mac/Windows dev — added to my-cluster
+# (Strimzi/CSM) by scripts/kafka-external-listener.sh as a JSON patch.
+#
+# Each broker advertises a unique localhost port so the four port-forwards
+# in scripts/mac-dev.sh map cleanly:
+#
+#   bootstrap (LB svc) → localhost:19090
+#   broker 0  (LB svc) → localhost:19094
+#   broker 1  (LB svc) → localhost:19095
+#   broker 2  (LB svc) → localhost:19096
+#
+# In-cluster deployments do NOT need this — the app's ConfigMap points at
+# the internal listener (my-cluster-kafka-bootstrap.cld-streaming.svc:9092).
+#
+# This file documents the listener; the script applies it idempotently.
+
+name: external
+port: 9094
+tls: false
+type: loadbalancer
+configuration:
+  brokers:
+    - broker: 0
+      advertisedHost: localhost
+      advertisedPort: 19094
+    - broker: 1
+      advertisedHost: localhost
+      advertisedPort: 19095
+    - broker: 2
+      advertisedHost: localhost
+      advertisedPort: 19096

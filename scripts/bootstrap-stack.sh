@@ -19,7 +19,14 @@ if [ -z "${HF_TOKEN:-}" ]; then
 fi
 
 echo "==> Applying backing YAMLs"
-kubectl apply -f k8s/backing/
+# kafka-external-listener.yaml is documentation, not a manifest — applied
+# below via the dedicated script.
+kubectl apply -f k8s/backing/vllm-Qwen2.5-3B-Instruct.yaml \
+              -f k8s/backing/qdrant-deployment.yaml \
+              -f k8s/backing/embedding-server.yaml
+
+echo "==> Adding Kafka external listener (idempotent)"
+bash scripts/kafka-external-listener.sh
 
 echo "==> Building Whisper image into Minikube docker daemon"
 eval "$(minikube docker-env)"
