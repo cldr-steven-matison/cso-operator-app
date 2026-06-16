@@ -38,9 +38,38 @@ scripts/    mac-dev.sh, deploy.sh, bootstrap-stack.sh
 ## Quick start (Mac dev)
 
 ```bash
-make bootstrap     # apply backing YAMLs, build whisper image, import flows
-make dev           # port-forwards + uvicorn + vite
+make bootstrap     # apply backing YAMLs, patch Kafka external listener, build whisper image
+# in three terminals:
+make dev           # port-forwards (vllm/qdrant/embed/whisper + 4× kafka)
+make backend       # FastAPI on :8000 with .env.local
+make frontend      # Vite on :5173, proxies /api -> :8000
 ```
+
+Backend env: copy `backend/.env.example` to `backend/.env.local` and fill in
+`NIFI_PASSWORD` from the `nifi-admin-creds` Secret in `cfm-streaming`:
+
+```bash
+kubectl get secret nifi-admin-creds -n cfm-streaming \
+  -o jsonpath='{.data.password}' | base64 -d
+```
+
+## Quick start (Windows)
+
+Requires WSL2 or Git Bash so the bash scripts run. Same flow as Mac:
+
+```bash
+git clone https://github.com/cldr-steven-matison/cso-operator-app
+cd cso-operator-app
+export HF_TOKEN=...           # for the Whisper image build
+make bootstrap
+make dev
+make backend                  # in another terminal
+make frontend                 # in another terminal
+```
+
+Whisper requires a GPU-enabled Minikube. The other services
+(vLLM, Qdrant, embedding-server, NiFi, Kafka) work the same on Windows
+once the backing operators are installed.
 
 ## Deploy (Mac or Windows Minikube)
 
