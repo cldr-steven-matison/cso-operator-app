@@ -17,6 +17,14 @@ async def topics():
         return {"error": str(e), "topics": []}
 
 
+@router.get("/all-topics")
+async def all_topics():
+    try:
+        return await kafka_svc.list_all_topics()
+    except Exception as e:
+        return {"error": str(e), "topics": []}
+
+
 @router.get("/tail/{topic}")
 async def tail(topic: str):
     if topic not in (settings.TOPIC_AUDIO, settings.TOPIC_DOCS):

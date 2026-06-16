@@ -17,6 +17,8 @@ export type QdrantStats = {
 
 export type KafkaTopic = { topic: string; exists: boolean; partitions?: number; depth?: number };
 export type KafkaTopicsResponse = KafkaTopic[] | { error: string; topics: KafkaTopic[] };
+export type KafkaAllTopic = { topic: string; partitions: number; depth: number };
+export type KafkaAllTopicsResponse = KafkaAllTopic[] | { error: string; topics: KafkaAllTopic[] };
 
 async function jget<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -45,6 +47,7 @@ export const api = {
   qdrantRecreate: () => jpost("/api/qdrant/recreate"),
 
   kafkaTopics: () => jget<KafkaTopicsResponse>("/api/kafka/topics"),
+  kafkaAllTopics: () => jget<KafkaAllTopicsResponse>("/api/kafka/all-topics"),
 
   ingestDoc: (file: File) => uploadFile("/api/ingest/doc", file),
   ingestAudio: (file: File) => uploadFile("/api/ingest/audio", file),

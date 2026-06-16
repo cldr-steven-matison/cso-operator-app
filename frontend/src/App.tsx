@@ -1,3 +1,4 @@
+import { AllTopics } from "@/components/AllTopics";
 import { DemoMode } from "@/components/DemoMode";
 import { HealthBar } from "@/components/HealthBar";
 import { Ingest } from "@/components/Ingest";
@@ -17,6 +18,7 @@ export default function App() {
         <KafkaActivity />
         <QdrantPanel />
         <RagQuery />
+        <AllTopics />
       </main>
     </div>
   );

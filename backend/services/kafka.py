@@ -1,9 +1,9 @@
-"""Kafka helpers using aiokafka — topic stats and live tail."""
+"""Kafka helpers using aiokafka — topic stats, live tail, produce."""
 
 import asyncio
 from typing import AsyncIterator
 
-from aiokafka import AIOKafkaConsumer, TopicPartition
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
 from aiokafka.admin import AIOKafkaAdminClient
 
 from config import settings
@@ -40,6 +40,54 @@ async def topic_stats() -> list[dict]:
         await consumer.stop()
         await admin.close()
     return out
+
+
+async def list_all_topics() -> list[dict]:
+    """All topics with depth (end-offset sum)."""
+    admin = AIOKafkaAdminClient(bootstrap_servers=settings.KAFKA_BOOTSTRAP)
+    consumer = AIOKafkaConsumer(bootstrap_servers=settings.KAFKA_BOOTSTRAP)
+    out: list[dict] = []
+    try:
+        await admin.start()
+        await consumer.start()
+        names = sorted(await admin.list_topics())
+        for name in names:
+            if name.startswith("__"):
+                continue
+            try:
+                meta = await admin.describe_topics([name])
+                info = meta[0] if meta else {}
+                partitions = [
+                    TopicPartition(name, p["partition"])
+                    for p in info.get("partitions", [])
+                ]
+                if not partitions:
+                    out.append({"topic": name, "partitions": 0, "depth": 0})
+                    continue
+                ends = await consumer.end_offsets(partitions)
+                begins = await consumer.beginning_offsets(partitions)
+                depth = sum(ends[p] - begins[p] for p in partitions)
+                out.append(
+                    {"topic": name, "partitions": len(partitions), "depth": depth}
+                )
+            except Exception:
+                out.append({"topic": name, "partitions": 0, "depth": 0})
+    finally:
+        await consumer.stop()
+        await admin.close()
+    return out
+
+
+async def produce(topic: str, body: bytes, headers: list[tuple[str, bytes]] | None = None) -> dict:
+    """Publish a single message to a topic. Used by /api/ingest/* when no
+    NiFi ListenHTTP URL is configured."""
+    producer = AIOKafkaProducer(bootstrap_servers=settings.KAFKA_BOOTSTRAP)
+    try:
+        await producer.start()
+        meta = await producer.send_and_wait(topic, value=body, headers=headers or [])
+        return {"topic": meta.topic, "partition": meta.partition, "offset": meta.offset}
+    finally:
+        await producer.stop()
 
 
 async def tail(topic: str) -> AsyncIterator[dict]:

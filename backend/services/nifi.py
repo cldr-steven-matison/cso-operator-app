@@ -80,8 +80,6 @@ def _pg_info(pg: dict) -> dict:
     return {
         "id": pg["id"],
         "version": pg.get("revision", {}).get("version", 0),
-        "state": pg.get("status", {}).get("aggregateSnapshot", {}).get("runStatus")
-        or pg.get("component", {}).get("state"),
     }
 
 
@@ -107,8 +105,44 @@ async def resolve_groups(
     return out
 
 
+async def pg_state(client: httpx.AsyncClient, pg_id: str) -> str:
+    """Compute a PG's state from its processors' states.
+
+    NiFi's PG-level aggregate counts come back null in our setup, but
+    /flow/process-groups/{id} reliably returns processor-level state.
+    Returns one of: "RUNNING" | "STOPPED" | "INVALID" | "DISABLED" | "EMPTY".
+    """
+    data = await _get(client, f"/flow/process-groups/{pg_id}")
+    procs = data.get("processGroupFlow", {}).get("flow", {}).get("processors", [])
+    counts = {"RUNNING": 0, "STOPPED": 0, "INVALID": 0, "DISABLED": 0}
+    for p in procs:
+        s = p.get("component", {}).get("state") or p.get("status", {}).get(
+            "aggregateSnapshot", {}
+        ).get("runStatus")
+        if s in counts:
+            counts[s] += 1
+    if counts["RUNNING"]:
+        return "RUNNING"
+    if counts["STOPPED"]:
+        return "STOPPED"
+    if counts["INVALID"]:
+        return "INVALID"
+    if counts["DISABLED"]:
+        return "DISABLED"
+    return "EMPTY"
+
+
 async def state(client: httpx.AsyncClient) -> dict:
-    return await resolve_groups(client)
+    """Return {name: {id, version, state}} for all known PGs."""
+    groups = await resolve_groups(client)
+    results = await asyncio.gather(
+        *(pg_state(client, pg["id"]) for pg in groups.values()),
+        return_exceptions=True,
+    )
+    out: dict[str, dict] = {}
+    for (name, pg), st in zip(groups.items(), results):
+        out[name] = {**pg, "state": st if isinstance(st, str) else "UNKNOWN"}
+    return out
 
 
 async def set_state(client: httpx.AsyncClient, name: str, running: bool) -> dict:
