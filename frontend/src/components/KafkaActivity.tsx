@@ -3,6 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { api, openSSE, type KafkaTopic } from "@/lib/api";
 
+function asArray(r: KafkaTopic[] | { error: string; topics: KafkaTopic[] }): KafkaTopic[] {
+  return Array.isArray(r) ? r : r.topics;
+}
+
 type Msg = { topic: string; partition: number; offset: number; ts: number; size: number; payload: string };
 
 const TOPICS = ["new_audio", "new_documents"];
@@ -15,7 +19,7 @@ export function KafkaActivity() {
   useEffect(() => {
     const refresh = async () => {
       try {
-        setTopics(await api.kafkaTopics());
+        setTopics(asArray(await api.kafkaTopics()));
       } catch {}
     };
     refresh();

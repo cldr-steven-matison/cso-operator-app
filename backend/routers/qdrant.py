@@ -7,9 +7,15 @@ router = APIRouter(prefix="/qdrant")
 
 @router.get("/stats")
 async def stats(request: Request):
-    return await qdrant_svc.stats(request.app.state.http)
+    try:
+        return await qdrant_svc.stats(request.app.state.http)
+    except Exception as e:
+        return {"exists": False, "error": str(e)}
 
 
 @router.post("/recreate")
 async def recreate(request: Request):
-    return await qdrant_svc.recreate(request.app.state.http)
+    try:
+        return await qdrant_svc.recreate(request.app.state.http)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

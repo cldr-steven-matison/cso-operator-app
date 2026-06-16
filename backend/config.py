@@ -17,6 +17,8 @@ class Settings(BaseSettings):
 
     NIFI_URL: str = "https://mynifi-web.mynifi.cfm-streaming.svc.cluster.local"
     NIFI_VERIFY_TLS: bool = False
+    NIFI_USERNAME: str = ""
+    NIFI_PASSWORD: str = ""
 
     KAFKA_BOOTSTRAP: str = "my-cluster-kafka-bootstrap.cld-streaming.svc:9092"
     TOPIC_AUDIO: str = "new_audio"

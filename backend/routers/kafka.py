@@ -11,7 +11,10 @@ router = APIRouter(prefix="/kafka")
 
 @router.get("/topics")
 async def topics():
-    return await kafka_svc.topic_stats()
+    try:
+        return await kafka_svc.topic_stats()
+    except Exception as e:
+        return {"error": str(e), "topics": []}
 
 
 @router.get("/tail/{topic}")

@@ -5,6 +5,7 @@ from aiokafka.admin import AIOKafkaAdminClient
 from fastapi import APIRouter, Request
 
 from config import settings
+from services import nifi as nifi_svc
 
 router = APIRouter()
 
@@ -12,7 +13,15 @@ router = APIRouter()
 async def _ping(client: httpx.AsyncClient, url: str) -> dict:
     try:
         r = await client.get(url, timeout=5.0)
-        return {"ok": r.status_code < 500, "status": r.status_code}
+        return {"ok": r.status_code < 400, "status": r.status_code}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def _ping_nifi(client: httpx.AsyncClient) -> dict:
+    try:
+        await nifi_svc._get(client, "/system-diagnostics")
+        return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -41,7 +50,7 @@ async def health(request: Request):
         _ping(client, f"{settings.QDRANT_URL}/collections"),
         _ping(client, f"{settings.EMBED_URL}/health"),
         _ping(client, f"{settings.WHISPER_URL}/docs"),
-        _ping(client, f"{settings.NIFI_URL}/nifi-api/system-diagnostics"),
+        _ping_nifi(client),
         _ping_kafka(),
     )
 
