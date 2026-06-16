@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cso-operator-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cso-operator-app
+  template:
+    metadata:
+      labels:
+        app: cso-operator-app
+    spec:
+      containers:
+        - name: app
+          image: cso-operator-app:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: cso-operator-app-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"

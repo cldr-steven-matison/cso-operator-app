@@ -1,0 +1,84 @@
+# Dockerfile.whisper.12 - Final Stable "G1" Build
+# Targets: CUDA 12.4, Flash Attention 2, Whisper-Large-v3
+
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS builder
+
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    python3.11 python3.11-venv python3-pip git ffmpeg ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel packaging
+
+RUN pip install --no-cache-dir \
+    torch==2.4.1+cu124 torchvision==0.19.1+cu124 torchaudio==2.4.1+cu124 \
+    --extra-index-url https://download.pytorch.org/whl/cu124
+
+RUN pip install --no-cache-dir \
+    fastapi uvicorn starlette pydantic pydantic-core \
+    anyio idna sniffio typing-extensions click h11 python-multipart
+
+RUN pip install --no-cache-dir --no-deps \
+    transformers insanely-fast-whisper==0.0.15 huggingface_hub
+
+RUN pip install --no-cache-dir \
+    pyyaml requests tqdm numpy regex sentencepiece \
+    httpx filelock fsspec safetensors accelerate \
+    soundfile librosa scipy tokenizers
+
+RUN pip install --no-cache-dir flash-attn --no-build-isolation
+
+RUN python3 -c "from transformers import pipeline; pipeline('automatic-speech-recognition', model='openai/whisper-large-v3')"
+
+# STAGE 2
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y python3.11 ffmpeg && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY <<EOF /app/main.py
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
+import torch
+from transformers import pipeline
+import tempfile, os
+
+app = FastAPI(title="StreamToWhisper")
+
+pipe = pipeline(
+    "automatic-speech-recognition",
+    model="openai/whisper-large-v3",
+    torch_dtype=torch.float16,
+    device="cuda:0",
+    model_kwargs={"attn_implementation": "flash_attention_2"}
+)
+
+@app.post("/transcribe")
+async def transcribe(file: UploadFile = File(...)):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+    try:
+        result = pipe(tmp_path, chunk_length_s=30, batch_size=24, return_timestamps=True)
+        os.unlink(tmp_path)
+        return {"text": result["text"]}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
+EOF
+
+EXPOSE 8001
+ENTRYPOINT ["/opt/venv/bin/python3", "main.py"]
