@@ -27,7 +27,9 @@ Local demo only — no auth, no production hardening.
 backend/    FastAPI proxy + RAG orchestrator
 frontend/   Vite + React + TS + Tailwind + shadcn/ui
 whisper/    Dockerfile + Service for the Whisper inference server
-flows/      NiFi process group JSON (with ListenHTTP added)
+flows/      CSOOperatorApp.json — single import containing all four
+            process groups (IngestDocsToStream, IngestDataToStream,
+            StreamToWhisper, StreamTovLLM)
 k8s/        Deployment, Service, ConfigMap; backing/ copies of stack YAMLs
 samples/    Reference doc + audio for Demo Mode
 scripts/    mac-dev.sh, deploy.sh, bootstrap-stack.sh

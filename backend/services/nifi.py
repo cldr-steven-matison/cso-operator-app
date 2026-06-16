@@ -28,8 +28,12 @@ async def _fetch_token(client: httpx.AsyncClient) -> str:
             "password": settings.NIFI_PASSWORD,
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
+        cookies={},
     )
     r.raise_for_status()
+    # Drop cookies the token endpoint sets — NiFi will treat any future
+    # session cookie + Bearer combination as cookie-auth and demand CSRF.
+    client.cookies.clear()
     return r.text.strip()
 
 
@@ -43,19 +47,27 @@ async def _headers(client: httpx.AsyncClient, force_refresh: bool = False) -> di
 
 async def _get(client: httpx.AsyncClient, path: str) -> dict:
     url = f"{settings.NIFI_URL}/nifi-api{path}"
-    r = await client.get(url, headers=await _headers(client))
+    r = await client.get(url, headers=await _headers(client), cookies={})
     if r.status_code == 401:
-        r = await client.get(url, headers=await _headers(client, force_refresh=True))
-    r.raise_for_status()
+        client.cookies.clear()
+        r = await client.get(url, headers=await _headers(client, force_refresh=True), cookies={})
+    if r.status_code >= 400:
+        raise httpx.HTTPStatusError(
+            f"{r.status_code} from {path}: {r.text[:500]}", request=r.request, response=r
+        )
     return r.json()
 
 
 async def _put(client: httpx.AsyncClient, path: str, body: dict) -> dict:
     url = f"{settings.NIFI_URL}/nifi-api{path}"
-    r = await client.put(url, headers=await _headers(client), json=body)
+    r = await client.put(url, headers=await _headers(client), json=body, cookies={})
     if r.status_code == 401:
-        r = await client.put(url, headers=await _headers(client, force_refresh=True), json=body)
-    r.raise_for_status()
+        client.cookies.clear()
+        r = await client.put(url, headers=await _headers(client, force_refresh=True), json=body, cookies={})
+    if r.status_code >= 400:
+        raise httpx.HTTPStatusError(
+            f"{r.status_code} from {path}: {r.text[:500]}", request=r.request, response=r
+        )
     return r.json()
 
 
