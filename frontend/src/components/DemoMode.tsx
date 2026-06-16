@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { api } from "@/lib/api";
 
-const FLOWS = ["IngestToStream", "IngestDataToStream", "StreamToWhisper", "StreamTovLLM"] as const;
+const FLOWS = ["IngestDocsToStream", "IngestDataToStream", "StreamToWhisper", "StreamTovLLM"] as const;
 
 export function DemoMode() {
   const [step, setStep] = useState(0);

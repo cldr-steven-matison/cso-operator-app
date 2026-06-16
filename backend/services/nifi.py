@@ -12,7 +12,7 @@ import httpx
 
 from config import settings
 
-PG_NAMES = ("IngestToStream", "IngestDataToStream", "StreamToWhisper", "StreamTovLLM")
+PG_NAMES = ("IngestDocsToStream", "IngestDataToStream", "StreamToWhisper", "StreamTovLLM")
 
 _token: str | None = None
 _token_lock = asyncio.Lock()
@@ -59,23 +59,39 @@ async def _put(client: httpx.AsyncClient, path: str, body: dict) -> dict:
     return r.json()
 
 
-async def list_root_groups(client: httpx.AsyncClient) -> list[dict]:
-    data = await _get(client, "/process-groups/root/process-groups")
+async def _children(client: httpx.AsyncClient, group_id: str) -> list[dict]:
+    data = await _get(client, f"/process-groups/{group_id}/process-groups")
     return data.get("processGroups", [])
 
 
-async def resolve_groups(client: httpx.AsyncClient) -> dict[str, dict]:
-    """Return {name: {"id": str, "version": int, "state": str}} for known PGs."""
+def _pg_info(pg: dict) -> dict:
+    return {
+        "id": pg["id"],
+        "version": pg.get("revision", {}).get("version", 0),
+        "state": pg.get("status", {}).get("aggregateSnapshot", {}).get("runStatus")
+        or pg.get("component", {}).get("state"),
+    }
+
+
+async def resolve_groups(
+    client: httpx.AsyncClient, max_depth: int = 4
+) -> dict[str, dict]:
+    """Walk process groups under root and return {name: info} for known PGs."""
     out: dict[str, dict] = {}
-    for pg in await list_root_groups(client):
-        name = pg.get("component", {}).get("name") or pg.get("status", {}).get("name")
-        if name in PG_NAMES:
-            out[name] = {
-                "id": pg["id"],
-                "version": pg.get("revision", {}).get("version", 0),
-                "state": pg.get("status", {}).get("aggregateSnapshot", {}).get("runStatus")
-                or pg.get("component", {}).get("state"),
-            }
+    queue: list[tuple[str, int]] = [("root", 0)]
+    visited: set[str] = set()
+    while queue:
+        gid, depth = queue.pop(0)
+        if gid in visited or depth > max_depth:
+            continue
+        visited.add(gid)
+        for pg in await _children(client, gid):
+            name = pg.get("component", {}).get("name")
+            if name in PG_NAMES and name not in out:
+                out[name] = _pg_info(pg)
+            queue.append((pg["id"], depth + 1))
+        if len(out) == len(PG_NAMES):
+            break
     return out
 
 
