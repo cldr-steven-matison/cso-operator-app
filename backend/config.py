@@ -22,5 +22,13 @@ class Settings(BaseSettings):
     TOPIC_AUDIO: str = "new_audio"
     TOPIC_DOCS: str = "new_documents"
 
+    # NiFi ListenHTTP endpoints (set after the processors are wired in the flows)
+    NIFI_INGEST_DOC_URL: str = ""
+    NIFI_INGEST_AUDIO_URL: str = ""
+
+    # RAG knobs
+    RAG_TOP_K: int = 4
+    RAG_MAX_TOKENS: int = 512
+
 
 settings = Settings()
