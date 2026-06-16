@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { api } from "@/lib/api";
 
-const FLOWS = ["IngestDocsToStream", "IngestDataToStream", "StreamToWhisper", "StreamTovLLM"] as const;
+const FLOWS = ["IngestDataToStream", "StreamToWhisper", "StreamTovLLM"] as const;
 
 export function DemoMode() {
   const [step, setStep] = useState(0);
@@ -16,18 +16,19 @@ export function DemoMode() {
 
   const startAll = async () => {
     setBusy(true);
-    append("Starting all flows...");
-    try {
-      for (const f of FLOWS) {
+    append("Starting flows...");
+    let ok = 0;
+    for (const f of FLOWS) {
+      try {
         await api.nifiStart(f);
         append(`  ✓ ${f}`);
+        ok++;
+      } catch (e) {
+        append(`  ! ${f}: ${String(e)}`);
       }
-      setStep(1);
-    } catch (e) {
-      append(`  ! ${String(e)}`);
-    } finally {
-      setBusy(false);
     }
+    if (ok === FLOWS.length) setStep(1);
+    setBusy(false);
   };
 
   return (
@@ -35,7 +36,7 @@ export function DemoMode() {
       <CardTitle>Demo Mode</CardTitle>
       <ol className="space-y-2 text-sm">
         <Step n={1} active={step === 0} done={step > 0}>
-          Start all four flows.
+          Start the three flows.
           <div className="mt-1">
             <Button onClick={startAll} disabled={busy || step > 0}>
               {step > 0 ? "Started" : "Start flows"}

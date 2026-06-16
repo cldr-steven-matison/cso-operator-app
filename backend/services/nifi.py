@@ -12,7 +12,7 @@ import httpx
 
 from config import settings
 
-PG_NAMES = ("IngestDocsToStream", "IngestDataToStream", "StreamToWhisper", "StreamTovLLM")
+PG_NAMES = ("IngestDataToStream", "StreamToWhisper", "StreamTovLLM")
 
 _token: str | None = None
 _token_lock = asyncio.Lock()

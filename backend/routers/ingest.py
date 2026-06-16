@@ -1,12 +1,16 @@
 """Ingest uploads.
 
+The NiFi `IngestDataToStream` flow is the unified producer for both docs
+(→ `new_documents`) and audio (→ `new_audio`).
+
 Two delivery modes:
 1. NiFi ListenHTTP (preferred): if NIFI_INGEST_DOC_URL / NIFI_INGEST_AUDIO_URL
-   is set, POST the file body straight to that processor.
+   is set, POST the file body straight to that processor inside
+   IngestDataToStream.
 2. Direct Kafka (fallback): publish raw bytes to TOPIC_DOCS / TOPIC_AUDIO.
-   The downstream NiFi flows (StreamTovLLM / StreamToWhisper) consume from
-   those topics, so the file still lands in NiFi — just at the consumer
-   end of the flow instead of through the IngestDocs/IngestData ingress.
+   The downstream consumer flows (StreamTovLLM / StreamToWhisper) still
+   pick it up, so the file lands in NiFi at the consumer end of the
+   pipeline instead of through IngestDataToStream's ingress.
 """
 
 from fastapi import APIRouter, File, Request, UploadFile

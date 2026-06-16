@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { api, type NifiState } from "@/lib/api";
 
-const FLOWS = ["IngestDocsToStream", "IngestDataToStream", "StreamToWhisper", "StreamTovLLM"] as const;
+const FLOWS = ["IngestDataToStream", "StreamToWhisper", "StreamTovLLM"] as const;
 
 function tone(state?: string) {
   if (!state) return "neutral" as const;
