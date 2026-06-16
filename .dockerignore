@@ -1,0 +1,30 @@
+.git
+.gitignore
+.github
+.vscode
+.idea
+
+# Python
+**/__pycache__
+**/*.pyc
+.venv
+venv
+.env
+.env.local
+
+# Node
+**/node_modules
+**/dist
+**/.vite
+*.log
+
+# Repo cruft
+.DS_Store
+flows/
+samples/
+whisper/
+k8s/
+scripts/
+docs/
+README.md
+Makefile

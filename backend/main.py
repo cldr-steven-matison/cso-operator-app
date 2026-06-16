@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from config import settings
 from routers import health, ingest, kafka, nifi, qdrant, query
@@ -29,5 +31,13 @@ for r in (health.router, query.router, nifi.router, qdrant.router, kafka.router,
 
 
 @app.get("/api")
-async def root():
+async def api_root():
     return {"name": "cso-operator-app", "ok": True}
+
+
+# Serve the built frontend from /app/static when it exists (production image).
+_static = Path(__file__).parent / "static"
+if _static.is_dir():
+    app.mount("/", StaticFiles(directory=_static, html=True), name="static")
+
+
