@@ -10,7 +10,7 @@ data:
   EMBED_URL: "http://embedding-server-service.default.svc.cluster.local:80"
   EMBED_DIM: "768"
   WHISPER_URL: "http://whisper-service.default.svc.cluster.local:8001"
-  NIFI_URL: "https://mynifi-web.mynifi.cfm-streaming.svc.cluster.local"
+  NIFI_URL: "https://mynifi-web.cfm-streaming.svc.cluster.local"
   NIFI_VERIFY_TLS: "false"
   KAFKA_BOOTSTRAP: "my-cluster-kafka-bootstrap.cld-streaming.svc:9092"
   TOPIC_AUDIO: "new_audio"

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     WHISPER_URL: str = "http://whisper-service.default.svc.cluster.local:8001"
 
-    NIFI_URL: str = "https://mynifi-web.mynifi.cfm-streaming.svc.cluster.local"
+    NIFI_URL: str = "https://mynifi-web.cfm-streaming.svc.cluster.local"
     NIFI_VERIFY_TLS: bool = False
     NIFI_USERNAME: str = ""
     NIFI_PASSWORD: str = ""
