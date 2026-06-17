@@ -27,13 +27,36 @@ spec:
           args:
             - |
               set -e
-              pip install --no-cache-dir huggingface_hub
-              python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='nomic-ai/nomic-embed-text-v1', local_dir='/data', token='$HF_TOKEN')"
-              # Repair config.json: nomic-embed-text-v1 ships a duplicate
-              # `max_position_embeddings` which TEI's strict JSON parser rejects.
-              # Python's json module keeps the last occurrence — round-tripping
-              # rewrites the file with one entry.
-              python3 -c "import json,sys; d=json.load(open('/data/config.json')); json.dump(d,open('/data/config.json','w'),indent=2)"
+              # Pin huggingface_hub to a 0.x release so local_dir produces a
+              # plain copy of the files (no symlinks into a separate cache).
+              # huggingface_hub 1.x changed local_dir semantics and writes
+              # via os.replace which can land us with a stale config.json
+              # post-repair.
+              pip install --no-cache-dir 'huggingface_hub<1.0'
+              python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='nomic-ai/nomic-embed-text-v1', local_dir='/data', local_dir_use_symlinks=False, token='$HF_TOKEN')"
+
+              echo "--- ls /data (post-download) ---"
+              ls -la /data | head -30
+              echo "--- before repair (occurrences of max_position_embeddings) ---"
+              grep -c max_position_embeddings /data/config.json || true
+
+              # Repair via Python: json.load keeps last occurrence on dict
+              # construction, so a load+dump cycle removes duplicates. Write
+              # to a temp file then atomically replace.
+              python3 - <<'PY'
+              import json, os
+              with open('/data/config.json') as f:
+                  d = json.load(f)
+              tmp = '/data/config.json.tmp'
+              with open(tmp, 'w') as f:
+                  json.dump(d, f, indent=2)
+              os.replace(tmp, '/data/config.json')
+              PY
+
+              echo "--- after repair (occurrences of max_position_embeddings) ---"
+              grep -c max_position_embeddings /data/config.json || true
+              echo "--- /data/config.json (first 60 lines) ---"
+              head -60 /data/config.json
               echo "config.json repaired"
           volumeMounts:
             - name: model-cache
