@@ -35,10 +35,12 @@ RUN pip install --no-cache-dir --no-deps \
     transformers insanely-fast-whisper==0.0.15 huggingface_hub
 
 # 5. Manual AI Dependency Tree
+# tokenizers pinned to the highest version transformers accepts; 0.23.1 is
+# rejected with "needs to be 0.22.0 or 0.23.0".
 RUN pip install --no-cache-dir \
     pyyaml requests tqdm numpy regex sentencepiece \
     httpx filelock fsspec safetensors accelerate \
-    soundfile librosa scipy tokenizers
+    soundfile librosa scipy tokenizers==0.23.0
 
 # 6. Compile Flash Attention 2 (Hardware-Specific Build)
 RUN pip install --no-cache-dir flash-attn --no-build-isolation
