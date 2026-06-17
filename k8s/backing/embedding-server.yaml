@@ -13,17 +13,32 @@ spec:
         app: embedding-server
     spec:
       dnsPolicy: ClusterFirstWithHostNet
+      # The Init Container runs to completion BEFORE the main TEI container starts
+      initContainers:
+        - name: model-downloader
+          image: python:3.10-slim
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: HF_TOKEN
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir huggingface_hub
+              python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='nomic-ai/nomic-embed-text-v1', local_dir='/data', token='$HF_TOKEN')"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /data
       containers:
         - name: tei-container
           image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5
-          # This is the magic part: it forces the token into the binary's face
           command: ["/bin/sh", "-c"]
           args: 
             - |
-              text-embeddings-router \
-              --model-id nomic-ai/nomic-embed-text-v1 \
-              --port 80 \
-              --hf-api-token "[hf-token]"
+              # Runs offline instantly out of the shared emptyDir storage layer populated by the init container
+              text-embeddings-router --model-id /data --port 80
           ports:
             - containerPort: 80
           resources:
