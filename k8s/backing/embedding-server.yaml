@@ -26,8 +26,15 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
+              set -e
               pip install --no-cache-dir huggingface_hub
               python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='nomic-ai/nomic-embed-text-v1', local_dir='/data', token='$HF_TOKEN')"
+              # Repair config.json: nomic-embed-text-v1 ships a duplicate
+              # `max_position_embeddings` which TEI's strict JSON parser rejects.
+              # Python's json module keeps the last occurrence — round-tripping
+              # rewrites the file with one entry.
+              python3 -c "import json,sys; d=json.load(open('/data/config.json')); json.dump(d,open('/data/config.json','w'),indent=2)"
+              echo "config.json repaired"
           volumeMounts:
             - name: model-cache
               mountPath: /data
