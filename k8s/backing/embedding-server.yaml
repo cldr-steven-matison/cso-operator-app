@@ -40,17 +40,31 @@ spec:
               echo "--- before repair (occurrences of max_position_embeddings) ---"
               grep -c max_position_embeddings /data/config.json || true
 
-              # Repair via Python: json.load keeps last occurrence on dict
-              # construction, so a load+dump cycle removes duplicates. Write
-              # to a temp file then atomically replace.
+              # Repair config.json: nomic-embed-text-v1 ships GPT-style alias
+              # fields (n_positions, n_embd, n_inner, etc.) alongside their
+              # BERT-style equivalents (max_position_embeddings, hidden_size,
+              # intermediate_size, ...). TEI's Rust BertConfig has serde
+              # aliases for each pair, so when both keys are present they
+              # deserialize into the same Rust field and serde errors:
+              #   "duplicate field `max_position_embeddings` at line 37"
+              # (the line of n_positions, with the Rust field name reported).
+              # Strip the GPT-style aliases.
               python3 - <<'PY'
               import json, os
               with open('/data/config.json') as f:
                   d = json.load(f)
+              aliases = (
+                  "n_positions", "n_embd", "n_inner", "n_head", "n_layer",
+                  "layer_norm_epsilon", "attn_pdrop", "embd_pdrop", "resid_pdrop",
+              )
+              removed = [k for k in aliases if k in d]
+              for k in removed:
+                  d.pop(k, None)
               tmp = '/data/config.json.tmp'
               with open(tmp, 'w') as f:
                   json.dump(d, f, indent=2)
               os.replace(tmp, '/data/config.json')
+              print("removed GPT-style aliases:", removed)
               PY
 
               echo "--- after repair (occurrences of max_position_embeddings) ---"
