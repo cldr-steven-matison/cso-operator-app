@@ -40,7 +40,7 @@ RUN pip install --no-cache-dir --no-deps \
 RUN pip install --no-cache-dir \
     pyyaml requests tqdm numpy regex sentencepiece \
     httpx filelock fsspec safetensors accelerate \
-    soundfile librosa scipy tokenizers==0.23.0
+    soundfile librosa scipy 'tokenizers>=0.22,<0.23'
 
 # 6. Compile Flash Attention 2 (Hardware-Specific Build)
 RUN pip install --no-cache-dir flash-attn --no-build-isolation
