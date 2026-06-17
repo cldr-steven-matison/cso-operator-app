@@ -1,4 +1,12 @@
-export type HealthService = { ok: boolean; status?: number; error?: string; topics?: number };
+export type HealthService = {
+  ok: boolean;
+  status?: number;
+  error?: string;
+  topics?: number;
+  // vLLM-specific: configured model and the list reported by /v1/models.
+  configured?: string;
+  loaded?: string[];
+};
 export type Health = {
   ok: boolean;
   services: Record<"vllm" | "qdrant" | "embedding" | "whisper" | "nifi" | "kafka", HealthService>;

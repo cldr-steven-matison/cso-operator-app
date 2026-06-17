@@ -24,7 +24,6 @@ flows/
 samples/
 whisper/
 k8s/
-scripts/
 docs/
 README.md
 Makefile
