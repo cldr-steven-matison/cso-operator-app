@@ -65,9 +65,17 @@ spec:
         - name: tei-container
           image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5
           command: ["/bin/sh", "-c"]
-          args: 
+          args:
             - |
-              # Runs offline instantly out of the shared emptyDir storage layer populated by the init container
+              echo "--- TEI sees /data: ---"
+              ls -la /data | head -25
+              echo "--- TEI sees these max_position_embeddings entries: ---"
+              grep -nH max_position_embeddings /data/config.json || true
+              grep -nrH max_position_embeddings /data 2>/dev/null | head
+              echo "--- size + sha ---"
+              wc -c /data/config.json
+              sha256sum /data/config.json
+              echo "--- launching TEI ---"
               text-embeddings-router --model-id /data --port 80
           ports:
             - containerPort: 80
