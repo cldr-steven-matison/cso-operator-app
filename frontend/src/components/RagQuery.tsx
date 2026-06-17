@@ -12,11 +12,13 @@ export function RagQuery() {
   const [sources, setSources] = useState<Source[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [showSources, setShowSources] = useState(false);
+  const [error, setError] = useState<string>("");
 
   const ask = async () => {
     if (!q.trim() || streaming) return;
     setAnswer("");
     setSources([]);
+    setError("");
     setStreaming(true);
 
     const close = openSSE(
@@ -26,6 +28,16 @@ export function RagQuery() {
           try {
             setSources(JSON.parse(data));
           } catch {}
+          return;
+        }
+        if (event === "error") {
+          // Backend surfaces vLLM / qdrant / embedding failures here.
+          try {
+            const obj = JSON.parse(data);
+            setError(obj.error + (obj.body ? `\n${obj.body}` : ""));
+          } catch {
+            setError(data);
+          }
           return;
         }
         if (data === "[DONE]") {
@@ -66,6 +78,11 @@ export function RagQuery() {
       <div className="border border-border rounded p-3 bg-bg min-h-[120px] whitespace-pre-wrap text-sm">
         {answer || <span className="text-muted">answer will stream here</span>}
       </div>
+      {error && (
+        <div className="mt-2 border border-red-500/40 bg-red-500/10 text-red-300 rounded p-2 text-xs whitespace-pre-wrap break-all">
+          {error}
+        </div>
+      )}
 
       {sources.length > 0 && (
         <div className="mt-2">

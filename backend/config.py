@@ -5,7 +5,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env.local", extra="ignore")
 
     VLLM_URL: str = "http://vllm-service.default.svc.cluster.local:8000"
-    VLLM_MODEL: str = "Qwen/Qwen2.5-3B-Instruct"
+    # Must match what vLLM is actually serving — check `GET /v1/models`.
+    VLLM_MODEL: str = "Qwen/Qwen2.5-1.5B-Instruct"
 
     QDRANT_URL: str = "http://qdrant.default.svc.cluster.local:6333"
     QDRANT_COLLECTION: str = "my-rag-collection"
