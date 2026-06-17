@@ -24,9 +24,14 @@ class Settings(BaseSettings):
     TOPIC_AUDIO: str = "new_audio"
     TOPIC_DOCS: str = "new_documents"
 
-    # NiFi ListenHTTP endpoints (set after the processors are wired in the flows)
-    NIFI_INGEST_DOC_URL: str = ""
-    NIFI_INGEST_AUDIO_URL: str = ""
+    # Single NiFi ListenHTTP at the head of IngestDataToStream.
+    # The flow's RouteOnAttribute branches docs vs audio by Content-Type / mime.
+    NIFI_INGEST_URL: str = "http://mynifi.cfm-streaming.svc.cluster.local:9000/contentListener"
+
+    # URL for "Use sample audio" — proxied through the backend to dodge CORS.
+    SAMPLE_AUDIO_URL: str = (
+        "https://www.voiptroubleshooter.com/open_speech/american/OSR_us_000_0010_8k.wav"
+    )
 
     # RAG knobs
     RAG_TOP_K: int = 4

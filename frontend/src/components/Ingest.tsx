@@ -4,12 +4,15 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { api } from "@/lib/api";
 
-const AUDIO_EXT = [".wav", ".mp3", ".m4a", ".flac", ".ogg"];
-
-function isAudio(name: string) {
-  const lower = name.toLowerCase();
-  return AUDIO_EXT.some((e) => lower.endsWith(e));
-}
+type IngestResult = {
+  url?: string;
+  status?: number;
+  ok?: boolean;
+  response?: string;
+  content_type?: string;
+  filename?: string;
+  bytes?: number;
+};
 
 export function Ingest() {
   const [status, setStatus] = useState<string>("");
@@ -17,14 +20,33 @@ export function Ingest() {
 
   const onFile = async (file: File) => {
     setBusy(true);
-    setStatus(`Uploading ${file.name}...`);
+    setStatus(`Uploading ${file.name} (${file.type || "?"})...`);
     try {
-      const audio = isAudio(file.name);
-      const res = audio ? await api.ingestAudio(file) : await api.ingestDoc(file);
-      setStatus(`Sent → ${audio ? "IngestDataToStream" : "IngestToStream"} (${res.status}, ${res.bytes} bytes)`);
+      const res: IngestResult = await api.ingest(file);
+      const verdict = res.ok ? "✓" : "✗";
+      setStatus(
+        `${verdict} NiFi ${res.status} · ${res.filename} · ${res.content_type} · ${res.bytes}B${
+          res.response ? ` · ${res.response.slice(0, 120)}` : ""
+        }`
+      );
     } catch (e) {
       setStatus(`Error: ${String(e)}`);
     } finally {
+      setBusy(false);
+    }
+  };
+
+  const useSample = async () => {
+    setBusy(true);
+    setStatus("Fetching sample WAV through backend proxy...");
+    try {
+      const r = await fetch(api.sampleAudioUrl);
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      const blob = await r.blob();
+      const file = new File([blob], "OSR_us_000_0010_8k.wav", { type: "audio/wav" });
+      await onFile(file);
+    } catch (e) {
+      setStatus(`Error: ${String(e)}`);
       setBusy(false);
     }
   };
@@ -51,29 +73,13 @@ export function Ingest() {
           }}
         />
         <div className="text-muted text-sm">Drop a doc or audio file, or click to choose</div>
-        <div className="text-muted text-xs mt-1">audio → IngestDataToStream · other → IngestToStream</div>
+        <div className="text-muted text-xs mt-1">
+          NiFi RouteOnAttribute branches by mime type
+        </div>
       </label>
-      {status && <div className="text-xs text-muted mt-2">{status}</div>}
+      {status && <div className="text-xs text-muted mt-2 break-all">{status}</div>}
       <div className="mt-3 flex gap-2">
-        <Button
-          variant="ghost"
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true);
-            setStatus("Fetching sample WAV...");
-            try {
-              const r = await fetch(
-                "https://www.voiptroubleshooter.com/open_speech/american/OSR_us_000_0010_8k.wav"
-              );
-              const blob = await r.blob();
-              const file = new File([blob], "OSR_us_000_0010_8k.wav", { type: "audio/wav" });
-              await onFile(file);
-            } catch (e) {
-              setStatus(`Error: ${String(e)}`);
-              setBusy(false);
-            }
-          }}
-        >
+        <Button variant="ghost" disabled={busy} onClick={useSample}>
           Use sample audio
         </Button>
       </div>

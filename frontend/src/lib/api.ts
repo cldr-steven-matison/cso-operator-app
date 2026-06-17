@@ -49,8 +49,8 @@ export const api = {
   kafkaTopics: () => jget<KafkaTopicsResponse>("/api/kafka/topics"),
   kafkaAllTopics: () => jget<KafkaAllTopicsResponse>("/api/kafka/all-topics"),
 
-  ingestDoc: (file: File) => uploadFile("/api/ingest/doc", file),
-  ingestAudio: (file: File) => uploadFile("/api/ingest/audio", file),
+  ingest: (file: File) => uploadFile("/api/ingest", file),
+  sampleAudioUrl: "/api/sample-audio",
 };
 
 async function uploadFile(url: string, file: File) {
