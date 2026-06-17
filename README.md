@@ -1,5 +1,7 @@
 # CSO Operator App
 
+![CSO Operator App Control Plane](/CSO_Operator_Control_Plane.png)
+
 A demo control panel for the **Cloudera Streaming Operators** RAG + Audio Transcription stack on Minikube.
 
 One screen drives:
