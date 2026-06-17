@@ -1,94 +1,83 @@
-# syntax=docker/dockerfile:1
-# Whisper inference server for the CSO Operator App.
-# Two stages: a CUDA-devel builder that compiles the Python env and pre-bakes
-# whisper-large-v3, and a slim CUDA-runtime image that copies the venv +
-# the embedded FastAPI server.
+# Dockerfile.whisper.12 - Final Stable "G1" Build
+# Targets: CUDA 12.4, Flash Attention 2, Whisper-Large-v3
+# Author: Steven Matison (Solutions Engineer, Cloudera)
 
-###############################################
-# STAGE 1 — Builder
-###############################################
+# STAGE 1: The Heavy Lifting (Builder)
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS builder
 
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PATH="/opt/venv/bin:$PATH"
-ENV PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu124"
-# RTX 4060 (Ada, compute capability 8.9)
-ENV TORCH_CUDA_ARCH_LIST="8.9"
-ENV FORCE_CUDA="1"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv python3-pip \
-    git ffmpeg \
-    build-essential ninja-build \
+RUN apt-get update && apt-get install -y \
+    python3.11 python3.11-venv python3-pip git ffmpeg ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-RUN python3.11 -m venv /opt/venv \
-    && pip install --no-cache-dir --upgrade pip setuptools wheel packaging
+# 1. Essential Build Tools for C++ Compilation
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel packaging
 
-# Step 1: CUDA 12.4 PyTorch stack
+# 2. Hard-pin Torch to CUDA 12.4 (RTX 4060 Optimization)
 RUN pip install --no-cache-dir \
-    torch==2.4.1+cu124 \
-    torchvision==0.19.1+cu124 \
-    torchaudio==2.4.1+cu124
+    torch==2.4.1+cu124 torchvision==0.19.1+cu124 torchaudio==2.4.1+cu124 \
+    --extra-index-url https://download.pytorch.org/whl/cu124
 
-# Step 2: Whisper + Transformers
+# 3. Web Stack (Allowing Transitive Dependencies for Starlette/Pydantic)
 RUN pip install --no-cache-dir \
-    transformers==4.44.2 \
-    tokenizers==0.19.1 \
-    insanely-fast-whisper==0.0.15 \
-    huggingface_hub accelerate safetensors \
-    soundfile librosa scipy
+    fastapi uvicorn starlette pydantic pydantic-core \
+    anyio idna sniffio typing-extensions click h11 python-multipart
 
-# Step 3: FastAPI server
+# 4. AI Stack (Guarded with --no-deps to prevent Torch overwrites)
+RUN pip install --no-cache-dir --no-deps \
+    transformers insanely-fast-whisper==0.0.15 huggingface_hub
+
+# 5. Manual AI Dependency Tree
 RUN pip install --no-cache-dir \
-    fastapi \
-    uvicorn \
-    python-multipart
+    pyyaml requests tqdm numpy regex sentencepiece \
+    httpx filelock fsspec safetensors accelerate \
+    soundfile librosa scipy tokenizers
 
-# Step 4: Pre-bake whisper-large-v3 into the HF cache
-ARG HF_TOKEN
-RUN HF_TOKEN=${HF_TOKEN} python3 -c "from transformers import pipeline; pipeline('automatic-speech-recognition', model='openai/whisper-large-v3')"
+# 6. Compile Flash Attention 2 (Hardware-Specific Build)
+RUN pip install --no-cache-dir flash-attn --no-build-isolation
 
+# 7. Pre-Bake Whisper-Large-v3 (Authenticated Download)
+RUN python3 -c "from transformers import pipeline; pipeline('automatic-speech-recognition', model='openai/whisper-large-v3')"
 
-###############################################
-# STAGE 2 — Runtime
-###############################################
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+# ==========================================
+# STAGE 2: The Lean Runtime
+# ==========================================
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PATH="/opt/venv/bin:$PATH"
-ENV PYTHONUNBUFFERED=1
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y \
     python3.11 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Bring the venv and the prebaked model cache from the builder
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Embed the FastAPI server. No flash_attention_2 — keep this stable
-# until flash-attn install is debugged separately.
+# FastAPI Inference Logic
 COPY <<EOF /app/main.py
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 import torch
 from transformers import pipeline
-import tempfile, os
+import tempfile
+import os
 
 app = FastAPI(title="StreamToWhisper")
-
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 pipe = pipeline(
     "automatic-speech-recognition",
     model="openai/whisper-large-v3",
-    torch_dtype=torch.float16 if device.startswith("cuda") else torch.float32,
-    device=device,
+    torch_dtype=torch.float16,
+    device="cuda:0",
+    model_kwargs={"attn_implementation": "flash_attention_2"}
 )
 
 @app.post("/transcribe")
@@ -98,12 +87,10 @@ async def transcribe(file: UploadFile = File(...)):
         tmp_path = tmp.name
     try:
         result = pipe(tmp_path, chunk_length_s=30, batch_size=24, return_timestamps=True)
+        os.unlink(tmp_path)
         return {"text": result["text"]}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
 if __name__ == "__main__":
     import uvicorn
@@ -111,4 +98,4 @@ if __name__ == "__main__":
 EOF
 
 EXPOSE 8001
-ENTRYPOINT ["python3", "main.py"]
+ENTRYPOINT ["/opt/venv/bin/python3", "main.py"]
