@@ -28,7 +28,7 @@ WATCHED_NS: tuple[str, ...] = ("cld-streaming", "cfm-streaming", "default")
 # (e.g. CSA installs as `csa-operator` but the bundled Flink operator is
 # `flink-kubernetes-operator`).
 OPERATORS: list[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = [
-    ("CSM (Strimzi)", ("strimzi-cluster-operator",), "cld-streaming",
+    ("CSM (Kafka)", ("strimzi-cluster-operator",), "cld-streaming",
      ("kafka.strimzi.io", "core.strimzi.io")),
     ("CSA (Flink)", ("flink-kubernetes-operator", "csa-operator"), "cld-streaming",
      ("flink.apache.org",)),
