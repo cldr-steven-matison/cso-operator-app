@@ -12,6 +12,7 @@ spec:
       labels:
         app: cso-operator-app
     spec:
+      serviceAccountName: cso-operator-app
       containers:
         - name: app
           image: cso-operator-app:latest

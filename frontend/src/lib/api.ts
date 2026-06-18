@@ -28,6 +28,53 @@ export type KafkaTopicsResponse = KafkaTopic[] | { error: string; topics: KafkaT
 export type KafkaAllTopic = { topic: string; partitions: number; depth: number };
 export type KafkaAllTopicsResponse = KafkaAllTopic[] | { error: string; topics: KafkaAllTopic[] };
 
+export type KafkaPeekMsg = {
+  topic: string;
+  partition: number;
+  offset: number;
+  ts: number | null;
+  size: number;
+  payload: string;
+  payload_b64?: string;
+};
+
+export type Operator = {
+  name: string;
+  deployment: string;
+  namespace: string;
+  installed: boolean;
+  ready: number;
+  replicas: number;
+  image: string;
+  version: string;
+  crd_groups: string[];
+  crds_present: number;
+  error?: string;
+};
+
+export type PodInfo = {
+  name: string;
+  phase: string;
+  ready: number;
+  containers: number;
+  restarts: number;
+  age_seconds: number;
+  node: string;
+  owner_kind: string;
+  owner_name: string;
+};
+
+export type PodSummary = {
+  ns: string;
+  total: number;
+  running: number;
+  pending: number;
+  failed: number;
+  succeeded: number;
+  pods: PodInfo[];
+  error?: string;
+};
+
 async function jget<T>(url: string): Promise<T> {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
@@ -56,6 +103,20 @@ export const api = {
 
   kafkaTopics: () => jget<KafkaTopicsResponse>("/api/kafka/topics"),
   kafkaAllTopics: () => jget<KafkaAllTopicsResponse>("/api/kafka/all-topics"),
+  kafkaPeek: (topic: string, limit = 10) =>
+    jget<KafkaPeekMsg[]>(`/api/kafka/peek/${encodeURIComponent(topic)}?limit=${limit}`),
+
+  k8sOperators: () => jget<Operator[]>("/api/k8s/operators"),
+  k8sPods: () => jget<PodSummary[]>("/api/k8s/pods"),
+  k8sRestart: (ns: string, name: string) =>
+    jpost(`/api/k8s/deploy/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/restart`),
+  k8sDeletePod: (ns: string, name: string) =>
+    fetch(`/api/k8s/pod/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json();
+    }),
 
   ingest: (file: File) => uploadFile("/api/ingest", file),
   sampleAudioUrl: "/api/sample-audio",

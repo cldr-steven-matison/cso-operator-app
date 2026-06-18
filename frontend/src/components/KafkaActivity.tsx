@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Card, CardTitle } from "@/components/ui/Card";
+import { TopicPeek } from "@/components/TopicPeek";
 import { api, openSSE, type KafkaTopic } from "@/lib/api";
 
 function asArray(r: KafkaTopic[] | { error: string; topics: KafkaTopic[] }): KafkaTopic[] {
@@ -14,6 +15,7 @@ const TOPICS = ["new_audio", "new_documents"];
 export function KafkaActivity() {
   const [topics, setTopics] = useState<KafkaTopic[]>([]);
   const [messages, setMessages] = useState<Record<string, Msg[]>>({});
+  const [peekOpen, setPeekOpen] = useState<Record<string, boolean>>({});
   const tailers = useRef<(() => void)[]>([]);
 
   useEffect(() => {
@@ -50,6 +52,7 @@ export function KafkaActivity() {
         {TOPICS.map((t) => {
           const stat = topics.find((x) => x.topic === t);
           const msgs = messages[t] ?? [];
+          const isOpen = !!peekOpen[t];
           return (
             <div key={t} className="border border-border rounded p-3 bg-bg">
               <div className="flex items-center justify-between mb-2">
@@ -72,6 +75,13 @@ export function KafkaActivity() {
                   </div>
                 ))}
               </div>
+              <button
+                className="mt-2 text-xs text-muted hover:text-text"
+                onClick={() => setPeekOpen((o) => ({ ...o, [t]: !o[t] }))}
+              >
+                {isOpen ? "hide last 10" : "peek last 10"}
+              </button>
+              {isOpen && <TopicPeek topic={t} />}
             </div>
           );
         })}

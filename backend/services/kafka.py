@@ -1,6 +1,7 @@
-"""Kafka helpers using aiokafka — topic stats, live tail, produce."""
+"""Kafka helpers using aiokafka — topic stats, live tail, peek, produce."""
 
 import asyncio
+import base64
 from typing import AsyncIterator
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
@@ -88,6 +89,83 @@ async def produce(topic: str, body: bytes, headers: list[tuple[str, bytes]] | No
         return {"topic": meta.topic, "partition": meta.partition, "offset": meta.offset}
     finally:
         await producer.stop()
+
+
+def _decode_payload(value: bytes | None) -> tuple[str, str | None]:
+    """Return (text_preview, b64_or_None). Falls back to base64 when bytes
+    aren't valid UTF-8 so binary topics (`new_audio`) are still inspectable."""
+    if not value:
+        return "", None
+    try:
+        text = value.decode("utf-8")
+        return text[:1000], None
+    except UnicodeDecodeError:
+        preview = value.decode("utf-8", errors="replace")[:1000]
+        return preview, base64.b64encode(value).decode("ascii")
+
+
+async def peek(topic: str, limit: int = 10) -> list[dict]:
+    """Return the latest `limit` messages on `topic`, newest-first.
+
+    No consumer group → no offset commits. Each partition is rewound by
+    `limit` from its end offset, then we drain briefly with getmany() and
+    re-sort by (timestamp, offset) so we don't over-fetch on hot topics.
+    """
+    consumer = AIOKafkaConsumer(
+        bootstrap_servers=settings.KAFKA_BOOTSTRAP,
+        enable_auto_commit=False,
+        group_id=None,
+    )
+    await consumer.start()
+    try:
+        parts = consumer.partitions_for_topic(topic)
+        if not parts:
+            # partitions_for_topic can return None before the first metadata
+            # refresh — force a metadata fetch and retry.
+            await consumer._client.force_metadata_update()
+            parts = consumer.partitions_for_topic(topic) or set()
+        if not parts:
+            return []
+        tps = [TopicPartition(topic, p) for p in parts]
+        consumer.assign(tps)
+        ends = await consumer.end_offsets(tps)
+        begins = await consumer.beginning_offsets(tps)
+        for tp in tps:
+            start = max(begins[tp], ends[tp] - limit)
+            consumer.seek(tp, start)
+
+        # Drain available records up to limit*partitions, capped by 2s wall.
+        collected: list = []
+        target = limit * max(1, len(tps))
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while len(collected) < target:
+            remaining_ms = int(max(0, deadline - asyncio.get_event_loop().time()) * 1000)
+            if remaining_ms <= 0:
+                break
+            batch = await consumer.getmany(timeout_ms=min(500, remaining_ms))
+            if not batch:
+                break
+            for recs in batch.values():
+                collected.extend(recs)
+
+        collected.sort(key=lambda m: (m.timestamp or 0, m.offset), reverse=True)
+        out: list[dict] = []
+        for m in collected[:limit]:
+            preview, b64 = _decode_payload(m.value)
+            entry = {
+                "topic": m.topic,
+                "partition": m.partition,
+                "offset": m.offset,
+                "ts": m.timestamp,
+                "size": len(m.value or b""),
+                "payload": preview,
+            }
+            if b64 is not None:
+                entry["payload_b64"] = b64
+            out.append(entry)
+        return out
+    finally:
+        await consumer.stop()
 
 
 async def tail(topic: str) -> AsyncIterator[dict]:

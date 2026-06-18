@@ -25,6 +25,15 @@ async def all_topics():
         return {"error": str(e), "topics": []}
 
 
+@router.get("/peek/{topic}")
+async def peek(topic: str, limit: int = 10):
+    try:
+        limit = max(1, min(100, int(limit)))
+        return await kafka_svc.peek(topic, limit)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @router.get("/tail/{topic}")
 async def tail(topic: str):
     if topic not in (settings.TOPIC_AUDIO, settings.TOPIC_DOCS):
