@@ -38,7 +38,7 @@ export function Operators() {
     <Card>
       <CardTitle>Cloudera Operators</CardTitle>
       {error && <div className="text-bad text-xs mb-2">{error}</div>}
-      <div className="space-y-2">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {ops.map((op) => (
           <div
             key={op.deployment}

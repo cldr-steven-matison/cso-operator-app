@@ -134,17 +134,28 @@ async def peek(topic: str, limit: int = 10) -> list[dict]:
             start = max(begins[tp], ends[tp] - limit)
             consumer.seek(tp, start)
 
-        # Drain available records up to limit*partitions, capped by 2s wall.
+        # Drain available records up to limit*partitions, capped by 3s wall.
+        # Don't exit on the first empty getmany() — aiokafka often returns an
+        # empty batch right after seek() while it resolves positions, so we
+        # only stop once we've hit the deadline or have enough records.
         collected: list = []
         target = limit * max(1, len(tps))
-        deadline = asyncio.get_event_loop().time() + 2.0
+        deadline = asyncio.get_event_loop().time() + 3.0
+        empty_passes = 0
         while len(collected) < target:
             remaining_ms = int(max(0, deadline - asyncio.get_event_loop().time()) * 1000)
             if remaining_ms <= 0:
                 break
             batch = await consumer.getmany(timeout_ms=min(500, remaining_ms))
             if not batch:
-                break
+                empty_passes += 1
+                # Two empty polls in a row after the position is set means the
+                # partitions really are quiet — stop instead of waiting out the
+                # full deadline on every call.
+                if empty_passes >= 2 and collected:
+                    break
+                continue
+            empty_passes = 0
             for recs in batch.values():
                 collected.extend(recs)
 

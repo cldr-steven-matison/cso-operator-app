@@ -13,16 +13,18 @@ export default function App() {
   return (
     <div className="min-h-full flex flex-col">
       <HealthBar />
-      <main className="flex-1 p-4 grid grid-cols-1 xl:grid-cols-2 gap-4 max-w-[1600px] mx-auto w-full">
-        <DemoMode />
-        <Ingest />
+      <main className="flex-1 p-4 max-w-[1600px] mx-auto w-full space-y-4">
         <Operators />
-        <NifiControls />
-        <KafkaActivity />
-        <QdrantPanel />
-        <RagQuery />
-        <PodSummary />
-        <AllTopics />
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <DemoMode />
+          <Ingest />
+          <NifiControls />
+          <KafkaActivity />
+          <QdrantPanel />
+          <RagQuery />
+          <PodSummary />
+          <AllTopics />
+        </div>
       </main>
     </div>
   );

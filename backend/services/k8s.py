@@ -23,13 +23,16 @@ from kubernetes_asyncio.client.exceptions import ApiException
 
 WATCHED_NS: tuple[str, ...] = ("cld-streaming", "cfm-streaming", "default")
 
-# (display_name, deployment_name, namespace, crd_group_suffixes)
-OPERATORS: list[tuple[str, str, str, tuple[str, ...]]] = [
-    ("CSM (Strimzi)", "strimzi-cluster-operator", "cld-streaming",
+# (display_name, candidate deployment names, namespace, crd_group_suffixes)
+# First name is the canonical one; alternates cover Helm-chart naming variants
+# (e.g. CSA installs as `csa-operator` but the bundled Flink operator is
+# `flink-kubernetes-operator`).
+OPERATORS: list[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = [
+    ("CSM (Strimzi)", ("strimzi-cluster-operator",), "cld-streaming",
      ("kafka.strimzi.io", "core.strimzi.io")),
-    ("CSA (Flink)", "flink-kubernetes-operator", "cld-streaming",
+    ("CSA (Flink)", ("flink-kubernetes-operator", "csa-operator"), "cld-streaming",
      ("flink.apache.org",)),
-    ("CFM (NiFi)", "cfm-operator", "cfm-streaming",
+    ("CFM (NiFi)", ("cfm-operator",), "cfm-streaming",
      ("cfm.cloudera.com",)),
 ]
 
@@ -66,17 +69,26 @@ async def list_operators() -> list[dict]:
     apps = client.AppsV1Api(api)
     ext = client.ApiextensionsV1Api(api)
     try:
-        crds = await ext.list_custom_resource_definition()
+        # CRD list may 403 if the SA can't read CRDs cluster-wide — keep going
+        # so the deployment status still renders. `crds_present` falls back to
+        # 0 in that case and the failure shows up as a per-entry error.
         crd_groups: dict[str, int] = {}
-        for c in crds.items:
-            g = c.spec.group
-            crd_groups[g] = crd_groups.get(g, 0) + 1
+        crd_error: str | None = None
+        try:
+            crds = await ext.list_custom_resource_definition()
+            for c in crds.items:
+                g = c.spec.group
+                crd_groups[g] = crd_groups.get(g, 0) + 1
+        except ApiException as e:
+            crd_error = f"crds: {e.status} {e.reason}"
+        except Exception as e:  # network / auth blowups
+            crd_error = f"crds: {e}"
 
         out: list[dict] = []
-        for display, name, ns, groups in OPERATORS:
+        for display, candidates, ns, groups in OPERATORS:
             entry: dict = {
                 "name": display,
-                "deployment": name,
+                "deployment": candidates[0],
                 "namespace": ns,
                 "installed": False,
                 "ready": 0,
@@ -86,13 +98,27 @@ async def list_operators() -> list[dict]:
                 "crd_groups": list(groups),
                 "crds_present": sum(crd_groups.get(g, 0) for g in groups),
             }
-            try:
-                dep = await apps.read_namespaced_deployment(name=name, namespace=ns)
-            except ApiException as e:
-                if e.status == 404:
-                    out.append(entry)
-                    continue
-                entry["error"] = f"{e.status} {e.reason}"
+            if crd_error:
+                entry["error"] = crd_error
+            dep = None
+            last_err: str | None = None
+            for candidate in candidates:
+                try:
+                    dep = await apps.read_namespaced_deployment(name=candidate, namespace=ns)
+                    entry["deployment"] = candidate
+                    break
+                except ApiException as e:
+                    if e.status == 404:
+                        last_err = "not found"
+                        continue
+                    last_err = f"{e.status} {e.reason}"
+                    break
+                except Exception as e:
+                    last_err = str(e)
+                    break
+            if dep is None:
+                if last_err and last_err != "not found":
+                    entry["error"] = f"deploy: {last_err}"
                 out.append(entry)
                 continue
             ready, desired = _ready_replicas(dep)
