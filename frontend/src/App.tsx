@@ -15,6 +15,7 @@ export default function App() {
       <HealthBar />
       <main className="flex-1 p-4 max-w-[1600px] mx-auto w-full space-y-4">
         <Operators />
+        <PodSummary />
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <DemoMode />
           <Ingest />
@@ -22,7 +23,6 @@ export default function App() {
           <KafkaActivity />
           <QdrantPanel />
           <RagQuery />
-          <PodSummary />
           <AllTopics />
         </div>
       </main>

@@ -84,7 +84,7 @@ export function PodSummary() {
   };
 
   return (
-    <Card className="col-span-1 xl:col-span-2">
+    <Card>
       <CardTitle>Pods</CardTitle>
       {error && <div className="text-bad text-xs mb-2">{error}</div>}
       <div className="space-y-3">
