@@ -2,8 +2,15 @@
 # Mac dev: port-forward backing services + Kafka external listener,
 # then run backend + frontend in two more terminals.
 # Stop everything with Ctrl-C (kills all spawned port-forwards).
+#
+# Stack-agnostic: forwards the canonical Service names (`vllm-service`,
+# `whisper-service`) which the bootstrap script aliases to whichever
+# stack is active (GPU or CPU). The backend's .env.local URLs are
+# identical on both paths.
 set -euo pipefail
 
+STACK="${STACK:-gpu}"
+echo "Stack: $STACK (informational — canonical Services route to the active backend)"
 echo "Starting kubectl port-forwards..."
 
 # Backing AI stack (default namespace)

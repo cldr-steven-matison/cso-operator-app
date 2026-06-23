@@ -1,0 +1,69 @@
+#
+# CPU-only Whisper deployment for Mac dev.
+#
+# Built from whisper/Dockerfile.whisper.cpu into Minikube's docker daemon
+# as `streamwhisper-cpu:latest`. No nvidia.com/gpu resource — schedulable
+# on any Minikube node.
+#
+# Service exposes the same port 8001 / POST /transcribe contract as the
+# GPU variant, but with a distinct name (`whisper-cpu-service`) so both
+# stacks can coexist in-cluster. For NiFi's StreamToWhisper flow to keep
+# pointing at the canonical `whisper-service` name, a stack-agnostic
+# Service alias is layered on top selecting the `whisper` label that both
+# the GPU (`app: whisper-server`) and CPU (`app: whisper-cpu-server`)
+# deployments share via `whisper: "true"`. See: whisper-service-alias.yaml.
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whisper-cpu-server
+  labels:
+    app: whisper-cpu-server
+    whisper: "true"
+    stack: cpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whisper-cpu-server
+  template:
+    metadata:
+      labels:
+        app: whisper-cpu-server
+        whisper: "true"
+        stack: cpu
+    spec:
+      containers:
+      - name: whisper-cpu-server
+        image: streamwhisper-cpu:latest
+        imagePullPolicy: Never
+        env:
+        - name: WHISPER_MODEL
+          value: "small"
+        - name: WHISPER_COMPUTE_TYPE
+          value: "int8"
+        ports:
+        - containerPort: 8001
+        # Demo-tier scheduling — see vllm-cpu.yaml for rationale.
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "800Mi"
+          limits:
+            cpu: "4"
+            memory: "3Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whisper-cpu-service
+  labels:
+    stack: cpu
+spec:
+  selector:
+    app: whisper-cpu-server
+  ports:
+  - protocol: TCP
+    port: 8001
+    targetPort: 8001
+  type: ClusterIP

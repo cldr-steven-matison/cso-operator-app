@@ -93,7 +93,12 @@ spec:
               text-embeddings-router --model-id /data --port 80
           ports:
             - containerPort: 80
+          # Explicit small request — without it k8s infers requests=limits
+          # and the pod can't schedule on a CPU-saturated Minikube.
           resources:
+            requests:
+              cpu: "150m"
+              memory: "512Mi"
             limits:
               memory: "2Gi"
               cpu: "2"

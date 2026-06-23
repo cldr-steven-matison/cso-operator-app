@@ -1,0 +1,26 @@
+#
+# Stack-agnostic alias: makes the canonical `vllm-service` DNS name
+# resolve to CPU pods. Applied ONLY when STACK=cpu.
+#
+# Backend ConfigMap pins VLLM_URL to vllm-service.default.svc.cluster.local.
+# This alias keeps that pin valid when the CPU stack is the live one.
+#
+# scripts/bootstrap-stack.sh deletes the GPU vllm-service before applying
+# this — two Services of the same name cannot coexist in one namespace.
+#
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-service
+  namespace: default
+  labels:
+    stack: cpu
+    alias: "true"
+spec:
+  selector:
+    app: vllm-cpu-server
+  ports:
+  - protocol: TCP
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP

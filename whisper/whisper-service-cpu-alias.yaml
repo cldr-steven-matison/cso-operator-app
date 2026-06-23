@@ -1,0 +1,28 @@
+#
+# Stack-agnostic alias: makes the canonical `whisper-service` DNS name
+# resolve to CPU pods. Applied ONLY when STACK=cpu, alongside (or after
+# deleting) the GPU whisper-server.yaml which also publishes a Service of
+# the same name.
+#
+# Rationale: NiFi's StreamToWhisper InvokeHTTP processor is configured
+# to call http://whisper-service:8001/transcribe. Keeping that URL
+# stable across stacks means no flow JSON edits when swapping CPU/GPU.
+#
+# Two `whisper-service` Services cannot coexist in the same namespace.
+# scripts/bootstrap-stack.sh deletes the other one before applying this.
+#
+apiVersion: v1
+kind: Service
+metadata:
+  name: whisper-service
+  labels:
+    stack: cpu
+    alias: "true"
+spec:
+  selector:
+    app: whisper-cpu-server
+  ports:
+  - protocol: TCP
+    port: 8001
+    targetPort: 8001
+  type: ClusterIP

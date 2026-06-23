@@ -1,0 +1,97 @@
+#
+# CPU-only drop-in for the vLLM service.
+#
+# Uses llama.cpp's OpenAI-compatible server with a quantized Qwen2.5-1.5B
+# GGUF. Same /v1/models + /v1/chat/completions contract as the GPU vLLM
+# deployment, so backend code and ConfigMap shape are unchanged. The
+# --alias flag forces /v1/models to report the same string the backend's
+# VLLM_MODEL setting expects.
+#
+# Service name is intentionally distinct (`vllm-cpu-service`) so the CPU
+# and GPU variants can coexist in-cluster. For Mac dev, scripts/mac-dev.sh
+# port-forwards either Service onto localhost:8000 depending on $STACK.
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-cpu-server
+  labels:
+    app: vllm-cpu-server
+    stack: cpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-cpu-server
+  template:
+    metadata:
+      labels:
+        app: vllm-cpu-server
+        stack: cpu
+    spec:
+      containers:
+      - name: llama-cpp-server
+        image: ghcr.io/ggml-org/llama.cpp:server
+        ports:
+        - containerPort: 8000
+        env:
+        # llama.cpp's `-hf` flag streams the GGUF from HuggingFace on first
+        # start and caches it under /root/.cache/llama.cpp. HF_TOKEN is
+        # optional for Qwen2.5-1.5B (public), kept here so gated variants
+        # work without a YAML edit.
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        args:
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8000"
+        - "-hf"
+        - "Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M"
+        # /v1/models reports this exact string. Matches VLLM_MODEL in the
+        # ConfigMap so HealthBar stays green without ConfigMap churn.
+        - "--alias"
+        - "Qwen/Qwen2.5-1.5B-Instruct"
+        - "--ctx-size"
+        - "8192"
+        - "--threads"
+        - "4"
+        - "--parallel"
+        - "1"
+        # Demo-tier scheduling: small request so the pod schedules on a
+        # crowded Minikube (CSM/CSA/CFM operators already reserve most
+        # cores), generous limit so inference can scavenge idle cycles.
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "2Gi"
+          limits:
+            cpu: "6"
+            memory: "6Gi"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /root/.cache/llama.cpp
+      volumes:
+      - name: model-cache
+        emptyDir:
+          sizeLimit: "4Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-cpu-service
+  namespace: default
+  labels:
+    stack: cpu
+spec:
+  selector:
+    app: vllm-cpu-server
+  ports:
+  - protocol: TCP
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP

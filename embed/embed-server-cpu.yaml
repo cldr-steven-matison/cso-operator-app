@@ -1,0 +1,65 @@
+#
+# arm64-native (and amd64) CPU embedding server for Mac dev.
+#
+# Replaces the upstream TEI image when STACK=cpu — TEI ships amd64-only
+# and pulls fail on Apple Silicon Minikube with:
+#   "no matching manifest for linux/arm64/v8"
+#
+# Same model (nomic-embed-text-v1), same 768-d Cosine embeddings, same
+# POST /embed contract. The Service intentionally re-uses the canonical
+# name `embedding-server-service` so the backend ConfigMap is unchanged.
+#
+# The GPU stack's k8s/backing/embedding-server.yaml is removed by the
+# bootstrap when STACK=cpu (its TEI Deployment would conflict on
+# arm64 anyway).
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embedding-server-cpu
+  labels:
+    app: embedding-server-cpu
+    stack: cpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: embedding-server-cpu
+  template:
+    metadata:
+      labels:
+        app: embedding-server-cpu
+        stack: cpu
+    spec:
+      containers:
+      - name: embed
+        image: embed-server-cpu:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 80
+        env:
+        - name: EMBED_MODEL
+          value: "nomic-ai/nomic-embed-text-v1"
+        resources:
+          requests:
+            cpu: "150m"
+            memory: "1Gi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embedding-server-service
+  labels:
+    stack: cpu
+    alias: "true"
+spec:
+  selector:
+    app: embedding-server-cpu
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+  type: ClusterIP

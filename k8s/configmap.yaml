@@ -10,7 +10,9 @@ data:
   EMBED_URL: "http://embedding-server-service.default.svc.cluster.local:80"
   EMBED_DIM: "768"
   WHISPER_URL: "http://whisper-service.default.svc.cluster.local:8001"
-  NIFI_URL: "https://mynifi-web.cfm-streaming.svc.cluster.local"
+  # mynifi-web Service publishes 8443, not 443 — omitting the port makes
+  # every NiFi call hang on TCP connect to :443. Include it explicitly.
+  NIFI_URL: "https://mynifi-web.cfm-streaming.svc.cluster.local:8443"
   NIFI_VERIFY_TLS: "false"
   NIFI_INGEST_URL: "http://mynifi.cfm-streaming.svc.cluster.local:9000/contentListener"
   KAFKA_BOOTSTRAP: "my-cluster-kafka-bootstrap.cld-streaming.svc:9092"

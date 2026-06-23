@@ -1,0 +1,95 @@
+# Dockerfile.whisper.cpu - CPU-only Whisper variant for Mac dev
+# Targets: strict CPU, no Metal, no CUDA. faster-whisper small int8.
+# Author: Steven Matison (Solutions Engineer, Cloudera)
+#
+# Drop-in for the GPU image: same FastAPI shell, same POST /transcribe
+# returning {"text": "..."}. NiFi's StreamToWhisper InvokeHTTP doesn't
+# notice the swap as long as the Service in front routes to a pod with
+# this image.
+
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# ffmpeg is required for faster-whisper to decode arbitrary audio inputs
+# (NiFi may forward mp3/m4a/wav indiscriminately). libgomp1 is needed by
+# CTranslate2's threaded backends.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN pip install --upgrade pip setuptools wheel
+
+# faster-whisper bundles CTranslate2 (CPU INT8 backend). No torch needed.
+# `requests` is explicitly listed because faster-whisper 1.0.3 imports it
+# from utils.py but doesn't declare it as a dependency (fixed in later
+# releases). Without this pin, pre-baking the model fails with
+# `ModuleNotFoundError: No module named 'requests'`.
+RUN pip install \
+    faster-whisper==1.0.3 \
+    fastapi uvicorn python-multipart \
+    requests
+
+# Pre-bake the small model so first-request latency on a fresh pod is
+# bounded by inference time, not HuggingFace download time. compute_type
+# matches the runtime setting below so the cached snapshot is reused.
+ENV WHISPER_MODEL=small
+ENV WHISPER_COMPUTE_TYPE=int8
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL}', device='cpu', compute_type='${WHISPER_COMPUTE_TYPE}')"
+
+COPY <<EOF /app/main.py
+import os
+import tempfile
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
+from faster_whisper import WhisperModel
+
+app = FastAPI(title="StreamToWhisper (CPU)")
+
+MODEL_NAME = os.environ.get("WHISPER_MODEL", "small")
+COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+
+# Single shared model — faster-whisper releases the GIL during decode so
+# multiple workers aren't required for a demo. One pod, one model.
+model = WhisperModel(MODEL_NAME, device="cpu", compute_type=COMPUTE_TYPE)
+
+
+@app.post("/transcribe")
+async def transcribe(file: UploadFile = File(...)):
+    suffix = os.path.splitext(file.filename or "")[1] or ".wav"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+    try:
+        segments, _info = model.transcribe(
+            tmp_path,
+            beam_size=1,         # demo-tier latency; bump to 5 for quality
+            vad_filter=True,
+        )
+        text = "".join(seg.text for seg in segments).strip()
+        return {"text": text}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True, "model": MODEL_NAME, "compute_type": COMPUTE_TYPE}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
+EOF
+
+EXPOSE 8001
+ENTRYPOINT ["python", "main.py"]

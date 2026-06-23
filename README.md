@@ -55,6 +55,24 @@ kubectl get secret nifi-admin-creds -n cfm-streaming \
   -o jsonpath='{.data.password}' | base64 -d
 ```
 
+### Strict-CPU variant (Mac, no GPU)
+
+For Mac dev without GPU passthrough, swap vLLM and Whisper for CPU-only
+equivalents (llama.cpp + faster-whisper). Same backend, same NiFi flows,
+same ConfigMap — only the in-cluster Deployments change. Pass `STACK=cpu`
+to bootstrap and dev:
+
+```bash
+make bootstrap STACK=cpu     # no $HF_TOKEN needed
+make dev STACK=cpu
+make backend                 # unchanged
+make frontend                # unchanged
+```
+
+Switch back with `make bootstrap STACK=gpu`. See
+[DesktopShare/cso-operator-app-plan.md → CPU variant](https://github.com/cldr-steven-matison/DesktopShare/blob/main/cso-operator-app-plan.md#cpu-variant-mac-no-gpu)
+for details and performance ceilings.
+
 ## Quick start (Windows)
 
 Requires WSL2 or Git Bash so the bash scripts run. Same flow as Mac:

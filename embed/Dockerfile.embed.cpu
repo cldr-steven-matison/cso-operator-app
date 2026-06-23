@@ -1,0 +1,84 @@
+# Dockerfile.embed.cpu - arm64-native (and amd64) CPU embedding server.
+# Drop-in for ghcr.io/huggingface/text-embeddings-inference:cpu-1.5,
+# which ships amd64 only and won't pull on Apple Silicon Minikube.
+#
+# Same model (nomic-ai/nomic-embed-text-v1), same 768-d output,
+# same POST /embed contract — backend doesn't notice the swap.
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/root/.cache/huggingface
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN pip install --upgrade pip setuptools wheel
+
+# Torch CPU wheel — small (~200MB), no CUDA, ships arm64 builds.
+RUN pip install \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.4.1
+
+RUN pip install \
+    fastapi uvicorn pydantic \
+    sentence-transformers==3.0.1 \
+    einops
+
+# Pre-bake the model so the pod starts without a HuggingFace download.
+# `trust_remote_code=True` is required for nomic-embed-text-v1 (it ships
+# custom modeling code). HF_TOKEN is optional at build time — the repo
+# is public, the secret is mounted at runtime as a placeholder.
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('nomic-ai/nomic-embed-text-v1', trust_remote_code=True)"
+
+COPY <<EOF /app/main.py
+import os
+from typing import Union, List
+from fastapi import FastAPI
+from pydantic import BaseModel
+from sentence_transformers import SentenceTransformer
+
+app = FastAPI(title="EmbedServer (CPU, arm64-native)")
+
+MODEL_NAME = os.environ.get("EMBED_MODEL", "nomic-ai/nomic-embed-text-v1")
+model = SentenceTransformer(MODEL_NAME, trust_remote_code=True)
+
+
+class EmbedRequest(BaseModel):
+    # TEI's API accepts either a single string or a list. The backend's
+    # services/embedding.py only sends single strings today, but we
+    # honor both to stay drop-in.
+    inputs: Union[str, List[str]]
+
+
+@app.post("/embed")
+def embed(req: EmbedRequest):
+    texts = [req.inputs] if isinstance(req.inputs, str) else req.inputs
+    # normalize_embeddings=True matches TEI's default for Cosine similarity.
+    vecs = model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
+    # TEI returns a list-of-lists even for a single input.
+    return [v.tolist() for v in vecs]
+
+
+@app.get("/healthz")
+@app.get("/health")
+def healthz():
+    # `/health` is the path the cso-operator-app backend pings — TEI
+    # exposed it, and we mirror to stay drop-in. `/healthz` kept for
+    # Kubernetes liveness convention.
+    return {"ok": True, "model": MODEL_NAME, "dim": model.get_sentence_embedding_dimension()}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=80)
+EOF
+
+EXPOSE 80
+ENTRYPOINT ["python", "main.py"]
