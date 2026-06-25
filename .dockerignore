@@ -21,7 +21,7 @@ venv
 # Repo cruft
 .DS_Store
 flows/
-samples/
+# samples/ is needed at runtime for the EFM demo catalog (samples/efm-demos.json).
 whisper/
 k8s/
 docs/

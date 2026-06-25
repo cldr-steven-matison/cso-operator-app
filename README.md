@@ -12,6 +12,12 @@ One screen drives:
 - **NiFi flow controls** (start/stop, live state).
 - **Kafka topic activity** (depth, lag, live tail).
 - **Qdrant collection management** (recreate, stats).
+- **EFM agent control** — list `agent-classes`, list live agents (heartbeat
+  staleness dots), and a Test Agent panel that POSTs to a MiNiFi agent's
+  `ListenHTTP /contentListener` from a repo-local demo catalog
+  (`samples/efm-demos.json`). The catalog is per-`agentClass`; each entry
+  declares a Kafka topic + `expect` block, so the panel verifies
+  end-to-end and shows a `PASS / FAIL` badge.
 
 Local demo only — no auth, no production hardening.
 
@@ -33,7 +39,8 @@ flows/      CSOOperatorApp.json — single import containing all four
             process groups (IngestDocsToStream, IngestDataToStream,
             StreamToWhisper, StreamTovLLM)
 k8s/        Deployment, Service, ConfigMap; backing/ copies of stack YAMLs
-samples/    Reference doc + audio for Demo Mode
+samples/    Reference doc + audio for Demo Mode; efm-demos.json
+            (catalog read at request time by /api/efm/demos)
 scripts/    mac-dev.sh, deploy.sh, bootstrap-stack.sh
 ```
 

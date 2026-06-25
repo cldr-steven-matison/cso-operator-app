@@ -1,0 +1,14 @@
+[
+  {
+    "name": "ListenHTTP — JSON payload",
+    "agentClass": "KubernetesPod",
+    "contentType": "application/json",
+    "payload": "{\"hello\":\"from cso-operator-app\"}",
+    "kafkaTopic": "new_documents",
+    "expect": {
+      "topic": "new_documents",
+      "withinSec": 10,
+      "match": "from cso-operator-app"
+    }
+  }
+]

@@ -21,6 +21,15 @@ export type EfmAgent = {
   endpointUrl: string;
 };
 export type EfmSendResult = { ok: boolean; status_code: number; body_preview: string };
+export type EfmDemoExpect = { topic: string; withinSec: number; match?: string };
+export type EfmDemo = {
+  name: string;
+  agentClass: string;
+  contentType: string;
+  payload: string;
+  kafkaTopic: string;
+  expect: EfmDemoExpect;
+};
 
 export type NifiPg = { id: string; version: number; state: string };
 export type NifiState = Record<string, NifiPg>;
@@ -130,6 +139,7 @@ export const api = {
 
   efmAgentClasses: () => jget<EfmAgentClass[]>("/api/efm/agent-classes"),
   efmAgents: () => jget<EfmAgent[]>("/api/efm/agents"),
+  efmDemos: () => jget<EfmDemo[]>("/api/efm/demos"),
   efmSend: (endpointUrl: string, payload: string, contentType: string) =>
     jpost<EfmSendResult>("/api/efm/send", { endpoint_url: endpointUrl, payload, content_type: contentType }),
 

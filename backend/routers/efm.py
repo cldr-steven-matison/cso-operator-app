@@ -1,4 +1,6 @@
 import asyncio
+import json
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -7,6 +9,24 @@ import httpx
 from config import settings
 
 router = APIRouter(prefix="/efm")
+
+# Demo catalog. Two layouts:
+#   - In the image: Dockerfile flattens backend/ to /app/ and copies samples/
+#     to /app/samples/, so /app/routers/efm.py → ../samples/efm-demos.json.
+#   - Local dev: backend/routers/efm.py → ../../samples/efm-demos.json.
+# Read at request time so catalog edits hot-reload without a backend restart.
+_HERE = Path(__file__).resolve().parent
+_DEMO_CANDIDATES = (
+    _HERE.parent / "samples" / "efm-demos.json",          # image: /app/samples
+    _HERE.parent.parent / "samples" / "efm-demos.json",   # local: repo/samples
+)
+
+
+def _demos_file() -> Path | None:
+    for p in _DEMO_CANDIDATES:
+        if p.is_file():
+            return p
+    return None
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -134,6 +154,22 @@ async def get_agents(request: Request):
         })
 
     return result
+
+
+@router.get("/demos")
+async def get_demos():
+    """Return the repo-local demo catalog.
+
+    Each entry: {name, agentClass, contentType, payload, kafkaTopic, expect:{topic,withinSec,match?}}.
+    Empty list if the catalog file is missing.
+    """
+    path = _demos_file()
+    if path is None:
+        return []
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read demo catalog: {e}")
 
 
 class SendRequest(BaseModel):

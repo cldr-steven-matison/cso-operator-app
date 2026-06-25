@@ -7,6 +7,7 @@ import {
   api,
   type EfmAgent,
   type EfmAgentClass,
+  type EfmDemo,
   type EfmSendResult,
   type KafkaAllTopic,
   type KafkaAllTopicsResponse,
@@ -74,16 +75,82 @@ export function EfmPage() {
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState<EfmSendResult | null>(null);
 
+  const [demos, setDemos] = useState<EfmDemo[]>([]);
+  const [selectedDemoName, setSelectedDemoName] = useState<string>("");
+  // Captured at send time; the verdict watcher reads from this snapshot so
+  // changing the demo selector mid-watch can't poison an in-flight result.
+  const [activeExpect, setActiveExpect] = useState<
+    { topic: string; match?: string; deadline: number } | null
+  >(null);
+  const [verdict, setVerdict] = useState<"pending" | "pass" | "fail" | null>(null);
+
   const [peekTopic, setPeekTopic] = useState<string>("new_documents");
   const [allTopics, setAllTopics] = useState<KafkaAllTopic[]>([]);
   const [peekedMsgs, setPeekedMsgs] = useState<KafkaPeekMsg[]>([]);
   const [peeking, setPeeking] = useState(false);
   const peekIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Fetch all Kafka topics once on mount
+  // Fetch all Kafka topics + demo catalog once on mount
   useEffect(() => {
     api.kafkaAllTopics().then((r) => setAllTopics(asAllTopics(r))).catch(() => {});
+    api.efmDemos().then(setDemos).catch(() => {});
   }, []);
+
+  // Demos available for the currently-selected agent's class.
+  const selectedAgent = agents.find((a) => a.identifier === selectedAgentId);
+  const availableDemos = selectedAgent
+    ? demos.filter((d) => d.agentClass === selectedAgent.className)
+    : [];
+
+  // Apply a demo: fill content-type, payload, peek topic; stash expectation
+  // for the next send (NOT immediately — only after a successful send does
+  // the watcher start).
+  function applyDemo(name: string) {
+    setSelectedDemoName(name);
+    const d = demos.find((x) => x.name === name);
+    if (!d) return;
+    setContentType(d.contentType);
+    setPayload(d.payload);
+    handlePeekTopicChange(d.kafkaTopic);
+    setVerdict(null);
+    setActiveExpect(null);
+  }
+
+  // Watch peek messages for the active expectation: PASS when a NEW message
+  // appears on the expected topic (and matches `match` substring if set);
+  // FAIL when the deadline passes with no match.
+  useEffect(() => {
+    if (!activeExpect || verdict !== "pending") return;
+    // Only consider messages that arrived strictly after the send.
+    // peekedMsgs comes from kafkaPeek which returns up to 5 most recent.
+    const cutoff = activeExpect.deadline - 0; // we set deadline = now + withinSec*1000
+    const matched = peekedMsgs.some((m) => {
+      // ts may be null; if so, accept if substring matches (best-effort).
+      if (activeExpect.match && !m.payload.includes(activeExpect.match)) return false;
+      return true;
+    });
+    if (matched) {
+      setVerdict("pass");
+      return;
+    }
+    if (Date.now() >= cutoff) {
+      setVerdict("fail");
+    }
+  }, [peekedMsgs, activeExpect, verdict]);
+
+  // Deadline tick — without this, a PENDING verdict that never sees a new
+  // message would stay pending forever. Re-run the effect every second
+  // after a send so the deadline check above fires.
+  useEffect(() => {
+    if (verdict !== "pending" || !activeExpect) return;
+    const id = setInterval(() => {
+      if (Date.now() >= activeExpect.deadline) {
+        setVerdict("fail");
+        clearInterval(id);
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [verdict, activeExpect]);
 
   // Auto-fill endpointUrl when selectedAgentId changes
   useEffect(() => {
@@ -131,10 +198,23 @@ export function EfmPage() {
     if (!endpointUrl) return;
     setSending(true);
     setSendResult(null);
+    // Reset prior verdict before this send. If a demo is selected, snapshot
+    // its expectation against a fresh deadline so the watcher starts clean.
+    setVerdict(null);
+    setActiveExpect(null);
     try {
       const result = await api.efmSend(endpointUrl, payload, contentType);
       setSendResult(result);
       if (result.ok) {
+        const demo = demos.find((d) => d.name === selectedDemoName);
+        if (demo) {
+          setActiveExpect({
+            topic: demo.expect.topic,
+            match: demo.expect.match,
+            deadline: Date.now() + demo.expect.withinSec * 1000,
+          });
+          setVerdict("pending");
+        }
         // Initial peek then start auto-refresh
         try {
           const msgs = await api.kafkaPeek(peekTopic, 5);
@@ -233,6 +313,26 @@ export function EfmPage() {
             </select>
           </div>
 
+          {/* Row 1b: Demo preset (filtered by selected agent's class) */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted w-20 shrink-0">Demo:</span>
+            <select
+              value={selectedDemoName}
+              onChange={(e) => applyDemo(e.target.value)}
+              className="flex-1 bg-bg border border-border rounded px-2 py-1 text-sm text-text"
+              disabled={availableDemos.length === 0}
+            >
+              <option value="">
+                {availableDemos.length === 0 ? "(no demos for this agent class)" : "— select demo —"}
+              </option>
+              {availableDemos.map((d) => (
+                <option key={d.name} value={d.name}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* Row 2: Endpoint URL */}
           <div className="flex items-center gap-2">
             <span className="text-xs text-muted w-20 shrink-0">Endpoint:</span>
@@ -275,6 +375,15 @@ export function EfmPage() {
                 {sendResult.status_code} {sendResult.ok ? "OK" : "ERR"} —{" "}
                 {sendResult.body_preview.slice(0, 80)}
               </span>
+            )}
+            {verdict && (
+              <Badge
+                tone={
+                  verdict === "pass" ? "ok" : verdict === "fail" ? "bad" : "warn"
+                }
+              >
+                {verdict === "pending" ? "verifying…" : verdict.toUpperCase()}
+              </Badge>
             )}
           </div>
 
