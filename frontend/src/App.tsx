@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { AllTopics } from "@/components/AllTopics";
 import { DemoMode } from "@/components/DemoMode";
+import { EfmPage } from "@/components/EfmPage";
 import { HealthBar } from "@/components/HealthBar";
 import { Ingest } from "@/components/Ingest";
 import { KafkaActivity } from "@/components/KafkaActivity";
@@ -12,10 +13,11 @@ import { QdrantPanel } from "@/components/QdrantPanel";
 import { RagQuery } from "@/components/RagQuery";
 import { cn } from "@/lib/utils";
 
-type Tab = "operator" | "rag";
+type Tab = "operator" | "efm" | "rag";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "operator", label: "Operator" },
+  { id: "efm", label: "EFM" },
   { id: "rag", label: "RAG" },
 ];
 
@@ -47,6 +49,7 @@ export default function App() {
             <PodSummary />
           </>
         )}
+        {tab === "efm" && <EfmPage />}
         {tab === "rag" && (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             <DemoMode />

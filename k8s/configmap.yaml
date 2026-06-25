@@ -15,6 +15,7 @@ data:
   NIFI_URL: "https://mynifi-web.cfm-streaming.svc.cluster.local:8443"
   NIFI_VERIFY_TLS: "false"
   NIFI_INGEST_URL: "http://mynifi.cfm-streaming.svc.cluster.local:9000/contentListener"
+  EFM_URL: "http://efm.cld-streaming.svc:10090"
   KAFKA_BOOTSTRAP: "my-cluster-kafka-bootstrap.cld-streaming.svc:9092"
   TOPIC_AUDIO: "new_audio"
   TOPIC_DOCS: "new_documents"

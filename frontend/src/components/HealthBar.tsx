@@ -4,7 +4,7 @@ import { Dot } from "@/components/ui/Badge";
 import { api, type Health, type Operator } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-const ORDER: (keyof Health["services"])[] = ["vllm", "embedding", "qdrant", "whisper", "nifi", "kafka"];
+const ORDER: (keyof Health["services"])[] = ["vllm", "embedding", "qdrant", "whisper", "nifi", "kafka", "efm"];
 
 export function HealthBar() {
   const [h, setH] = useState<Health | null>(null);

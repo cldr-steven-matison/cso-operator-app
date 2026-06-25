@@ -9,8 +9,18 @@ export type HealthService = {
 };
 export type Health = {
   ok: boolean;
-  services: Record<"vllm" | "qdrant" | "embedding" | "whisper" | "nifi" | "kafka", HealthService>;
+  services: Record<"vllm" | "qdrant" | "embedding" | "whisper" | "nifi" | "kafka" | "efm", HealthService>;
 };
+
+export type EfmAgentClass = { name: string; agentCount: number };
+export type EfmAgent = {
+  identifier: string;
+  className: string;
+  lastSeen: string | null;
+  status: Record<string, unknown>;
+  endpointUrl: string;
+};
+export type EfmSendResult = { ok: boolean; status_code: number; body_preview: string };
 
 export type NifiPg = { id: string; version: number; state: string };
 export type NifiState = Record<string, NifiPg>;
@@ -117,6 +127,11 @@ export const api = {
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
       return r.json();
     }),
+
+  efmAgentClasses: () => jget<EfmAgentClass[]>("/api/efm/agent-classes"),
+  efmAgents: () => jget<EfmAgent[]>("/api/efm/agents"),
+  efmSend: (endpointUrl: string, payload: string, contentType: string) =>
+    jpost<EfmSendResult>("/api/efm/send", { endpoint_url: endpointUrl, payload, content_type: contentType }),
 
   ingest: (file: File) => uploadFile("/api/ingest", file),
   sampleAudioUrl: "/api/sample-audio",

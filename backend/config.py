@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     # The flow's RouteOnAttribute branches docs vs audio by Content-Type / mime.
     NIFI_INGEST_URL: str = "http://mynifi.cfm-streaming.svc.cluster.local:9000/contentListener"
 
+    EFM_URL: str = "http://efm.cld-streaming.svc:10090"
+
     # URL for "Use sample audio" — proxied through the backend to dodge CORS.
     SAMPLE_AUDIO_URL: str = (
         "https://www.voiptroubleshooter.com/open_speech/american/OSR_us_000_0010_8k.wav"

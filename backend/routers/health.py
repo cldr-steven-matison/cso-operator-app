@@ -63,6 +63,10 @@ async def _ping_nifi(client: httpx.AsyncClient) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+async def _ping_efm(client: httpx.AsyncClient) -> dict:
+    return await _ping(client, f"{settings.EFM_URL}/efm/api/agent-classes")
+
+
 async def _ping_kafka() -> dict:
     admin = AIOKafkaAdminClient(bootstrap_servers=settings.KAFKA_BOOTSTRAP)
     try:
@@ -82,13 +86,14 @@ async def _ping_kafka() -> dict:
 async def health(request: Request):
     client: httpx.AsyncClient = request.app.state.http
 
-    vllm, qdrant, embed, whisper, nifi, kafka = await asyncio.gather(
+    vllm, qdrant, embed, whisper, nifi, kafka, efm = await asyncio.gather(
         _ping_vllm(client),
         _ping(client, f"{settings.QDRANT_URL}/collections"),
         _ping(client, f"{settings.EMBED_URL}/health"),
         _ping(client, f"{settings.WHISPER_URL}/docs"),
         _ping_nifi(client),
         _ping_kafka(),
+        _ping_efm(client),
     )
 
     services = {
@@ -98,5 +103,6 @@ async def health(request: Request):
         "whisper": whisper,
         "nifi": nifi,
         "kafka": kafka,
+        "efm": efm,
     }
     return {"ok": all(s["ok"] for s in services.values()), "services": services}

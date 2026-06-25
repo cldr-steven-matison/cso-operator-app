@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from config import settings
-from routers import health, ingest, k8s, kafka, nifi, qdrant, query
+from routers import efm, health, ingest, k8s, kafka, nifi, qdrant, query
 
 
 @asynccontextmanager
@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for r in (health.router, query.router, nifi.router, qdrant.router, kafka.router, ingest.router, k8s.router):
+for r in (health.router, query.router, nifi.router, qdrant.router, kafka.router, ingest.router, k8s.router, efm.router):
     app.include_router(r, prefix="/api")
 
 
