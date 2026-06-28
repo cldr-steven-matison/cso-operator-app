@@ -383,8 +383,10 @@ async def process_clip(clip: dict) -> dict:
         if transcript and not transcript.startswith("["):
             try:
                 prompt = (
-                    f"You are a social media editor for a gaming clip account. "
-                    f"Write one punchy, witty sentence (max 100 chars) reacting to this Twitch clip transcript. "
+                    f"You are a hype social media editor for a gaming clip account on X (Twitter). "
+                    f"Write one punchy, witty reaction (max 220 chars) to this Twitch clip. "
+                    f"Use relevant emojis and gaming slang naturally — 2-4 emojis max, don't overdo it. "
+                    f"Examples of tone: 'bro said what 💀', 'no way he actually did that 😭🔥', 'chat was NOT ready 👀'. "
                     f"Clip: '{clip.get('title', '')}' by {clip.get('streamer', 'unknown')}. "
                     f"Transcript: {transcript[:500]}"
                 )
@@ -410,8 +412,9 @@ async def process_clip(clip: dict) -> dict:
 async def clip_queue(limit: int = 20) -> list[dict]:
     """Peek the last `limit` records from processed_clips.
 
-    Uses manual partition assignment (no group coordinator) to avoid the
-    aiokafka CancelledError that happens with subscribe() on low-traffic topics.
+    Uses getmany() (single direct fetch) instead of the async iterator so
+    that manual seek() works reliably — the async for iterator hangs after
+    seek() in aiokafka when there are no in-flight fetch requests queued.
     """
     from aiokafka import AIOKafkaConsumer, TopicPartition
 
@@ -420,21 +423,26 @@ async def clip_queue(limit: int = 20) -> list[dict]:
     consumer = AIOKafkaConsumer(
         bootstrap_servers=settings.KAFKA_BOOTSTRAP,
         enable_auto_commit=False,
-        consumer_timeout_ms=1000,
+        request_timeout_ms=10000,
     )
     try:
-        await consumer.start()
-        # Manual assignment — no group coordinator needed
-        partitions = [TopicPartition(topic, p) for p in range(3)]
-        consumer.assign(partitions)
-        end_offsets = await consumer.end_offsets(partitions)
-        for tp in partitions:
-            end = end_offsets.get(tp, 0)
-            start = max(0, end - limit)
-            consumer.seek(tp, start)
+        await asyncio.wait_for(consumer.start(), timeout=10.0)
+        tp = TopicPartition(topic, 0)
+        consumer.assign([tp])
 
-        deadline = asyncio.get_event_loop().time() + 3.0
-        async for msg in consumer:
+        end_map = await asyncio.wait_for(consumer.end_offsets([tp]), timeout=10.0)
+        end = end_map.get(tp, 0)
+        if end == 0:
+            return []
+
+        consumer.seek(tp, max(0, end - limit))
+
+        # getmany() is a one-shot fetch that respects the seek offset
+        batch = await asyncio.wait_for(
+            consumer.getmany(tp, timeout_ms=5000, max_records=limit),
+            timeout=10.0,
+        )
+        for msg in batch.get(tp, []):
             try:
                 record = json.loads(msg.value.decode("utf-8"))
                 record["_offset"] = msg.offset
@@ -443,13 +451,11 @@ async def clip_queue(limit: int = 20) -> list[dict]:
                 clips.append(record)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
-            if asyncio.get_event_loop().time() > deadline or len(clips) >= limit:
-                break
     except Exception:
         pass
     finally:
         try:
-            await consumer.stop()
+            await asyncio.wait_for(consumer.stop(), timeout=5.0)
         except Exception:
             pass
     return clips[-limit:]
