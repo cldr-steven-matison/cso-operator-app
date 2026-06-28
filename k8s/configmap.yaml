@@ -25,3 +25,11 @@ data:
   CLIP_STORAGE_PATH: "/clips"
   NEW_CLIPS_TOPIC: "new_clips"
   PROCESSED_CLIPS_TOPIC: "processed_clips"
+  # Kick API (values injected via kubectl set env / Secret)
+  KICK_CLIENT_ID: ""
+  KICK_CLIENT_SECRET: ""
+  # X (Twitter) API — OAuth 1.0a (values injected via kubectl set env / Secret)
+  X_API_KEY: ""
+  X_API_SECRET: ""
+  X_ACCESS_TOKEN: ""
+  X_ACCESS_TOKEN_SECRET: ""

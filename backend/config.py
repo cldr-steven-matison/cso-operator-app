@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     NEW_CLIPS_TOPIC: str = "new_clips"
     PROCESSED_CLIPS_TOPIC: str = "processed_clips"
 
+    # Kick API — OAuth2 client credentials
+    KICK_CLIENT_ID: str = ""
+    KICK_CLIENT_SECRET: str = ""
+
     # X (Twitter) API — OAuth 1.0a, @TunaStreetTest
     X_API_KEY: str = ""
     X_API_SECRET: str = ""
