@@ -48,8 +48,11 @@ class PublishRequest(BaseModel):
 @router.post("/publish")
 async def publish(body: PublishRequest):
     """Upload clip to X and create a tweet. Requires X credentials in config."""
+    import os
     if not body.clip_path or not body.tweet_text:
         raise HTTPException(status_code=400, detail="clip_path and tweet_text are required")
+    if not os.path.exists(body.clip_path):
+        raise HTTPException(status_code=404, detail=f"Clip file not found: {body.clip_path} — re-fetch clips first")
     try:
         return await streamers.publish_clip(body.clip_path, body.tweet_text)
     except Exception as e:

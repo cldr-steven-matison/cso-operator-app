@@ -68,6 +68,18 @@ function FlowCard({
 
 // ── ClipCard ───────────────────────────────────────────────────────────────
 
+const FALLBACK_CAPTIONS = [
+  "Testing the newest twitch content with commentary from Tuna Street 🚀🐟🧑‍🚀",
+  "Caught something wild on Twitch — Tuna Street has the take 🐟🔥",
+  "Fresh off the stream, straight to your feed — Tuna Street approved 🧑‍🚀🐟",
+  "Tuna Street is watching so you don't have to 👀🐟🚀",
+  "Another clip, another banger — Tuna Street on the case 🐟💥",
+];
+
+function fallbackCaption() {
+  return FALLBACK_CAPTIONS[Math.floor(Math.random() * FALLBACK_CAPTIONS.length)];
+}
+
 function ClipCard({
   clip,
   onPublished,
@@ -77,7 +89,7 @@ function ClipCard({
   onPublished: (offset: number) => void;
   onSkip: (offset: number) => void;
 }) {
-  const [caption, setCaption] = useState(clip.caption ?? "");
+  const [caption, setCaption] = useState(clip.caption?.trim() || fallbackCaption());
   const [commentary, setCommentary] = useState("");
   const [publishing, setPublishing] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; url?: string; error?: string } | null>(null);
@@ -295,6 +307,7 @@ export function StreamersPage() {
   };
 
   const refreshQueue = async () => {
+    setDismissed(new Set()); // clear dismiss state so reused Kafka offsets show up
     try {
       const q = await api.streamersQueue();
       setClips(q);
