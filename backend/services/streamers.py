@@ -195,16 +195,65 @@ async def _get_clips(client: httpx.AsyncClient, token: str, broadcaster_id: str,
     return r.json().get("data", [])
 
 
-async def _download_clip(client: httpx.AsyncClient, mp4_url: str, dest: Path) -> bool:
+_TWITCH_WEB_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"  # public Twitch web player client
+
+_GQL_CLIP_QUERY = """
+query VideoAccessToken_Clip($slug: ID!) {
+  clip(slug: $slug) {
+    id
+    videoQualities {
+      quality
+      sourceURL
+    }
+  }
+}
+"""
+
+
+async def _gql_clip_mp4_url(client: httpx.AsyncClient, clip_id: str) -> str | None:
+    """Use Twitch GQL to get the highest-quality direct MP4 URL for a clip.
+
+    The old thumbnail→.mp4 trick stopped working in 2024 when Twitch migrated
+    their clip CDN. GQL returns signed CloudFront sourceURLs that are directly
+    downloadable.
+    """
     try:
-        async with client.stream("GET", mp4_url, timeout=60.0) as r:
+        r = await client.post(
+            "https://gql.twitch.tv/gql",
+            json={"query": _GQL_CLIP_QUERY, "variables": {"slug": clip_id}},
+            headers={"Client-ID": _TWITCH_WEB_CLIENT_ID},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            return None
+        qualities = r.json()["data"]["clip"]["videoQualities"]
+        if not qualities:
+            return None
+        # First entry is highest quality
+        return qualities[0]["sourceURL"]
+    except Exception:
+        return None
+
+
+async def _download_clip(client: httpx.AsyncClient, url: str, dest: Path) -> bool:
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        async with client.stream("GET", url, timeout=120.0) as r:
             r.raise_for_status()
-            dest.parent.mkdir(parents=True, exist_ok=True)
+            # Reject obvious non-video responses (JPEG magic or tiny HTML)
+            first_chunk = b""
             with open(dest, "wb") as f:
                 async for chunk in r.aiter_bytes(65536):
+                    if not first_chunk:
+                        first_chunk = chunk
+                        if first_chunk[:3] == b"\xff\xd8\xff":
+                            # JPEG — wrong URL; bail out immediately
+                            dest.unlink(missing_ok=True)
+                            return False
                     f.write(chunk)
-        return True
+        return dest.exists() and dest.stat().st_size > 10_000
     except Exception:
+        dest.unlink(missing_ok=True)
         return False
 
 
@@ -223,8 +272,9 @@ async def fetch_clips() -> dict:
         except Exception:
             pass
 
-    since = datetime.now(timezone.utc) - timedelta(hours=1)
+    since = datetime.now(timezone.utc) - timedelta(hours=6)
     fetched: list[dict] = []
+    errors: list[str] = []
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         token = await _twitch_token_refresh(client)
@@ -232,6 +282,7 @@ async def fetch_clips() -> dict:
         for login in logins:
             broadcaster_id = await _get_broadcaster_id(client, token, login)
             if not broadcaster_id:
+                errors.append(f"Could not resolve broadcaster_id for {login}")
                 continue
             clips = await _get_clips(client, token, broadcaster_id, since)
             for clip in clips:
@@ -239,18 +290,18 @@ async def fetch_clips() -> dict:
                 if not clip_id or clip_id in seen:
                     continue
 
-                # Get direct MP4 URL from thumbnail (Twitch thumbnail → clip download URL pattern)
-                thumb = clip.get("thumbnail_url", "")
-                mp4_url = thumb.replace("-preview-480x272.jpg", ".mp4") if thumb else ""
-                if not mp4_url:
-                    continue
-
                 dest = clip_dir / f"{clip_id}.mp4"
                 if not dest.exists():
+                    mp4_url = await _gql_clip_mp4_url(client, clip_id)
+                    if not mp4_url:
+                        errors.append(f"No download URL for {clip_id}")
+                        continue
                     ok = await _download_clip(client, mp4_url, dest)
                     if not ok:
+                        errors.append(f"Download failed for {clip_id}")
                         continue
 
+                thumb = clip.get("thumbnail_url", "")
                 metadata = {
                     "clip_id": clip_id,
                     "streamer": login,
@@ -266,12 +317,11 @@ async def fetch_clips() -> dict:
                 fetched.append(metadata)
                 seen.add(clip_id)
 
-    # Publish to new_clips Kafka topic
     if fetched:
         await _publish_clips_to_kafka(fetched)
         seen_file.write_text(json.dumps(list(seen)))
 
-    return {"fetched": len(fetched), "clips": [c["clip_id"] for c in fetched]}
+    return {"fetched": len(fetched), "clips": [c["clip_id"] for c in fetched], "errors": errors}
 
 
 async def _publish_clips_to_kafka(clips: list[dict]):
@@ -342,43 +392,50 @@ async def process_clip(clip: dict) -> dict:
 # ── Clip queue ────────────────────────────────────────────────────────────────
 
 async def clip_queue(limit: int = 20) -> list[dict]:
-    """Peek processed_clips and return parsed clip records."""
+    """Peek the last `limit` records from processed_clips.
+
+    Uses manual partition assignment (no group coordinator) to avoid the
+    aiokafka CancelledError that happens with subscribe() on low-traffic topics.
+    """
     from aiokafka import AIOKafkaConsumer, TopicPartition
 
     topic = settings.PROCESSED_CLIPS_TOPIC
     clips: list[dict] = []
+    consumer = AIOKafkaConsumer(
+        bootstrap_servers=settings.KAFKA_BOOTSTRAP,
+        enable_auto_commit=False,
+        consumer_timeout_ms=1000,
+    )
     try:
-        consumer = AIOKafkaConsumer(
-            bootstrap_servers=settings.KAFKA_BOOTSTRAP,
-            auto_offset_reset="latest",
-            enable_auto_commit=False,
-            consumer_timeout_ms=2000,
-        )
         await consumer.start()
-        try:
-            await consumer.subscribe([topic])
-            # Give it a moment to assign partitions
-            await asyncio.sleep(0.5)
-            partitions = consumer.assignment()
-            if partitions:
-                end_offsets = await consumer.end_offsets(list(partitions))
-                for tp in partitions:
-                    end = end_offsets[tp]
-                    start = max(0, end - limit)
-                    consumer.seek(tp, start)
-                async for msg in consumer:
-                    try:
-                        record = json.loads(msg.value.decode("utf-8"))
-                        record["_offset"] = msg.offset
-                        record["_partition"] = msg.partition
-                        record["_ts"] = msg.timestamp
-                        clips.append(record)
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        pass
-        finally:
-            await consumer.stop()
+        # Manual assignment — no group coordinator needed
+        partitions = [TopicPartition(topic, p) for p in range(3)]
+        consumer.assign(partitions)
+        end_offsets = await consumer.end_offsets(partitions)
+        for tp in partitions:
+            end = end_offsets.get(tp, 0)
+            start = max(0, end - limit)
+            consumer.seek(tp, start)
+
+        deadline = asyncio.get_event_loop().time() + 3.0
+        async for msg in consumer:
+            try:
+                record = json.loads(msg.value.decode("utf-8"))
+                record["_offset"] = msg.offset
+                record["_partition"] = msg.partition
+                record["_ts"] = msg.timestamp
+                clips.append(record)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+            if asyncio.get_event_loop().time() > deadline or len(clips) >= limit:
+                break
     except Exception:
         pass
+    finally:
+        try:
+            await consumer.stop()
+        except Exception:
+            pass
     return clips[-limit:]
 
 
