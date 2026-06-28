@@ -16,10 +16,10 @@ spec:
       - name: whisper-server
         image: streamwhisper:latest
         imagePullPolicy: Never
-        resources:
-          limits:
-            nvidia.com/gpu: 1
-            memory: "8Gi"
+#        resources:
+#          limits:
+#            nvidia.com/gpu: 1  # no gpu for you today
+#            memory: "8Gi"
         ports:
         - containerPort: 8001
 ---

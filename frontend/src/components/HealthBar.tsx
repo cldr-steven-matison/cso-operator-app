@@ -26,7 +26,7 @@ export function HealthBar() {
       }
     };
     tick();
-    const id = setInterval(tick, 5000);
+    const id = setInterval(tick, 30000);
     return () => {
       alive = false;
       clearInterval(id);
