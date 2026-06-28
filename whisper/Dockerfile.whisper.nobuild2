@@ -1,0 +1,133 @@
+# syntax=docker/dockerfile:1
+# Dockerfile.whisper - Optimised Stable Build
+# Targets: CUDA 12.4, Flash Attention 2, Whisper-Large-v3, Secure Secrets
+
+# ==========================================
+# STAGE 1: Heavy Lifting & Compilation
+# ==========================================
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Force pip to ALWAYS prioritize the CUDA 12.4 binary index for tracking dependencies
+ENV PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu124
+
+# Target RTX 4060 explicitly (Ada Lovelace Compute Capability 8.9)
+# This prevents Flash Attention from building variants for every GPU architecture
+ENV TORCH_CUDA_ARCH_LIST="8.9"
+ENV FORCE_CUDA="1"
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    git \
+    ffmpeg \
+    ninja-build \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Setup isolated Virtual Environment
+RUN python3.11 -m venv /opt/venv \
+    && pip install --no-cache-dir --upgrade pip setuptools wheel packaging
+
+# Step 1: Core ML Stack (Hard-pinned for RTX 4060 / CUDA 12.4 optimization)
+RUN pip install --no-cache-dir \
+    torch==2.4.1+cu124 torchvision==0.19.1+cu124 torchaudio==2.4.1+cu124
+
+# Step 2: Install Hugging Face & AI dependencies natively
+# We pass the --no-deps or pin constraints where necessary, but PIP_EXTRA_INDEX_URL keeps it safe
+RUN pip install --no-cache-dir \
+    transformers==4.44.2 \
+    tokenizers==0.19.1 \
+    insanely-fast-whisper==0.0.15 \
+    huggingface_hub \
+    accelerate \
+    safetensors \
+    soundfile \
+    librosa \
+    scipy
+
+# Step 3: Fast-API Application Stack
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn \
+    python-multipart
+
+# Step 4: Flash Attention 2 Compilation (Requires ninja & build-essential)
+RUN pip install --no-cache-dir flash-attn --no-build-isolation
+
+# Step 5: Securely Pre-Bake Model Weights (Uses BuildKit Secret Mount)
+RUN --mount=type=secret,id=HF_TOKEN \
+    if [ -f /run/secrets/HF_TOKEN ]; then export HF_TOKEN=$(cat /run/secrets/HF_TOKEN); fi && \
+    python3 -c "from transformers import pipeline; pipeline('automatic-speech-recognition', model='openai/whisper-large-v3')"
+
+
+# ==========================================
+# STAGE 2: Ultra-Lean Runtime
+# ==========================================
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+
+# Install runtime engine only (No heavy build tools)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy built environment and cache layers from builder
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
+
+# Embedded Inference Server Code
+COPY <<EOF /app/main.py
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
+import torch
+from transformers import pipeline
+import tempfile
+import os
+
+app = FastAPI(title="StreamToWhisper")
+
+# Explicitly ensure GPU allocation is viable
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+pipe = pipeline(
+    "automatic-speech-recognition",
+    model="openai/whisper-large-v3",
+    torch_dtype=torch.float16,
+    device=device,
+    model_kwargs={"attn_implementation": "flash_attention_2"}
+)
+
+@app.post("/transcribe")
+async def transcribe(file: UploadFile = File(...)):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+    try:
+        result = pipe(tmp_path, chunk_length_s=30, batch_size=24, return_timestamps=True)
+        return {"text": result["text"]}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
+EOF
+
+EXPOSE 8001
+ENTRYPOINT ["python3", "main.py"]

@@ -7,3 +7,4 @@ python-multipart>=0.0.10
 aiokafka>=0.11
 sse-starlette>=2.1
 kubernetes_asyncio>=32
+tweepy>=4.14

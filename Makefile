@@ -10,8 +10,14 @@ IMAGE := cso-operator-app:latest
 # Kafka, NiFi, and the app image itself are identical on both paths.
 STACK ?= gpu
 
+# MODULES controls which optional modules are baked into the image.
+#   MODULES=streamers   — include the Twitch clip pipeline module
+#   MODULES=all         — include every known optional module
+#   MODULES=            — base image only (default)
+MODULES ?=
+
 help:
-	@echo "Targets (STACK=$(STACK)):"
+	@echo "Targets (STACK=$(STACK) MODULES=$(MODULES)):"
 	@echo "  bootstrap   apply backing YAMLs, build whisper image, import NiFi flows"
 	@echo "  dev         run port-forwards + backend + frontend for local dev"
 	@echo "  backend     run FastAPI with reload"
@@ -20,7 +26,9 @@ help:
 	@echo "  deploy      build + kubectl apply"
 	@echo "  clean       kubectl delete the app (leaves backing stack alone)"
 	@echo ""
-	@echo "Override the stack: make bootstrap STACK=cpu"
+	@echo "Override the stack:   make bootstrap STACK=cpu"
+	@echo "Enable streamers:     make build MODULES=streamers"
+	@echo "All modules:          make build MODULES=all"
 
 bootstrap:
 	STACK=$(STACK) bash scripts/bootstrap-stack.sh
@@ -39,7 +47,7 @@ frontend:
 	cd frontend && npm run dev
 
 build:
-	@eval $$(minikube docker-env) && docker build -t $(IMAGE) .
+	@eval $$(minikube docker-env) && docker build -t $(IMAGE) --build-arg MODULES=$(MODULES) .
 
 deploy:
 	bash scripts/deploy.sh

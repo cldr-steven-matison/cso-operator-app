@@ -1,6 +1,9 @@
 # Stage 1: build the React/Vite frontend
 FROM node:20-alpine AS frontend
 
+ARG MODULES=""
+ENV VITE_MODULES=${MODULES}
+
 WORKDIR /app
 COPY frontend/package.json ./
 RUN npm install --no-audit --no-fund
@@ -22,9 +25,13 @@ RUN apt-get update \
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+ARG MODULES=""
+ENV MODULES=${MODULES}
+
 COPY backend/ ./
 COPY scripts/ ./scripts/
 COPY samples/ ./samples/
+COPY streamers/ ./streamers/
 COPY --from=frontend /app/dist ./static
 
 EXPOSE 8000

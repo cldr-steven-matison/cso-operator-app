@@ -11,14 +11,19 @@ import { Operators } from "@/components/Operators";
 import { PodSummary } from "@/components/PodSummary";
 import { QdrantPanel } from "@/components/QdrantPanel";
 import { RagQuery } from "@/components/RagQuery";
+import { StreamersPage } from "@/components/StreamersPage";
 import { cn } from "@/lib/utils";
 
-type Tab = "operator" | "efm" | "rag";
+const _modules = (import.meta.env.VITE_MODULES ?? "").split(",").map((s: string) => s.trim());
+const _streamers = _modules.includes("streamers") || _modules.includes("all");
+
+type Tab = "operator" | "efm" | "rag" | "streamers";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "operator", label: "Operator" },
   { id: "efm", label: "EFM" },
   { id: "rag", label: "RAG" },
+  ...(_streamers ? [{ id: "streamers" as Tab, label: "Streamers" }] : []),
 ];
 
 export default function App() {
@@ -50,6 +55,7 @@ export default function App() {
           </>
         )}
         {tab === "efm" && <EfmPage />}
+        {tab === "streamers" && _streamers && <StreamersPage />}
         {tab === "rag" && (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             <DemoMode />

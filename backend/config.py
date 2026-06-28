@@ -40,5 +40,22 @@ class Settings(BaseSettings):
     RAG_TOP_K: int = 4
     RAG_MAX_TOKENS: int = 512
 
+    # Optional modules baked into this image (comma-separated, e.g. "streamers")
+    MODULES: str = ""
+
+    # Streamers module — Twitch clip pipeline
+    TWITCH_CLIENT_ID: str = ""
+    TWITCH_CLIENT_SECRET: str = ""
+    STREAMERS_WATCH_LIST: str = ""      # comma-separated Twitch logins
+    CLIP_STORAGE_PATH: str = "/clips"
+    NEW_CLIPS_TOPIC: str = "new_clips"
+    PROCESSED_CLIPS_TOPIC: str = "processed_clips"
+
+    # X (Twitter) API — OAuth 1.0a, @TunaStreetTest
+    X_API_KEY: str = ""
+    X_API_SECRET: str = ""
+    X_ACCESS_TOKEN: str = ""
+    X_ACCESS_TOKEN_SECRET: str = ""
+
 
 settings = Settings()

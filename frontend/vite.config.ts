@@ -7,6 +7,9 @@ export default defineConfig({
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") },
   },
+  define: {
+    "import.meta.env.VITE_MODULES": JSON.stringify(process.env.VITE_MODULES ?? ""),
+  },
   server: {
     port: 5173,
     proxy: {

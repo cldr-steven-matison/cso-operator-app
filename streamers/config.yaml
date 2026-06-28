@@ -1,0 +1,50 @@
+name: streamers
+description: >
+  Twitch clip curation pipeline. Fetches top clips from a configured watch list,
+  transcribes audio with Whisper, generates commentary with vLLM, and queues
+  clips for manual review and publish to X (@TunaStreetTest).
+version: "1.0"
+
+flows:
+  - name: FetchClips
+    description: Polls Twitch API every 15 minutes, downloads new clips to PVC, publishes metadata to new_clips topic.
+    source:
+      type: timer
+      interval_min: 15
+    destination:
+      type: kafka
+      topic: new_clips
+
+  - name: ProcessClips
+    description: Consumes new_clips, transcribes via Whisper, generates caption via vLLM, publishes enriched JSON to processed_clips.
+    source:
+      type: kafka
+      topic: new_clips
+    destination:
+      type: kafka
+      topic: processed_clips
+    services_required:
+      - whisper-service
+      - vllm-service
+
+  - name: PublishClip
+    description: Triggered by the Review UI Approve button. Receives clip path + tweet text, uploads media to X, creates tweet.
+    source:
+      type: http
+      path: /contentListener
+      port: 9001
+    destination:
+      type: x_api
+      account: "@TunaStreetTest"
+
+kafka_topics:
+  - name: new_clips
+    partitions: 3
+    retention_ms: 604800000   # 7 days
+  - name: processed_clips
+    partitions: 3
+    retention_ms: 604800000   # 7 days
+
+storage:
+  clip_pvc: clips-storage
+  mount_path: /clips

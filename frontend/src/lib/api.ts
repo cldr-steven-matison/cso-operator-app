@@ -83,6 +83,30 @@ export type PodInfo = {
   owner_name: string;
 };
 
+// ── Streamers module types ──────────────────────────────────────────────────
+
+export type StreamerFlowState = { id: string | null; version: number; state: string };
+export type StreamerFlows = Record<string, StreamerFlowState>;
+
+export type StreamerClip = {
+  clip_id?: string;
+  streamer?: string;
+  title?: string;
+  url?: string;
+  thumbnail_url?: string;
+  duration?: number;
+  created_at?: string;
+  clip_path?: string;
+  transcript?: string;
+  caption?: string;
+  _offset?: number;
+  _partition?: number;
+  _ts?: number;
+};
+
+export type StreamerPublishResult = { ok: boolean; tweet_id: string; url: string };
+export type WatchlistResponse = { logins: string[] };
+
 export type PodSummary = {
   ns: string;
   total: number;
@@ -145,6 +169,17 @@ export const api = {
 
   ingest: (file: File) => uploadFile("/api/ingest", file),
   sampleAudioUrl: "/api/sample-audio",
+
+  // Streamers module
+  streamersFlows: () => jget<StreamerFlows>("/api/streamers/flows"),
+  streamersFlowStart: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/start`),
+  streamersFlowStop: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/stop`),
+  streamersQueue: () => jget<StreamerClip[]>("/api/streamers/queue"),
+  streamersPublish: (clip_path: string, tweet_text: string) =>
+    jpost<StreamerPublishResult>("/api/streamers/publish", { clip_path, tweet_text }),
+  streamersWatchlist: () => jget<WatchlistResponse>("/api/streamers/watchlist"),
+  streamersSetWatchlist: (logins: string[]) =>
+    jpost<WatchlistResponse>("/api/streamers/watchlist", { logins }),
 };
 
 async function uploadFile(url: string, file: File) {

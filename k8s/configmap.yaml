@@ -19,3 +19,9 @@ data:
   KAFKA_BOOTSTRAP: "my-cluster-kafka-bootstrap.cld-streaming.svc:9092"
   TOPIC_AUDIO: "new_audio"
   TOPIC_DOCS: "new_documents"
+  # Streamers module (set MODULES=streamers to activate)
+  MODULES: ""
+  STREAMERS_WATCH_LIST: ""
+  CLIP_STORAGE_PATH: "/clips"
+  NEW_CLIPS_TOPIC: "new_clips"
+  PROCESSED_CLIPS_TOPIC: "processed_clips"

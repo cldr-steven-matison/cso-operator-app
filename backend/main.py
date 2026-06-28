@@ -9,6 +9,8 @@ from fastapi.staticfiles import StaticFiles
 from config import settings
 from routers import efm, health, ingest, k8s, kafka, nifi, qdrant, query
 
+_enabled_modules = [m.strip() for m in settings.MODULES.split(",") if m.strip()]
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -28,6 +30,10 @@ app.add_middleware(
 
 for r in (health.router, query.router, nifi.router, qdrant.router, kafka.router, ingest.router, k8s.router, efm.router):
     app.include_router(r, prefix="/api")
+
+if "streamers" in _enabled_modules:
+    from routers import streamers as _streamers_router
+    app.include_router(_streamers_router.router, prefix="/api")
 
 
 @app.get("/api")

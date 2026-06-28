@@ -1,0 +1,4 @@
+{
+  "_comment": "Placeholder — export the StreamersApp NiFi parent process group here after building flows in NiFi. See cso-operator-app-streamers.md for flow specs.",
+  "flowContents": {}
+}
