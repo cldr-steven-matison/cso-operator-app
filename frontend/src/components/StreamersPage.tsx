@@ -68,7 +68,15 @@ function FlowCard({
 
 // ── ClipCard ───────────────────────────────────────────────────────────────
 
-function ClipCard({ clip, onPublished }: { clip: StreamerClip; onPublished: () => void }) {
+function ClipCard({
+  clip,
+  onPublished,
+  onSkip,
+}: {
+  clip: StreamerClip;
+  onPublished: (offset: number) => void;
+  onSkip: (offset: number) => void;
+}) {
   const [caption, setCaption] = useState(clip.caption ?? "");
   const [commentary, setCommentary] = useState("");
   const [publishing, setPublishing] = useState(false);
@@ -84,7 +92,8 @@ function ClipCard({ clip, onPublished }: { clip: StreamerClip; onPublished: () =
     try {
       const r = await api.streamersPublish(clip.clip_path, tweetText);
       setResult({ ok: true, url: r.url });
-      onPublished();
+      // Brief flash so user sees "Posted" before card disappears
+      setTimeout(() => onPublished(clip._offset ?? -1), 1200);
     } catch (e) {
       setResult({ ok: false, error: String(e) });
     } finally {
@@ -167,11 +176,18 @@ function ClipCard({ clip, onPublished }: { clip: StreamerClip; onPublished: () =
         >
           {publishing ? "Publishing…" : "Approve & Publish"}
         </Button>
+        <Button
+          onClick={() => onSkip(clip._offset ?? -1)}
+          disabled={publishing}
+          className="text-xs opacity-60"
+        >
+          Skip
+        </Button>
         {result && (
           <span className={result.ok ? "text-accent text-xs" : "text-bad text-xs"}>
             {result.ok ? (
               <a href={result.url} target="_blank" rel="noreferrer" className="underline">
-                Posted — view on X
+                Posted — view on X ✓
               </a>
             ) : (
               result.error
@@ -268,6 +284,7 @@ export function StreamersPage() {
   const [flows, setFlows] = useState<StreamerFlows>({});
   const [clips, setClips] = useState<StreamerClip[]>([]);
   const [clipsLoading, setClipsLoading] = useState(true);
+  const [dismissed, setDismissed] = useState<Set<number>>(new Set());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refreshFlows = async () => {
@@ -286,6 +303,9 @@ export function StreamersPage() {
     }
   };
 
+  const dismiss = (offset: number) =>
+    setDismissed((prev) => new Set(prev).add(offset));
+
   useEffect(() => {
     refreshFlows();
     refreshQueue();
@@ -296,6 +316,7 @@ export function StreamersPage() {
   }, []);
 
   const flowNames = ["FetchClips", "ProcessClips", "PublishClip"] as const;
+  const visibleClips = clips.filter((c) => !dismissed.has(c._offset ?? -1));
 
   return (
     <div className="space-y-4">
@@ -327,24 +348,34 @@ export function StreamersPage() {
       {/* ── Section 2: Clip Review Queue ───────────────────────────── */}
       <Card>
         <div className="flex items-center justify-between mb-2">
-          <CardTitle>Clip Review Queue</CardTitle>
+          <CardTitle>
+            Clip Review Queue
+            {visibleClips.length > 0 && (
+              <span className="ml-2 text-xs text-muted font-normal">
+                {visibleClips.length} pending
+              </span>
+            )}
+          </CardTitle>
           <Button className="text-xs" onClick={refreshQueue}>
             Refresh
           </Button>
         </div>
         {clipsLoading ? (
           <p className="text-muted text-sm">Loading queue…</p>
-        ) : clips.length === 0 ? (
+        ) : visibleClips.length === 0 ? (
           <p className="text-muted text-sm">
-            No clips in queue. Start FetchClips and ProcessClips to populate.
+            {clips.length > 0
+              ? "All clips published or skipped."
+              : "No clips in queue. Start FetchClips and ProcessClips to populate."}
           </p>
         ) : (
           <div className="space-y-4">
-            {clips.map((clip, i) => (
+            {visibleClips.map((clip, i) => (
               <ClipCard
                 key={clip._offset ?? i}
                 clip={clip}
-                onPublished={refreshQueue}
+                onPublished={dismiss}
+                onSkip={dismiss}
               />
             ))}
           </div>
