@@ -205,18 +205,29 @@ query VideoAccessToken_Clip($slug: ID!) {
       quality
       sourceURL
     }
+    playbackAccessToken(
+      params: {
+        platform: "web"
+        playerBackend: "mediaplayer"
+        playerType: "site"
+      }
+    ) {
+      signature
+      value
+    }
   }
 }
 """
 
 
 async def _gql_clip_mp4_url(client: httpx.AsyncClient, clip_id: str) -> str | None:
-    """Use Twitch GQL to get the highest-quality direct MP4 URL for a clip.
+    """Use Twitch GQL to get the highest-quality signed MP4 URL for a clip.
 
     The old thumbnail→.mp4 trick stopped working in 2024 when Twitch migrated
-    their clip CDN. GQL returns signed CloudFront sourceURLs that are directly
-    downloadable.
+    clip CDN. GQL returns a playbackAccessToken (sig+value) that must be
+    appended to the CloudFront sourceURL as query params.
     """
+    from urllib.parse import quote
     try:
         r = await client.post(
             "https://gql.twitch.tv/gql",
@@ -226,11 +237,16 @@ async def _gql_clip_mp4_url(client: httpx.AsyncClient, clip_id: str) -> str | No
         )
         if r.status_code != 200:
             return None
-        qualities = r.json()["data"]["clip"]["videoQualities"]
-        if not qualities:
+        clip = r.json()["data"]["clip"]
+        qualities = clip.get("videoQualities", [])
+        token = clip.get("playbackAccessToken", {})
+        if not qualities or not token:
             return None
-        # First entry is highest quality
-        return qualities[0]["sourceURL"]
+        sig = token["signature"]
+        tok = token["value"]
+        # sourceURL requires sig+token to authenticate against CloudFront
+        source_url = qualities[0]["sourceURL"]
+        return f"{source_url}?sig={sig}&token={quote(tok)}"
     except Exception:
         return None
 
