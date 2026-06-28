@@ -107,6 +107,30 @@ export type StreamerClip = {
 export type StreamerPublishResult = { ok: boolean; tweet_id: string; url: string };
 export type WatchlistResponse = { logins: string[] };
 
+export type TopicRecord = {
+  offset: number;
+  streamer: string;
+  title: string;
+  clip_id: string;
+  caption: string;
+  has_file: boolean;
+};
+export type TopicStats = {
+  count: number;
+  records: TopicRecord[];
+  error?: string;
+};
+export type StreamerTopics = {
+  new_clips: TopicStats;
+  processed_clips: TopicStats;
+};
+export type KafkaResetResult = {
+  deleted_topics: string[];
+  removed_clips: number;
+  seen_clips_reset: boolean;
+  errors: string[];
+};
+
 export type PodSummary = {
   ns: string;
   total: number;
@@ -180,6 +204,8 @@ export const api = {
   streamersWatchlist: () => jget<WatchlistResponse>("/api/streamers/watchlist"),
   streamersSetWatchlist: (logins: string[]) =>
     jpost<WatchlistResponse>("/api/streamers/watchlist", { logins }),
+  streamersTopics: () => jget<StreamerTopics>("/api/streamers/topics"),
+  streamersReset: () => jpost<KafkaResetResult>("/api/streamers/reset"),
 };
 
 async function uploadFile(url: string, file: File) {

@@ -7,12 +7,15 @@ X publishing is called directly from the Review UI Approve button.
 """
 
 import asyncio
+import glob
 import json
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import httpx
+from aiokafka import AIOKafkaConsumer, TopicPartition
+from aiokafka.admin import AIOKafkaAdminClient
 
 from config import settings
 
@@ -500,3 +503,109 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
 
 async def publish_clip(clip_path: str, tweet_text: str) -> dict:
     return await asyncio.to_thread(_publish_sync, clip_path, tweet_text)
+
+
+# ── Topic stats ───────────────────────────────────────────────────────────────
+
+async def topic_stats() -> dict:
+    """Return message count and sample records for new_clips and processed_clips."""
+    topics = {
+        "new_clips": settings.NEW_CLIPS_TOPIC,
+        "processed_clips": settings.PROCESSED_CLIPS_TOPIC,
+    }
+    result = {}
+    for key, topic in topics.items():
+        consumer = AIOKafkaConsumer(
+            bootstrap_servers=settings.KAFKA_BOOTSTRAP,
+            enable_auto_commit=False,
+        )
+        try:
+            await asyncio.wait_for(consumer.start(), timeout=8.0)
+            tp = TopicPartition(topic, 0)
+            consumer.assign([tp])
+            begin_map = await asyncio.wait_for(consumer.beginning_offsets([tp]), timeout=5.0)
+            end_map = await asyncio.wait_for(consumer.end_offsets([tp]), timeout=5.0)
+            begin = begin_map.get(tp, 0)
+            end = end_map.get(tp, 0)
+            count = max(0, end - begin)
+
+            # Peek last 5 records
+            records = []
+            if count > 0:
+                consumer.seek(tp, max(begin, end - 5))
+                batch = await asyncio.wait_for(
+                    consumer.getmany(tp, timeout_ms=3000, max_records=5),
+                    timeout=8.0,
+                )
+                for msg in batch.get(tp, []):
+                    try:
+                        rec = json.loads(msg.value.decode("utf-8"))
+                        records.append({
+                            "offset": msg.offset,
+                            "streamer": rec.get("streamer", ""),
+                            "title": rec.get("title", ""),
+                            "clip_id": rec.get("clip_id", ""),
+                            "caption": rec.get("caption", ""),
+                            "has_file": bool(rec.get("clip_path") and Path(rec["clip_path"]).exists()),
+                        })
+                    except Exception:
+                        pass
+            result[key] = {"count": count, "records": records}
+        except Exception as e:
+            result[key] = {"count": 0, "records": [], "error": str(e)}
+        finally:
+            try:
+                await asyncio.wait_for(consumer.stop(), timeout=5.0)
+            except Exception:
+                pass
+    return result
+
+
+# ── Kafka reset ───────────────────────────────────────────────────────────────
+
+async def reset_kafka() -> dict:
+    """Delete new-clips and processed-clips KafkaTopic CRDs (Strimzi recreates
+    them empty when data next arrives) and wipe the /clips directory."""
+    import kubernetes_asyncio.client as k8s_client
+    import kubernetes_asyncio.config as k8s_config
+    from kubernetes_asyncio.client.rest import ApiException
+
+    # Clear clips on disk
+    storage = Path(settings.CLIP_STORAGE_PATH)
+    removed_files = 0
+    for mp4 in glob.glob(str(storage / "*.mp4")):
+        Path(mp4).unlink(missing_ok=True)
+        removed_files += 1
+    seen = storage / ".seen_clips.json"
+    seen.write_text("[]")
+
+    # Delete KafkaTopic CRDs — Strimzi deletes the actual topics
+    deleted = []
+    errors = []
+    try:
+        k8s_config.load_incluster_config()
+        api = k8s_client.CustomObjectsApi()
+        for name in ("new-clips", "processed-clips"):
+            try:
+                await api.delete_namespaced_custom_object(
+                    group="kafka.strimzi.io",
+                    version="v1beta2",
+                    namespace="cld-streaming",
+                    plural="kafkatopics",
+                    name=name,
+                )
+                deleted.append(name)
+            except ApiException as e:
+                if e.status == 404:
+                    deleted.append(f"{name} (already gone)")
+                else:
+                    errors.append(f"{name}: {e.reason}")
+    except Exception as e:
+        errors.append(str(e))
+
+    return {
+        "deleted_topics": deleted,
+        "removed_clips": removed_files,
+        "seen_clips_reset": True,
+        "errors": errors,
+    }

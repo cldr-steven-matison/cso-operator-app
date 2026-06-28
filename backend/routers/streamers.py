@@ -84,6 +84,22 @@ async def process_clip(request: Request):
     return result
 
 
+# ── Topic stats ──────────────────────────────────────────────────────────────
+
+@router.get("/topics")
+async def topic_stats():
+    """Message counts and sample records for new_clips and processed_clips."""
+    return await streamers.topic_stats()
+
+
+# ── Kafka reset ───────────────────────────────────────────────────────────────
+
+@router.post("/reset")
+async def reset_kafka():
+    """Delete Strimzi KafkaTopic CRDs and wipe /clips. Topics auto-recreate on next fetch."""
+    return await streamers.reset_kafka()
+
+
 # ── Watch list ────────────────────────────────────────────────────────────────
 
 @router.get("/watchlist")

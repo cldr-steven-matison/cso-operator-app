@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
-import { api, type StreamerClip, type StreamerFlows } from "@/lib/api";
+import { api, type StreamerClip, type StreamerFlows, type StreamerTopics } from "@/lib/api";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -211,6 +211,47 @@ function ClipCard({
   );
 }
 
+// ── TopicPanel ─────────────────────────────────────────────────────────────
+
+function TopicPanel({ label, stats }: { label: string; stats?: StreamerTopics["new_clips"] }) {
+  if (!stats) return (
+    <div className="border border-border rounded p-3 text-xs text-muted">Loading {label}…</div>
+  );
+  return (
+    <div className="border border-border rounded p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-text">{label}</span>
+        <span className="text-xs text-muted">{stats.count} message{stats.count !== 1 ? "s" : ""}</span>
+      </div>
+      {stats.error && <p className="text-xs text-bad">{stats.error}</p>}
+      {stats.records.length === 0 ? (
+        <p className="text-xs text-muted italic">empty</p>
+      ) : (
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-muted border-b border-border">
+              <th className="text-left py-1 pr-2">off</th>
+              <th className="text-left py-1 pr-2">streamer</th>
+              <th className="text-left py-1 pr-2">title</th>
+              <th className="text-left py-1">file</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.records.map((r) => (
+              <tr key={r.offset} className="border-b border-border last:border-0">
+                <td className="py-1 pr-2 text-muted">{r.offset}</td>
+                <td className="py-1 pr-2">{r.streamer || "—"}</td>
+                <td className="py-1 pr-2 truncate max-w-[180px]">{r.title || r.clip_id || "—"}</td>
+                <td className="py-1">{r.has_file ? "✓" : <span className="text-bad">✗</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 // ── WatchList ──────────────────────────────────────────────────────────────
 
 function WatchList() {
@@ -297,6 +338,10 @@ export function StreamersPage() {
   const [clips, setClips] = useState<StreamerClip[]>([]);
   const [clipsLoading, setClipsLoading] = useState(true);
   const [dismissed, setDismissed] = useState<Set<number>>(new Set());
+  const [topics, setTopics] = useState<StreamerTopics | null>(null);
+  const [topicsLoading, setTopicsLoading] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetResult, setResetResult] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refreshFlows = async () => {
@@ -307,12 +352,38 @@ export function StreamersPage() {
   };
 
   const refreshQueue = async () => {
-    setDismissed(new Set()); // clear dismiss state so reused Kafka offsets show up
+    setDismissed(new Set());
     try {
       const q = await api.streamersQueue();
       setClips(q);
     } catch {} finally {
       setClipsLoading(false);
+    }
+  };
+
+  const refreshTopics = async () => {
+    setTopicsLoading(true);
+    try {
+      setTopics(await api.streamersTopics());
+    } catch {} finally {
+      setTopicsLoading(false);
+    }
+  };
+
+  const doReset = async () => {
+    if (!confirm("Wipe both Kafka topics and all downloaded clips?")) return;
+    setResetting(true);
+    setResetResult(null);
+    try {
+      const r = await api.streamersReset();
+      const errs = r.errors?.length ? ` Errors: ${r.errors.join(", ")}` : "";
+      setResetResult(`Deleted: ${r.deleted_topics.join(", ")} | Clips removed: ${r.removed_clips}${errs}`);
+      await refreshQueue();
+      await refreshTopics();
+    } catch (e) {
+      setResetResult(`Error: ${String(e)}`);
+    } finally {
+      setResetting(false);
     }
   };
 
@@ -322,6 +393,7 @@ export function StreamersPage() {
   useEffect(() => {
     refreshFlows();
     refreshQueue();
+    refreshTopics();
     pollRef.current = setInterval(refreshFlows, 5000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
@@ -358,7 +430,35 @@ export function StreamersPage() {
         </div>
       </Card>
 
-      {/* ── Section 2: Clip Review Queue ───────────────────────────── */}
+      {/* ── Section 2: Kafka Topics ────────────────────────────────── */}
+      <Card>
+        <div className="flex items-center justify-between mb-3">
+          <CardTitle>Kafka Topics</CardTitle>
+          <div className="flex items-center gap-2">
+            <Button className="text-xs" onClick={refreshTopics} disabled={topicsLoading}>
+              {topicsLoading ? "Loading…" : "Refresh"}
+            </Button>
+            <Button
+              className="text-xs bg-bad text-white hover:opacity-80"
+              onClick={doReset}
+              disabled={resetting}
+            >
+              {resetting ? "Resetting…" : "Reset Kafka"}
+            </Button>
+          </div>
+        </div>
+        {resetResult && (
+          <p className={`text-xs mb-3 ${resetResult.startsWith("Error") ? "text-bad" : "text-accent"}`}>
+            {resetResult}
+          </p>
+        )}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <TopicPanel label="new_clips" stats={topics?.new_clips} />
+          <TopicPanel label="processed_clips" stats={topics?.processed_clips} />
+        </div>
+      </Card>
+
+      {/* ── Section 3: Clip Review Queue ───────────────────────────── */}
       <Card>
         <div className="flex items-center justify-between mb-2">
           <CardTitle>
