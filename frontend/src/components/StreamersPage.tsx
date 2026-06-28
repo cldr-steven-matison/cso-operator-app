@@ -7,13 +7,6 @@ import { api, type StreamerClip, type StreamerFlows } from "@/lib/api";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-function stateColor(state: string): string {
-  if (state === "RUNNING") return "text-accent";
-  if (state === "STOPPED") return "text-muted";
-  if (state === "NOT_INSTALLED") return "text-bad";
-  return "text-warn";
-}
-
 function stateTone(state: string): "ok" | "bad" | "warn" | "neutral" {
   if (state === "RUNNING") return "ok";
   if (state === "NOT_INSTALLED") return "bad";

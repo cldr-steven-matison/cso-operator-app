@@ -56,6 +56,31 @@ async def publish(body: PublishRequest):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+# ── NiFi-callable pipeline endpoints ─────────────────────────────────────────
+# These are called by the FetchClips and ProcessClips NiFi flows.
+
+@router.post("/fetch-clips")
+async def fetch_clips():
+    """Poll Twitch for new clips, download to PVC, publish metadata to new_clips.
+    Called by the FetchClips NiFi GenerateFlowFile → InvokeHTTP flow every 15 min."""
+    result = await streamers.fetch_clips()
+    return result
+
+
+@router.post("/process-clip")
+async def process_clip(request: Request):
+    """Receive clip metadata JSON from NiFi (new_clips topic), run Whisper + vLLM,
+    return enriched JSON. Called by the ProcessClips NiFi ConsumeKafka → InvokeHTTP flow."""
+    body = await request.body()
+    try:
+        import json
+        clip = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON clip metadata")
+    result = await streamers.process_clip(clip)
+    return result
+
+
 # ── Watch list ────────────────────────────────────────────────────────────────
 
 @router.get("/watchlist")

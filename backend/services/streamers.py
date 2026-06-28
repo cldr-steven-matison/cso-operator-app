@@ -1,12 +1,15 @@
 """Streamers module — Twitch clip pipeline backend services.
 
-NiFi flow control reuses the auth helpers from services.nifi (same NiFi cluster,
-same credentials). Clip queue reads from the processed_clips Kafka topic.
-X publishing uses tweepy wrapped in asyncio.to_thread.
+NiFi flows (FetchClips, ProcessClips) call back into this backend via HTTP so
+the heavy lifting (Twitch API, file I/O, Whisper, vLLM, Kafka publish) stays
+in Python. NiFi handles scheduling, Kafka consume/publish, and flow routing.
+X publishing is called directly from the Review UI Approve button.
 """
 
 import asyncio
 import json
+import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import httpx
@@ -16,6 +19,8 @@ from config import settings
 STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClip")
 
 _watchlist: list[str] = []
+_twitch_token: str = ""
+_twitch_token_expires: float = 0.0
 
 
 def _init_watchlist():
@@ -35,7 +40,7 @@ def set_watchlist(logins: list[str]):
     _watchlist = [l.strip() for l in logins if l.strip()]
 
 
-# ── NiFi helpers for streamer PGs ─────────────────────────────────────────────
+# ── NiFi flow control ─────────────────────────────────────────────────────────
 
 async def _children(client: httpx.AsyncClient, group_id: str) -> list[dict]:
     from services.nifi import _get
@@ -120,7 +125,7 @@ async def flow_set_state(client: httpx.AsyncClient, name: str, running: bool) ->
         raise ValueError(f"Unknown streamer flow '{name}'")
     groups = await _resolve_streamer_groups(client)
     if name not in groups:
-        raise ValueError(f"Flow '{name}' not yet installed — import StreamersApp.json into NiFi first")
+        raise ValueError(f"Flow '{name}' not yet installed — run scripts/setup-streamers-flows.py first")
     pg = groups[name]
     body = {
         "id": pg["id"],
@@ -128,6 +133,210 @@ async def flow_set_state(client: httpx.AsyncClient, name: str, running: bool) ->
         "disconnectedNodeAcknowledged": False,
     }
     return await _put(client, f"/flow/process-groups/{pg['id']}", body)
+
+
+# ── Twitch API ────────────────────────────────────────────────────────────────
+
+async def _twitch_token_refresh(client: httpx.AsyncClient) -> str:
+    global _twitch_token, _twitch_token_expires
+    if _twitch_token and time.time() < _twitch_token_expires - 60:
+        return _twitch_token
+    if not (settings.TWITCH_CLIENT_ID and settings.TWITCH_CLIENT_SECRET):
+        raise RuntimeError("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET not configured")
+    r = await client.post(
+        "https://id.twitch.tv/oauth2/token",
+        params={
+            "client_id": settings.TWITCH_CLIENT_ID,
+            "client_secret": settings.TWITCH_CLIENT_SECRET,
+            "grant_type": "client_credentials",
+        },
+        timeout=10.0,
+    )
+    r.raise_for_status()
+    data = r.json()
+    _twitch_token = data["access_token"]
+    _twitch_token_expires = time.time() + data.get("expires_in", 3600)
+    return _twitch_token
+
+
+def _twitch_headers(token: str) -> dict:
+    return {
+        "Client-ID": settings.TWITCH_CLIENT_ID,
+        "Authorization": f"Bearer {token}",
+    }
+
+
+async def _get_broadcaster_id(client: httpx.AsyncClient, token: str, login: str) -> str | None:
+    r = await client.get(
+        "https://api.twitch.tv/helix/users",
+        params={"login": login},
+        headers=_twitch_headers(token),
+        timeout=10.0,
+    )
+    if r.status_code != 200:
+        return None
+    data = r.json().get("data", [])
+    return data[0]["id"] if data else None
+
+
+async def _get_clips(client: httpx.AsyncClient, token: str, broadcaster_id: str, since: datetime) -> list[dict]:
+    r = await client.get(
+        "https://api.twitch.tv/helix/clips",
+        params={
+            "broadcaster_id": broadcaster_id,
+            "first": "5",
+            "started_at": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        headers=_twitch_headers(token),
+        timeout=10.0,
+    )
+    if r.status_code != 200:
+        return []
+    return r.json().get("data", [])
+
+
+async def _download_clip(client: httpx.AsyncClient, mp4_url: str, dest: Path) -> bool:
+    try:
+        async with client.stream("GET", mp4_url, timeout=60.0) as r:
+            r.raise_for_status()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with open(dest, "wb") as f:
+                async for chunk in r.aiter_bytes(65536):
+                    f.write(chunk)
+        return True
+    except Exception:
+        return False
+
+
+async def fetch_clips() -> dict:
+    """Poll Twitch for clips from the watch list, download to PVC, publish to new_clips."""
+    logins = get_watchlist()
+    if not logins:
+        return {"fetched": 0, "clips": [], "error": "Watch list is empty"}
+
+    clip_dir = Path(settings.CLIP_STORAGE_PATH)
+    seen_file = clip_dir / ".seen_clips.json"
+    seen: set[str] = set()
+    if seen_file.exists():
+        try:
+            seen = set(json.loads(seen_file.read_text()))
+        except Exception:
+            pass
+
+    since = datetime.now(timezone.utc) - timedelta(hours=1)
+    fetched: list[dict] = []
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        token = await _twitch_token_refresh(client)
+
+        for login in logins:
+            broadcaster_id = await _get_broadcaster_id(client, token, login)
+            if not broadcaster_id:
+                continue
+            clips = await _get_clips(client, token, broadcaster_id, since)
+            for clip in clips:
+                clip_id = clip.get("id", "")
+                if not clip_id or clip_id in seen:
+                    continue
+
+                # Get direct MP4 URL from thumbnail (Twitch thumbnail → clip download URL pattern)
+                thumb = clip.get("thumbnail_url", "")
+                mp4_url = thumb.replace("-preview-480x272.jpg", ".mp4") if thumb else ""
+                if not mp4_url:
+                    continue
+
+                dest = clip_dir / f"{clip_id}.mp4"
+                if not dest.exists():
+                    ok = await _download_clip(client, mp4_url, dest)
+                    if not ok:
+                        continue
+
+                metadata = {
+                    "clip_id": clip_id,
+                    "streamer": login,
+                    "broadcaster_id": broadcaster_id,
+                    "title": clip.get("title", ""),
+                    "url": clip.get("url", ""),
+                    "thumbnail_url": thumb,
+                    "duration": clip.get("duration", 0),
+                    "created_at": clip.get("created_at", ""),
+                    "clip_path": str(dest),
+                    "view_count": clip.get("view_count", 0),
+                }
+                fetched.append(metadata)
+                seen.add(clip_id)
+
+    # Publish to new_clips Kafka topic
+    if fetched:
+        await _publish_clips_to_kafka(fetched)
+        seen_file.write_text(json.dumps(list(seen)))
+
+    return {"fetched": len(fetched), "clips": [c["clip_id"] for c in fetched]}
+
+
+async def _publish_clips_to_kafka(clips: list[dict]):
+    from aiokafka import AIOKafkaProducer
+    producer = AIOKafkaProducer(bootstrap_servers=settings.KAFKA_BOOTSTRAP)
+    await producer.start()
+    try:
+        for clip in clips:
+            await producer.send(
+                settings.NEW_CLIPS_TOPIC,
+                json.dumps(clip).encode("utf-8"),
+            )
+        await producer.flush()
+    finally:
+        await producer.stop()
+
+
+# ── ProcessClip — Whisper + vLLM ──────────────────────────────────────────────
+
+async def process_clip(clip: dict) -> dict:
+    """Transcribe clip audio with Whisper, generate caption with vLLM.
+    Returns enriched clip dict ready to publish to processed_clips."""
+    clip_path = clip.get("clip_path", "")
+    if not clip_path or not Path(clip_path).exists():
+        return {**clip, "transcript": "", "caption": "", "error": f"File not found: {clip_path}"}
+
+    async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
+        # Whisper transcription
+        transcript = ""
+        try:
+            with open(clip_path, "rb") as f:
+                r = await client.post(
+                    f"{settings.WHISPER_URL}/transcribe",
+                    files={"file": (Path(clip_path).name, f, "video/mp4")},
+                )
+            if r.status_code == 200:
+                transcript = r.json().get("text", "")
+        except Exception as e:
+            transcript = f"[transcription error: {e}]"
+
+        # vLLM caption generation
+        caption = ""
+        if transcript and not transcript.startswith("["):
+            try:
+                prompt = (
+                    f"You are a social media editor for a gaming clip account. "
+                    f"Write one punchy, witty sentence (max 100 chars) reacting to this Twitch clip transcript. "
+                    f"Clip: '{clip.get('title', '')}' by {clip.get('streamer', 'unknown')}. "
+                    f"Transcript: {transcript[:500]}"
+                )
+                r = await client.post(
+                    f"{settings.VLLM_URL}/v1/chat/completions",
+                    json={
+                        "model": settings.VLLM_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 100,
+                        "temperature": 0.8,
+                    },
+                )
+                if r.status_code == 200:
+                    caption = r.json()["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                caption = f"[caption error: {e}]"
+
+    return {**clip, "transcript": transcript, "caption": caption}
 
 
 # ── Clip queue ────────────────────────────────────────────────────────────────
@@ -148,22 +357,24 @@ async def clip_queue(limit: int = 20) -> list[dict]:
         await consumer.start()
         try:
             await consumer.subscribe([topic])
-            await consumer.seek_to_end()
+            # Give it a moment to assign partitions
+            await asyncio.sleep(0.5)
             partitions = consumer.assignment()
-            end_offsets = await consumer.end_offsets(list(partitions))
-            for tp in partitions:
-                end = end_offsets[tp]
-                start = max(0, end - limit)
-                consumer.seek(tp, start)
-            async for msg in consumer:
-                try:
-                    record = json.loads(msg.value.decode("utf-8"))
-                    record["_offset"] = msg.offset
-                    record["_partition"] = msg.partition
-                    record["_ts"] = msg.timestamp
-                    clips.append(record)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    pass
+            if partitions:
+                end_offsets = await consumer.end_offsets(list(partitions))
+                for tp in partitions:
+                    end = end_offsets[tp]
+                    start = max(0, end - limit)
+                    consumer.seek(tp, start)
+                async for msg in consumer:
+                    try:
+                        record = json.loads(msg.value.decode("utf-8"))
+                        record["_offset"] = msg.offset
+                        record["_partition"] = msg.partition
+                        record["_ts"] = msg.timestamp
+                        clips.append(record)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        pass
         finally:
             await consumer.stop()
     except Exception:

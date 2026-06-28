@@ -19,6 +19,7 @@ dist/
 # Compiled JS emitted by tsc -b (we use noEmit; this is a belt + suspenders)
 frontend/src/**/*.js
 frontend/src/**/*.d.ts
+!frontend/src/vite-env.d.ts
 frontend/vite.config.js
 frontend/vite.config.d.ts
 

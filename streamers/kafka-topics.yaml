@@ -1,0 +1,32 @@
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: new-clips
+  namespace: cld-streaming
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  topicName: new_clips
+  partitions: 3
+  replicas: 3
+  config:
+    retention.ms: "604800000"   # 7 days
+    cleanup.policy: delete
+    min.insync.replicas: "2"
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: processed-clips
+  namespace: cld-streaming
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  topicName: processed_clips
+  partitions: 3
+  replicas: 3
+  config:
+    retention.ms: "604800000"   # 7 days
+    cleanup.policy: delete
+    min.insync.replicas: "2"
