@@ -110,6 +110,7 @@ export type WatchlistResponse = { logins: string[] };
 
 export type TopicRecord = {
   offset: number;
+  source?: string;
   streamer: string;
   title: string;
   clip_id: string;
