@@ -375,9 +375,12 @@ export function StreamersPage() {
     try {
       const r = await api.streamersReset();
       const errs = r.errors?.length ? ` Errors: ${r.errors.join(", ")}` : "";
-      setResetResult(`Deleted: ${r.deleted_topics.join(", ")} | Clips removed: ${r.removed_clips}${errs}`);
+      setResetResult(`Deleted: ${r.deleted_topics.join(", ")} | Clips removed: ${r.removed_clips}${errs} — waiting for Kafka…`);
+      // Give Strimzi ~4s to actually remove the topics before querying
+      await new Promise((res) => setTimeout(res, 4000));
       await refreshQueue();
       await refreshTopics();
+      setResetResult(`Done — topics cleared, ${r.removed_clips} clips removed.`);
     } catch (e) {
       setResetResult(`Error: ${String(e)}`);
     } finally {
