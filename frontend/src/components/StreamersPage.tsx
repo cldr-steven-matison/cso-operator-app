@@ -246,6 +246,7 @@ function TopicPanel({ label, stats }: { label: string; stats?: StreamerTopics["n
           <thead>
             <tr className="text-muted border-b border-border">
               <th className="text-left py-1 pr-2">off</th>
+              <th className="text-left py-1 pr-2">src</th>
               <th className="text-left py-1 pr-2">streamer</th>
               <th className="text-left py-1 pr-2">title</th>
               <th className="text-left py-1">file</th>
@@ -255,6 +256,7 @@ function TopicPanel({ label, stats }: { label: string; stats?: StreamerTopics["n
             {stats.records.map((r) => (
               <tr key={r.offset} className="border-b border-border last:border-0">
                 <td className="py-1 pr-2 text-muted">{r.offset}</td>
+                <td className="py-1 pr-2"><PlatformBadge platform={(r.source ?? "twitch") as "twitch" | "kick"} /></td>
                 <td className="py-1 pr-2">{r.streamer || "—"}</td>
                 <td className="py-1 pr-2 truncate max-w-[180px]">{r.title || r.clip_id || "—"}</td>
                 <td className="py-1">{r.has_file ? "✓" : <span className="text-bad">✗</span>}</td>

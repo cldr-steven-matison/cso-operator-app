@@ -881,6 +881,7 @@ async def _fetch_one_topic_stats(topic: str) -> dict:
                     rec = json.loads(msg.value.decode("utf-8"))
                     records.append({
                         "offset": msg.offset,
+                        "source": rec.get("source", "twitch"),
                         "streamer": rec.get("streamer", ""),
                         "title": rec.get("title", ""),
                         "clip_id": rec.get("clip_id", ""),
