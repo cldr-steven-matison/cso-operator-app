@@ -256,7 +256,7 @@
             "yieldDuration": "1 sec",
             "bulletinLevel": "WARN",
             "runDurationMillis": 0,
-            "concurrentlySchedulableTaskCount": 1,
+            "concurrentlySchedulableTaskCount": 3,
             "autoTerminatedRelationships": [
               "success",
               "failure"
@@ -798,7 +798,7 @@
             "yieldDuration": "1 sec",
             "bulletinLevel": "WARN",
             "runDurationMillis": 0,
-            "concurrentlySchedulableTaskCount": 1,
+            "concurrentlySchedulableTaskCount": 3,
             "autoTerminatedRelationships": [
               "No Retry",
               "Retry",
