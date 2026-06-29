@@ -1,6 +1,11 @@
+import re
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from config import settings
 from services import streamers
 
 router = APIRouter(prefix="/streamers")
@@ -43,6 +48,7 @@ async def clip_queue():
 class PublishRequest(BaseModel):
     clip_path: str
     tweet_text: str
+    clip_id: str = ""
 
 
 @router.post("/publish")
@@ -54,9 +60,37 @@ async def publish(body: PublishRequest):
     if not os.path.exists(body.clip_path):
         raise HTTPException(status_code=404, detail=f"Clip file not found: {body.clip_path} — re-fetch clips first")
     try:
-        return await streamers.publish_clip(body.clip_path, body.tweet_text)
+        return await streamers.publish_clip(body.clip_path, body.tweet_text, body.clip_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+# ── Skip ──────────────────────────────────────────────────────────────────────
+
+class SkipRequest(BaseModel):
+    clip_id: str
+
+
+@router.post("/skip")
+async def skip_clip(body: SkipRequest):
+    """Mark a clip as skipped so it no longer appears in the review queue."""
+    if not body.clip_id:
+        raise HTTPException(status_code=400, detail="clip_id required")
+    streamers.mark_skipped(body.clip_id)
+    return {"ok": True, "clip_id": body.clip_id}
+
+
+# ── Clip video file serve ─────────────────────────────────────────────────────
+
+@router.get("/clip/{clip_id}")
+async def serve_clip(clip_id: str):
+    """Stream the MP4 file for a clip. Used by the frontend video player."""
+    if not re.match(r'^[A-Za-z0-9_\-]+$', clip_id):
+        raise HTTPException(status_code=400, detail="Invalid clip_id")
+    path = Path(settings.CLIP_STORAGE_PATH) / f"{clip_id}.mp4"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Clip not found on disk")
+    return FileResponse(path, media_type="video/mp4")
 
 
 # ── NiFi-callable pipeline endpoints ─────────────────────────────────────────

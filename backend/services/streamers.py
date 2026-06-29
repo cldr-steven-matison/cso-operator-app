@@ -25,6 +25,16 @@ _watchlist: list[str] = []
 _twitch_token: str = ""
 _twitch_token_expires: float = 0.0
 
+# NiFi group-ID cache — BFS is expensive; group IDs don't change until a re-import
+_pg_cache: dict[str, dict] = {}
+_pg_cache_ts: float = 0.0
+_PG_CACHE_TTL = 300.0
+
+# topic_stats cache — Kafka consumer lifecycle is ~10s per topic; avoid per-request
+_topic_stats_cache: dict = {}
+_topic_stats_ts: float = 0.0
+_TOPIC_STATS_TTL = 30.0
+
 
 def _init_watchlist():
     global _watchlist
@@ -52,6 +62,11 @@ async def _children(client: httpx.AsyncClient, group_id: str) -> list[dict]:
 
 
 async def _resolve_streamer_groups(client: httpx.AsyncClient) -> dict[str, dict]:
+    global _pg_cache, _pg_cache_ts
+    now = time.time()
+    if _pg_cache and now < _pg_cache_ts + _PG_CACHE_TTL:
+        return _pg_cache
+
     out: dict[str, dict] = {}
     queue: list[tuple[str, int]] = [("root", 0)]
     visited: set[str] = set()
@@ -74,6 +89,10 @@ async def _resolve_streamer_groups(client: httpx.AsyncClient) -> dict[str, dict]
             queue.append((pg["id"], depth + 1))
         if len(out) == len(STREAMER_PG_NAMES):
             break
+
+    if out:  # only cache on success; retry immediately if NiFi was unreachable
+        _pg_cache = out
+        _pg_cache_ts = now
     return out
 
 
@@ -282,6 +301,50 @@ async def _download_clip(client: httpx.AsyncClient, url: str, dest: Path) -> boo
         return False
 
 
+# ── Skip / publish persistence ────────────────────────────────────────────────
+
+def _load_id_set(path: Path) -> set[str]:
+    if path.exists():
+        try:
+            return set(json.loads(path.read_text()))
+        except Exception:
+            pass
+    return set()
+
+
+def _save_id_set(path: Path, ids: set[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sorted(ids)))
+
+
+def _skipped_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".skipped.json"
+
+
+def _published_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".published.json"
+
+
+def mark_skipped(clip_id: str) -> None:
+    ids = _load_id_set(_skipped_path())
+    ids.add(clip_id)
+    _save_id_set(_skipped_path(), ids)
+
+
+def mark_published(clip_id: str) -> None:
+    ids = _load_id_set(_published_path())
+    ids.add(clip_id)
+    _save_id_set(_published_path(), ids)
+
+
+def get_skipped() -> set[str]:
+    return _load_id_set(_skipped_path())
+
+
+def get_published() -> set[str]:
+    return _load_id_set(_published_path())
+
+
 async def fetch_clips() -> dict:
     """Poll Twitch for clips from the watch list, download to PVC, publish to new_clips."""
     logins = get_watchlist()
@@ -312,7 +375,7 @@ async def fetch_clips() -> dict:
             clips = await _get_clips(client, token, broadcaster_id, since)
             per_streamer = 0
             for clip in clips:
-                if per_streamer >= 3:
+                if per_streamer >= 2:
                     break
                 clip_id = clip.get("id", "")
                 if not clip_id or clip_id in seen:
@@ -455,13 +518,17 @@ async def clip_queue(limit: int = 20) -> list[dict]:
             consumer.getmany(tp, timeout_ms=5000, max_records=limit),
             timeout=10.0,
         )
+        skipped = get_skipped()
+        published = get_published()
         for msg in batch.get(tp, []):
             try:
                 record = json.loads(msg.value.decode("utf-8"))
-                # Only surface clips whose file is on disk — skip anything
-                # still downloading or where the path is stale
+                clip_id = record.get("clip_id", "")
+                # Filter: missing file, already skipped, or already published
                 clip_path = record.get("clip_path", "")
                 if not clip_path or not Path(clip_path).exists():
+                    continue
+                if clip_id in skipped or clip_id in published:
                     continue
                 record["_offset"] = msg.offset
                 record["_partition"] = msg.partition
@@ -516,63 +583,86 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     }
 
 
-async def publish_clip(clip_path: str, tweet_text: str) -> dict:
-    return await asyncio.to_thread(_publish_sync, clip_path, tweet_text)
+async def publish_clip(clip_path: str, tweet_text: str, clip_id: str = "") -> dict:
+    result = await asyncio.to_thread(_publish_sync, clip_path, tweet_text)
+    if result.get("ok") and clip_id:
+        mark_published(clip_id)
+    return result
 
 
 # ── Topic stats ───────────────────────────────────────────────────────────────
 
-async def topic_stats() -> dict:
-    """Return message count and sample records for new_clips and processed_clips."""
-    topics = {
-        "new_clips": settings.NEW_CLIPS_TOPIC,
-        "processed_clips": settings.PROCESSED_CLIPS_TOPIC,
-    }
-    result = {}
-    for key, topic in topics.items():
-        consumer = AIOKafkaConsumer(
-            bootstrap_servers=settings.KAFKA_BOOTSTRAP,
-            enable_auto_commit=False,
-        )
-        try:
-            await asyncio.wait_for(consumer.start(), timeout=8.0)
-            tp = TopicPartition(topic, 0)
-            consumer.assign([tp])
-            begin_map = await asyncio.wait_for(consumer.beginning_offsets([tp]), timeout=5.0)
-            end_map = await asyncio.wait_for(consumer.end_offsets([tp]), timeout=5.0)
-            begin = begin_map.get(tp, 0)
-            end = end_map.get(tp, 0)
-            count = max(0, end - begin)
+async def _fetch_one_topic_stats(topic: str) -> dict:
+    consumer = AIOKafkaConsumer(
+        bootstrap_servers=settings.KAFKA_BOOTSTRAP,
+        enable_auto_commit=False,
+    )
+    try:
+        await asyncio.wait_for(consumer.start(), timeout=8.0)
+        tp = TopicPartition(topic, 0)
+        consumer.assign([tp])
+        begin_map = await asyncio.wait_for(consumer.beginning_offsets([tp]), timeout=5.0)
+        end_map = await asyncio.wait_for(consumer.end_offsets([tp]), timeout=5.0)
+        begin = begin_map.get(tp, 0)
+        end = end_map.get(tp, 0)
+        count = max(0, end - begin)
 
-            # Peek last 5 records
-            records = []
-            if count > 0:
-                consumer.seek(tp, max(begin, end - 5))
-                batch = await asyncio.wait_for(
-                    consumer.getmany(tp, timeout_ms=3000, max_records=5),
-                    timeout=8.0,
-                )
-                for msg in batch.get(tp, []):
-                    try:
-                        rec = json.loads(msg.value.decode("utf-8"))
-                        records.append({
-                            "offset": msg.offset,
-                            "streamer": rec.get("streamer", ""),
-                            "title": rec.get("title", ""),
-                            "clip_id": rec.get("clip_id", ""),
-                            "caption": rec.get("caption", ""),
-                            "has_file": bool(rec.get("clip_path") and Path(rec["clip_path"]).exists()),
-                        })
-                    except Exception:
-                        pass
-            result[key] = {"count": count, "records": records}
-        except Exception as e:
-            result[key] = {"count": 0, "records": [], "error": str(e)}
-        finally:
-            try:
-                await asyncio.wait_for(consumer.stop(), timeout=5.0)
-            except Exception:
-                pass
+        records = []
+        if count > 0:
+            consumer.seek(tp, max(begin, end - 5))
+            batch = await asyncio.wait_for(
+                consumer.getmany(tp, timeout_ms=3000, max_records=5),
+                timeout=8.0,
+            )
+            for msg in batch.get(tp, []):
+                try:
+                    rec = json.loads(msg.value.decode("utf-8"))
+                    records.append({
+                        "offset": msg.offset,
+                        "streamer": rec.get("streamer", ""),
+                        "title": rec.get("title", ""),
+                        "clip_id": rec.get("clip_id", ""),
+                        "caption": rec.get("caption", ""),
+                        "has_file": bool(rec.get("clip_path") and Path(rec["clip_path"]).exists()),
+                    })
+                except Exception:
+                    pass
+        return {"count": count, "records": records}
+    except Exception as e:
+        return {"count": 0, "records": [], "error": str(e)}
+    finally:
+        try:
+            await asyncio.wait_for(consumer.stop(), timeout=5.0)
+        except Exception:
+            pass
+
+
+async def topic_stats() -> dict:
+    """Return message count and sample records for new_clips and processed_clips.
+
+    Both consumers run in parallel and results are cached for 30s to avoid
+    creating Kafka consumer lifecycles on every page refresh.
+    """
+    global _topic_stats_cache, _topic_stats_ts
+    now = time.time()
+    if _topic_stats_cache and now < _topic_stats_ts + _TOPIC_STATS_TTL:
+        return _topic_stats_cache
+
+    results = await asyncio.gather(
+        _fetch_one_topic_stats(settings.NEW_CLIPS_TOPIC),
+        _fetch_one_topic_stats(settings.PROCESSED_CLIPS_TOPIC),
+        return_exceptions=True,
+    )
+
+    def _safe(r: object) -> dict:
+        return r if not isinstance(r, Exception) else {"count": 0, "records": [], "error": str(r)}
+
+    result = {
+        "new_clips": _safe(results[0]),
+        "processed_clips": _safe(results[1]),
+    }
+    _topic_stats_cache = result
+    _topic_stats_ts = now
     return result
 
 
@@ -591,6 +681,8 @@ async def reset_kafka() -> dict:
         Path(mp4).unlink(missing_ok=True)
         removed_files += 1
     (storage / ".seen_clips.json").write_text("[]")
+    (storage / ".skipped.json").write_text("[]")
+    (storage / ".published.json").write_text("[]")
 
     # Delete topics directly via Kafka Admin API — same as what Surveyor does
     deleted = []

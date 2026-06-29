@@ -199,8 +199,10 @@ export const api = {
   streamersFlowStart: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/start`),
   streamersFlowStop: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/stop`),
   streamersQueue: () => jget<StreamerClip[]>("/api/streamers/queue"),
-  streamersPublish: (clip_path: string, tweet_text: string) =>
-    jpost<StreamerPublishResult>("/api/streamers/publish", { clip_path, tweet_text }),
+  streamersPublish: (clip_path: string, tweet_text: string, clip_id?: string) =>
+    jpost<StreamerPublishResult>("/api/streamers/publish", { clip_path, tweet_text, clip_id }),
+  streamersSkip: (clip_id: string) =>
+    jpost<{ ok: boolean; clip_id: string }>("/api/streamers/skip", { clip_id }),
   streamersWatchlist: () => jget<WatchlistResponse>("/api/streamers/watchlist"),
   streamersSetWatchlist: (logins: string[]) =>
     jpost<WatchlistResponse>("/api/streamers/watchlist", { logins }),

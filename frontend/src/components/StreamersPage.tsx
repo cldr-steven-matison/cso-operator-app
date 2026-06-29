@@ -102,15 +102,21 @@ function ClipCard({
     setPublishing(true);
     setResult(null);
     try {
-      const r = await api.streamersPublish(clip.clip_path, tweetText);
+      const r = await api.streamersPublish(clip.clip_path, tweetText, clip.clip_id);
       setResult({ ok: true, url: r.url });
-      // Brief flash so user sees "Posted" before card disappears
       setTimeout(() => onPublished(clip._offset ?? -1), 1200);
     } catch (e) {
       setResult({ ok: false, error: String(e) });
     } finally {
       setPublishing(false);
     }
+  }
+
+  async function doSkip() {
+    if (clip.clip_id) {
+      try { await api.streamersSkip(clip.clip_id); } catch {}
+    }
+    onSkip(clip._offset ?? -1);
   }
 
   return (
@@ -127,10 +133,21 @@ function ClipCard({
           <img
             src={clip.thumbnail_url}
             alt="thumbnail"
+            loading="lazy"
             className="w-24 h-14 object-cover rounded border border-border shrink-0"
           />
         )}
       </div>
+
+      {/* Video player */}
+      {clip.clip_id && (
+        <video
+          controls
+          preload="none"
+          className="w-full rounded border border-border max-h-72"
+          src={`/api/streamers/clip/${clip.clip_id}`}
+        />
+      )}
 
       {/* Transcript toggle */}
       <div>
@@ -187,7 +204,7 @@ function ClipCard({
           {publishing ? "Publishing…" : "Approve & Publish"}
         </Button>
         <Button
-          onClick={() => onSkip(clip._offset ?? -1)}
+          onClick={doSkip}
           disabled={publishing}
           className="text-xs opacity-60"
         >
@@ -394,10 +411,30 @@ export function StreamersPage() {
   useEffect(() => {
     refreshFlows();
     refreshQueue();
-    refreshTopics();
-    pollRef.current = setInterval(refreshFlows, 5000);
+    // topics are expensive (Kafka consumer lifecycle) — manual Refresh only
+
+    const startPoll = () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(() => {
+        if (!document.hidden) refreshFlows();
+      }, 30000);
+    };
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      } else {
+        refreshFlows();
+        startPoll();
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+    startPoll();
+
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
