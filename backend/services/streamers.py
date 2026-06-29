@@ -560,7 +560,7 @@ async def _fetch_twitch_clips(
     clips = await _get_clips(client, token, broadcaster_id, since)
     result: list[dict] = []
     for clip in clips:
-        if len(result) >= 5:
+        if len(result) >= 2:
             break
         clip_id = clip.get("id", "")
         if not clip_id or clip_id in seen:
@@ -602,7 +602,7 @@ async def _fetch_kick_clips(
     clips = await _get_kick_clips(client, login)
     result: list[dict] = []
     for clip in clips:
-        if len(result) >= 5:
+        if len(result) >= 2:
             break
         raw_id = clip.get("id", "")
         if not raw_id:
