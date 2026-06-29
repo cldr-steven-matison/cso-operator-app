@@ -53,9 +53,28 @@ class PublishRequest(BaseModel):
     clip_id: str = ""
 
 
+@router.post("/approve")
+async def approve(body: PublishRequest):
+    """Queue a clip for publishing. Returns immediately; NiFi drains the queue every 2 min."""
+    if not body.clip_path or not body.tweet_text:
+        raise HTTPException(status_code=400, detail="clip_path and tweet_text are required")
+    if not os.path.exists(body.clip_path):
+        raise HTTPException(status_code=404, detail=f"Clip file not found: {body.clip_path} — re-fetch clips first")
+    return streamers.approve_clip(body.clip_id, body.clip_path, body.tweet_text)
+
+
+@router.post("/publish-next")
+async def publish_next():
+    """Pop and publish the next queued clip. Called by NiFi GenerateFlowFile timer every 2 min."""
+    try:
+        return await streamers.publish_next()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @router.post("/publish")
 async def publish(body: PublishRequest):
-    """Upload clip to X and create a tweet. Requires X credentials in config."""
+    """Direct publish (bypasses queue). Kept for manual/debug use."""
     if not body.clip_path or not body.tweet_text:
         raise HTTPException(status_code=400, detail="clip_path and tweet_text are required")
     if not os.path.exists(body.clip_path):

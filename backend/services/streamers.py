@@ -326,6 +326,25 @@ def _published_path() -> Path:
     return Path(settings.CLIP_STORAGE_PATH) / ".published.json"
 
 
+def _pending_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".pending_publish.json"
+
+
+def _load_pending() -> list[dict]:
+    p = _pending_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def _save_pending(pending: list[dict]) -> None:
+    _pending_path().parent.mkdir(parents=True, exist_ok=True)
+    _pending_path().write_text(json.dumps(pending))
+
+
 def mark_skipped(clip_id: str) -> None:
     ids = _load_id_set(_skipped_path())
     ids.add(clip_id)
@@ -344,6 +363,26 @@ def get_skipped() -> set[str]:
 
 def get_published() -> set[str]:
     return _load_id_set(_published_path())
+
+
+def approve_clip(clip_id: str, clip_path: str, tweet_text: str) -> dict:
+    """Queue a clip for X publishing. Returns immediately — NiFi drains the queue."""
+    pending = _load_pending()
+    if not any(p["clip_id"] == clip_id for p in pending):
+        pending.append({"clip_id": clip_id, "clip_path": clip_path, "tweet_text": tweet_text})
+        _save_pending(pending)
+    return {"queued": True, "clip_id": clip_id, "position": len(pending)}
+
+
+async def publish_next() -> dict:
+    """Pop the first pending clip and publish it to X. Called by NiFi timer every 2 min."""
+    pending = _load_pending()
+    if not pending:
+        return {"published": False, "reason": "queue empty"}
+    clip = pending[0]
+    result = await publish_clip(clip["clip_path"], clip["tweet_text"], clip["clip_id"])
+    _save_pending(pending[1:])
+    return {**result, "queue_remaining": len(pending) - 1}
 
 
 async def fetch_clips() -> dict:
@@ -450,6 +489,15 @@ def _clean_caption(text: str) -> str:
     # Strip surrounding double-quotes that the model adds around the answer
     if text.startswith('"') and text.endswith('"'):
         text = text[1:-1]
+    # Normalize weird hashtags: #ALL_CAPS or #WORD_WORD → #TitleCase
+    def _fix_tag(m: re.Match) -> str:
+        tag = m.group(1)
+        if '_' in tag:
+            return '#' + ''.join(w.capitalize() for w in tag.split('_'))
+        if tag.isupper() and len(tag) > 3:
+            return '#' + tag.capitalize()
+        return m.group(0)
+    text = re.sub(r'#([A-Za-z_]+)', _fix_tag, text)
     return text.strip()
 
 
@@ -711,6 +759,7 @@ async def reset_kafka() -> dict:
     (storage / ".seen_clips.json").write_text("[]")
     (storage / ".skipped.json").write_text("[]")
     (storage / ".published.json").write_text("[]")
+    (storage / ".pending_publish.json").write_text("[]")
 
     # Delete topics directly via Kafka Admin API — same as what Surveyor does
     deleted = []

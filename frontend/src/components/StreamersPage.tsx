@@ -92,7 +92,7 @@ function ClipCard({
   const [caption, setCaption] = useState(clip.caption?.trim() || fallbackCaption());
   const [commentary, setCommentary] = useState("");
   const [publishing, setPublishing] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; url?: string; error?: string } | null>(null);
+  const [result, setResult] = useState<{ ok: boolean; position?: number; error?: string } | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
 
   const tweetText = [caption, commentary].filter(Boolean).join("\n\n");
@@ -102,8 +102,8 @@ function ClipCard({
     setPublishing(true);
     setResult(null);
     try {
-      const r = await api.streamersPublish(clip.clip_path, tweetText, clip.clip_id);
-      setResult({ ok: true, url: r.url });
+      const r = await api.streamersApprove(clip.clip_path, tweetText, clip.clip_id);
+      setResult({ ok: true, position: r.position });
       setTimeout(() => onPublished(clip._offset ?? -1), 1200);
     } catch (e) {
       setResult({ ok: false, error: String(e) });
@@ -201,7 +201,7 @@ function ClipCard({
           onClick={doPublish}
           disabled={publishing || !tweetText.trim() || !clip.clip_path}
         >
-          {publishing ? "Publishing…" : "Approve & Publish"}
+          {publishing ? "Queuing…" : "Approve"}
         </Button>
         <Button
           onClick={doSkip}
@@ -212,13 +212,9 @@ function ClipCard({
         </Button>
         {result && (
           <span className={result.ok ? "text-accent text-xs" : "text-bad text-xs"}>
-            {result.ok ? (
-              <a href={result.url} target="_blank" rel="noreferrer" className="underline">
-                Posted — view on X ✓
-              </a>
-            ) : (
-              result.error
-            )}
+            {result.ok
+              ? `Queued #${result.position} — posts in ~2 min ✓`
+              : result.error}
           </span>
         )}
       </div>
