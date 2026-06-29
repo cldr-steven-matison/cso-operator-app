@@ -100,7 +100,7 @@ async def transcribe(file: UploadFile = File(...)):
         async with _gpu_sem:
             result = await loop.run_in_executor(
                 None,
-                partial(pipe, tmp_path, chunk_length_s=60, batch_size=24, beam_size=1, return_timestamps=True),
+                partial(pipe, tmp_path, chunk_length_s=60, batch_size=24, return_timestamps=True),
             )
         os.unlink(tmp_path)
         return {"text": result["text"]}
