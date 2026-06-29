@@ -574,11 +574,10 @@ async def topic_stats() -> dict:
 # ── Kafka reset ───────────────────────────────────────────────────────────────
 
 async def reset_kafka() -> dict:
-    """Delete new-clips and processed-clips KafkaTopic CRDs (Strimzi recreates
-    them empty when data next arrives) and wipe the /clips directory."""
-    import kubernetes_asyncio.client as k8s_client
-    import kubernetes_asyncio.config as k8s_config
-    from kubernetes_asyncio.client.rest import ApiException
+    """Delete new_clips and processed_clips topics directly via Kafka Admin API,
+    then wipe the /clips directory. Topics auto-recreate when data next arrives."""
+    from aiokafka.admin import AIOKafkaAdminClient
+    from aiokafka.errors import UnknownTopicOrPartitionError
 
     # Clear clips on disk
     storage = Path(settings.CLIP_STORAGE_PATH)
@@ -586,32 +585,30 @@ async def reset_kafka() -> dict:
     for mp4 in glob.glob(str(storage / "*.mp4")):
         Path(mp4).unlink(missing_ok=True)
         removed_files += 1
-    seen = storage / ".seen_clips.json"
-    seen.write_text("[]")
+    (storage / ".seen_clips.json").write_text("[]")
 
-    # Delete KafkaTopic CRDs — Strimzi deletes the actual topics
+    # Delete topics directly via Kafka Admin API — same as what Surveyor does
     deleted = []
     errors = []
+    topics = [settings.NEW_CLIPS_TOPIC, settings.PROCESSED_CLIPS_TOPIC]
+    admin = AIOKafkaAdminClient(bootstrap_servers=settings.KAFKA_BOOTSTRAP)
     try:
-        k8s_config.load_incluster_config()
-        api = k8s_client.CustomObjectsApi()
-        for name in ("new-clips", "processed-clips"):
-            try:
-                await api.delete_namespaced_custom_object(
-                    group="kafka.strimzi.io",
-                    version="v1beta2",
-                    namespace="cld-streaming",
-                    plural="kafkatopics",
-                    name=name,
-                )
-                deleted.append(name)
-            except ApiException as e:
-                if e.status == 404:
-                    deleted.append(f"{name} (already gone)")
-                else:
-                    errors.append(f"{name}: {e.reason}")
+        await asyncio.wait_for(admin.start(), timeout=10.0)
+        results = await asyncio.wait_for(admin.delete_topics(topics, timeout_ms=10000), timeout=15.0)
+        for topic, exc in results.items() if hasattr(results, "items") else []:
+            if exc is None:
+                deleted.append(topic)
+            else:
+                errors.append(f"{topic}: {exc}")
+        if not deleted and not errors:
+            deleted = topics
     except Exception as e:
         errors.append(str(e))
+    finally:
+        try:
+            await asyncio.wait_for(admin.stop(), timeout=5.0)
+        except Exception:
+            pass
 
     return {
         "deleted_topics": deleted,
