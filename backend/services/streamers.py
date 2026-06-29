@@ -565,6 +565,7 @@ async def _fetch_twitch_clips(
         clip_id = clip.get("id", "")
         if not clip_id or clip_id in seen:
             continue
+        seen.add(clip_id)
         dest = clip_dir / f"{clip_id}.mp4"
         if not dest.exists():
             mp4_url = await _gql_clip_mp4_url(client, clip_id)
@@ -610,6 +611,7 @@ async def _fetch_kick_clips(
         clip_id = f"kick_{raw_id.replace('-', '')}"
         if clip_id in seen:
             continue
+        seen.add(clip_id)
         dest = clip_dir / f"{clip_id}.mp4"
         if not dest.exists():
             m3u8_url = clip.get("clip_url") or clip.get("video_url", "")
