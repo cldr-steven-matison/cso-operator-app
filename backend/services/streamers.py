@@ -187,7 +187,7 @@ async def _get_clips(client: httpx.AsyncClient, token: str, broadcaster_id: str,
         "https://api.twitch.tv/helix/clips",
         params={
             "broadcaster_id": broadcaster_id,
-            "first": "5",
+            "first": "20",
             "started_at": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
         headers=_twitch_headers(token),
@@ -195,7 +195,13 @@ async def _get_clips(client: httpx.AsyncClient, token: str, broadcaster_id: str,
     )
     if r.status_code != 200:
         return []
-    return r.json().get("data", [])
+    clips = r.json().get("data", [])
+    # Skip anything under 30s — prefer clips closer to the 60s max
+    return sorted(
+        [c for c in clips if c.get("duration", 0) >= 30],
+        key=lambda c: c.get("duration", 0),
+        reverse=True,
+    )
 
 
 _TWITCH_WEB_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"  # public Twitch web player client
