@@ -375,7 +375,7 @@ async def fetch_clips() -> dict:
             clips = await _get_clips(client, token, broadcaster_id, since)
             per_streamer = 0
             for clip in clips:
-                if per_streamer >= 2:
+                if per_streamer >= 5:
                     break
                 clip_id = clip.get("id", "")
                 if not clip_id or clip_id in seen:
