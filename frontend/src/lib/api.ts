@@ -90,6 +90,7 @@ export type StreamerFlows = Record<string, StreamerFlowState>;
 
 export type StreamerClip = {
   clip_id?: string;
+  source?: string;
   streamer?: string;
   title?: string;
   url?: string;

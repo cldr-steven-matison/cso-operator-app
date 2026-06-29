@@ -25,6 +25,8 @@ STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClip")
 _watchlist: list[str] = []
 _twitch_token: str = ""
 _twitch_token_expires: float = 0.0
+_kick_token: str = ""
+_kick_token_expires: float = 0.0
 
 # NiFi group-ID cache — BFS is expensive; group IDs don't change until a re-import
 _pg_cache: dict[str, dict] = {}
@@ -158,6 +160,15 @@ async def flow_set_state(client: httpx.AsyncClient, name: str, running: bool) ->
     return await _put(client, f"/flow/process-groups/{pg['id']}", body)
 
 
+# ── Watch list helpers ────────────────────────────────────────────────────────
+
+def _parse_watch_entry(entry: str) -> tuple[str, str]:
+    """Split 'kick:login' → ('kick', 'login'); bare name → ('twitch', name)."""
+    if entry.startswith("kick:"):
+        return "kick", entry[5:]
+    return "twitch", entry
+
+
 # ── Twitch API ────────────────────────────────────────────────────────────────
 
 async def _twitch_token_refresh(client: httpx.AsyncClient) -> str:
@@ -280,6 +291,75 @@ async def _gql_clip_mp4_url(client: httpx.AsyncClient, clip_id: str) -> str | No
         return None
 
 
+# ── Kick API ──────────────────────────────────────────────────────────────────
+
+_KICK_TOKEN_URL = "https://id.kick.com/oauth/token"
+_KICK_API_BASE = "https://api.kick.com/public/v1"
+
+
+async def _kick_token_refresh(client: httpx.AsyncClient) -> str:
+    global _kick_token, _kick_token_expires
+    if _kick_token and time.time() < _kick_token_expires - 60:
+        return _kick_token
+    if not (settings.KICK_CLIENT_ID and settings.KICK_CLIENT_SECRET):
+        raise RuntimeError("KICK_CLIENT_ID and KICK_CLIENT_SECRET not configured")
+    r = await client.post(
+        _KICK_TOKEN_URL,
+        data={
+            "grant_type": "client_credentials",
+            "client_id": settings.KICK_CLIENT_ID,
+            "client_secret": settings.KICK_CLIENT_SECRET,
+        },
+        timeout=10.0,
+    )
+    r.raise_for_status()
+    data = r.json()
+    _kick_token = data["access_token"]
+    _kick_token_expires = time.time() + data.get("expires_in", 3600)
+    return _kick_token
+
+
+def _kick_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _get_kick_broadcaster_id(client: httpx.AsyncClient, token: str, slug: str) -> int | None:
+    r = await client.get(
+        f"{_KICK_API_BASE}/channels",
+        params={"slug": slug},
+        headers=_kick_headers(token),
+        timeout=10.0,
+    )
+    if r.status_code != 200:
+        return None
+    data = r.json().get("data", [])
+    if not data:
+        return None
+    # API returns broadcaster_user_id as the numeric channel ID
+    return data[0].get("broadcaster_user_id")
+
+
+async def _get_kick_clips(client: httpx.AsyncClient, token: str, broadcaster_id: int) -> list[dict]:
+    r = await client.get(
+        f"{_KICK_API_BASE}/clips",
+        params={
+            "broadcaster_id": broadcaster_id,
+            "sort": "view_count",
+            "time_range": "day",
+        },
+        headers=_kick_headers(token),
+        timeout=10.0,
+    )
+    if r.status_code != 200:
+        return []
+    clips = r.json().get("data", [])
+    return sorted(
+        [c for c in clips if c.get("duration", 0) >= 45],
+        key=lambda c: c.get("duration", 0),
+        reverse=True,
+    )
+
+
 async def _download_clip(client: httpx.AsyncClient, url: str, dest: Path) -> bool:
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -386,7 +466,10 @@ async def publish_next() -> dict:
 
 
 async def fetch_clips() -> dict:
-    """Poll Twitch for clips from the watch list, download to PVC, publish to new_clips."""
+    """Poll Twitch and Kick for clips from the watch list, download to PVC, publish to new_clips.
+
+    Watch list entries are 'login' (Twitch) or 'kick:login' (Kick).
+    """
     logins = get_watchlist()
     if not logins:
         return {"fetched": 0, "clips": [], "error": "Watch list is empty"}
@@ -405,55 +488,145 @@ async def fetch_clips() -> dict:
     errors: list[str] = []
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        token = await _twitch_token_refresh(client)
+        twitch_token: str | None = None
+        kick_token: str | None = None
 
-        for login in logins:
-            broadcaster_id = await _get_broadcaster_id(client, token, login)
-            if not broadcaster_id:
-                errors.append(f"Could not resolve broadcaster_id for {login}")
-                continue
-            clips = await _get_clips(client, token, broadcaster_id, since)
-            per_streamer = 0
-            for clip in clips:
-                if per_streamer >= 5:
-                    break
-                clip_id = clip.get("id", "")
-                if not clip_id or clip_id in seen:
-                    continue
+        for entry in logins:
+            platform, login = _parse_watch_entry(entry)
 
-                dest = clip_dir / f"{clip_id}.mp4"
-                if not dest.exists():
-                    mp4_url = await _gql_clip_mp4_url(client, clip_id)
-                    if not mp4_url:
-                        errors.append(f"No download URL for {clip_id}")
+            if platform == "kick":
+                metadata_list = await _fetch_kick_clips(
+                    client, login, clip_dir, seen, errors,
+                    kick_token_getter=lambda: _kick_token_refresh(client),
+                )
+                # cache the token for subsequent Kick entries
+                if _kick_token:
+                    kick_token = _kick_token
+                fetched.extend(metadata_list)
+                for m in metadata_list:
+                    seen.add(m["clip_id"])
+            else:
+                if twitch_token is None:
+                    try:
+                        twitch_token = await _twitch_token_refresh(client)
+                    except RuntimeError as e:
+                        errors.append(str(e))
                         continue
-                    ok = await _download_clip(client, mp4_url, dest)
-                    if not ok:
-                        errors.append(f"Download failed for {clip_id}")
-                        continue
-
-                thumb = clip.get("thumbnail_url", "")
-                metadata = {
-                    "clip_id": clip_id,
-                    "streamer": login,
-                    "broadcaster_id": broadcaster_id,
-                    "title": clip.get("title", ""),
-                    "url": clip.get("url", ""),
-                    "thumbnail_url": thumb,
-                    "duration": clip.get("duration", 0),
-                    "created_at": clip.get("created_at", ""),
-                    "clip_path": str(dest),
-                    "view_count": clip.get("view_count", 0),
-                }
-                fetched.append(metadata)
-                seen.add(clip_id)
-                per_streamer += 1
+                metadata_list = await _fetch_twitch_clips(
+                    client, twitch_token, login, clip_dir, seen, since, errors,
+                )
+                fetched.extend(metadata_list)
+                for m in metadata_list:
+                    seen.add(m["clip_id"])
 
     if fetched:
         await _publish_clips_to_kafka(fetched)
         seen_file.write_text(json.dumps(list(seen)))
 
     return {"fetched": len(fetched), "clips": [c["clip_id"] for c in fetched], "errors": errors}
+
+
+async def _fetch_twitch_clips(
+    client: httpx.AsyncClient,
+    token: str,
+    login: str,
+    clip_dir: Path,
+    seen: set[str],
+    since: datetime,
+    errors: list[str],
+) -> list[dict]:
+    broadcaster_id = await _get_broadcaster_id(client, token, login)
+    if not broadcaster_id:
+        errors.append(f"Twitch: could not resolve broadcaster_id for {login}")
+        return []
+    clips = await _get_clips(client, token, broadcaster_id, since)
+    result: list[dict] = []
+    for clip in clips:
+        if len(result) >= 5:
+            break
+        clip_id = clip.get("id", "")
+        if not clip_id or clip_id in seen:
+            continue
+        dest = clip_dir / f"{clip_id}.mp4"
+        if not dest.exists():
+            mp4_url = await _gql_clip_mp4_url(client, clip_id)
+            if not mp4_url:
+                errors.append(f"Twitch: no download URL for {clip_id}")
+                continue
+            ok = await _download_clip(client, mp4_url, dest)
+            if not ok:
+                errors.append(f"Twitch: download failed for {clip_id}")
+                continue
+        result.append({
+            "clip_id": clip_id,
+            "source": "twitch",
+            "streamer": login,
+            "broadcaster_id": broadcaster_id,
+            "title": clip.get("title", ""),
+            "url": clip.get("url", ""),
+            "thumbnail_url": clip.get("thumbnail_url", ""),
+            "duration": clip.get("duration", 0),
+            "created_at": clip.get("created_at", ""),
+            "clip_path": str(dest),
+            "view_count": clip.get("view_count", 0),
+        })
+    return result
+
+
+async def _fetch_kick_clips(
+    client: httpx.AsyncClient,
+    login: str,
+    clip_dir: Path,
+    seen: set[str],
+    errors: list[str],
+    kick_token_getter,
+) -> list[dict]:
+    try:
+        token = await kick_token_getter()
+    except RuntimeError as e:
+        errors.append(str(e))
+        return []
+    broadcaster_id = await _get_kick_broadcaster_id(client, token, login)
+    if not broadcaster_id:
+        errors.append(f"Kick: could not resolve broadcaster_id for {login}")
+        return []
+    clips = await _get_kick_clips(client, token, broadcaster_id)
+    result: list[dict] = []
+    for clip in clips:
+        if len(result) >= 5:
+            break
+        # Kick uses UUIDs — prefix with kick_ to namespace from Twitch IDs
+        raw_id = clip.get("clip_id", "")
+        if not raw_id:
+            continue
+        clip_id = f"kick_{raw_id.replace('-', '')}"
+        if clip_id in seen:
+            continue
+        dest = clip_dir / f"{clip_id}.mp4"
+        if not dest.exists():
+            mp4_url = clip.get("clip_url", "")
+            if not mp4_url:
+                errors.append(f"Kick: no clip_url for {clip_id}")
+                continue
+            ok = await _download_clip(client, mp4_url, dest)
+            if not ok:
+                errors.append(f"Kick: download failed for {clip_id}")
+                continue
+        broadcaster = clip.get("broadcaster", {})
+        result.append({
+            "clip_id": clip_id,
+            "source": "kick",
+            "streamer": login,
+            "broadcaster_id": broadcaster_id,
+            "title": clip.get("title", ""),
+            "url": clip.get("clip_url", ""),
+            "thumbnail_url": clip.get("thumbnail_url", ""),
+            "duration": clip.get("duration", 0),
+            "created_at": clip.get("created_at", ""),
+            "clip_path": str(dest),
+            "view_count": clip.get("views", 0),
+        })
+    return result
 
 
 async def _publish_clips_to_kafka(clips: list[dict]):
@@ -538,7 +711,7 @@ async def process_clip(clip: dict) -> dict:
                             {
                                 "role": "user",
                                 "content": (
-                                    f"Write one punchy, witty tweet reaction (max 220 chars) to this Twitch clip. "
+                                    f"Write one punchy, witty tweet reaction (max 220 chars) to this {clip.get('source', 'twitch').capitalize()} clip. "
                                     f"Use 2-4 emojis and gaming slang naturally. "
                                     f"Examples: 'bro said what 💀', 'no way he actually did that 😭🔥', 'chat was NOT ready 👀'. "
                                     f"Clip: '{clip.get('title', '')}' by {clip.get('streamer', 'unknown')}. "

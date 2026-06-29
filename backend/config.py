@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # Streamers module — Twitch clip pipeline
     TWITCH_CLIENT_ID: str = ""
     TWITCH_CLIENT_SECRET: str = ""
-    STREAMERS_WATCH_LIST: str = ""      # comma-separated Twitch logins
+    STREAMERS_WATCH_LIST: str = ""      # comma-separated logins; bare = Twitch, kick:login = Kick
     CLIP_STORAGE_PATH: str = "/clips"
     NEW_CLIPS_TOPIC: str = "new_clips"
     PROCESSED_CLIPS_TOPIC: str = "processed_clips"

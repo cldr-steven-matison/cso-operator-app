@@ -125,7 +125,8 @@ function ClipCard({
       <div className="flex items-start justify-between gap-2">
         <div>
           <p className="text-sm font-semibold text-text">{clip.title ?? "Untitled Clip"}</p>
-          <p className="text-xs text-muted">
+          <p className="text-xs text-muted flex items-center gap-1.5">
+            {clip.source && <PlatformBadge platform={clip.source as "twitch" | "kick"} />}
             {clip.streamer ?? "Unknown"} · {clip.duration ? `${Math.round(clip.duration)}s` : "—"}
           </p>
         </div>
@@ -190,7 +191,10 @@ function ClipCard({
       {/* Tweet preview */}
       {tweetText.trim() && (
         <div className="border border-border rounded p-2 bg-panel">
-          <p className="text-xs text-muted mb-1">Tweet preview ({tweetText.length}/280)</p>
+          <div className="flex items-center gap-2 mb-1">
+            <p className="text-xs text-muted">Tweet preview ({tweetText.length}/280)</p>
+            {clip.source && <PlatformBadge platform={clip.source as "twitch" | "kick"} />}
+          </div>
           <p className="text-xs text-text whitespace-pre-wrap">{tweetText}</p>
         </div>
       )}
@@ -265,9 +269,20 @@ function TopicPanel({ label, stats }: { label: string; stats?: StreamerTopics["n
 
 // ── WatchList ──────────────────────────────────────────────────────────────
 
+function PlatformBadge({ platform }: { platform: "twitch" | "kick" }) {
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${
+      platform === "kick" ? "bg-green-800 text-green-200" : "bg-purple-900 text-purple-200"
+    }`}>
+      {platform}
+    </span>
+  );
+}
+
 function WatchList() {
   const [logins, setLogins] = useState<string[]>([]);
   const [input, setInput] = useState("");
+  const [platform, setPlatform] = useState<"twitch" | "kick">("twitch");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -275,8 +290,10 @@ function WatchList() {
   }, []);
 
   async function add() {
-    const login = input.trim().toLowerCase();
-    if (!login || logins.includes(login)) return;
+    const bare = input.trim().toLowerCase();
+    if (!bare) return;
+    const login = platform === "kick" ? `kick:${bare}` : bare;
+    if (logins.includes(login)) return;
     const next = [...logins, login];
     setInput("");
     setSaving(true);
@@ -304,12 +321,35 @@ function WatchList() {
       <CardTitle>Watch List</CardTitle>
       <div className="space-y-3">
         <div className="flex gap-2">
+          {/* Platform picker */}
+          <div className="flex rounded border border-border overflow-hidden shrink-0 text-xs font-semibold">
+            <button
+              onClick={() => setPlatform("twitch")}
+              className={`px-2 py-1 uppercase tracking-wide transition-colors ${
+                platform === "twitch"
+                  ? "bg-purple-900 text-purple-200"
+                  : "bg-bg text-muted hover:text-text"
+              }`}
+            >
+              Twitch
+            </button>
+            <button
+              onClick={() => setPlatform("kick")}
+              className={`px-2 py-1 uppercase tracking-wide transition-colors border-l border-border ${
+                platform === "kick"
+                  ? "bg-green-800 text-green-200"
+                  : "bg-bg text-muted hover:text-text"
+              }`}
+            >
+              Kick
+            </button>
+          </div>
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && add()}
-            placeholder="Twitch login (e.g. xqc)"
+            placeholder={platform === "kick" ? "Kick slug (e.g. xqc)" : "Twitch login (e.g. xqc)"}
             className="flex-1 bg-bg border border-border rounded px-2 py-1 text-sm text-text font-mono"
           />
           <Button onClick={add} disabled={saving || !input.trim()}>
@@ -320,21 +360,26 @@ function WatchList() {
           <p className="text-xs text-muted">No streamers in watch list</p>
         ) : (
           <div className="flex flex-wrap gap-2">
-            {logins.map((login) => (
-              <div
-                key={login}
-                className="flex items-center gap-1 border border-border rounded px-2 py-1 bg-panel text-xs font-mono"
-              >
-                <span className="text-text">{login}</span>
-                <button
-                  onClick={() => remove(login)}
-                  className="text-muted hover:text-bad ml-1"
-                  aria-label={`Remove ${login}`}
+            {logins.map((login) => {
+              const isKick = login.startsWith("kick:");
+              const displayName = isKick ? login.slice(5) : login;
+              return (
+                <div
+                  key={login}
+                  className="flex items-center gap-1.5 border border-border rounded px-2 py-1 bg-panel text-xs font-mono"
                 >
-                  ×
-                </button>
-              </div>
-            ))}
+                  <PlatformBadge platform={isKick ? "kick" : "twitch"} />
+                  <span className="text-text">{displayName}</span>
+                  <button
+                    onClick={() => remove(login)}
+                    className="text-muted hover:text-bad ml-1"
+                    aria-label={`Remove ${login}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
