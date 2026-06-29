@@ -496,35 +496,44 @@ async def fetch_clips() -> dict:
     errors: list[str] = []
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
+        # Pre-fetch tokens so parallel tasks can share them
+        twitch_entries = [e for e in logins if not e.startswith("kick:")]
+        kick_entries = [e for e in logins if e.startswith("kick:")]
+
         twitch_token: str | None = None
-        kick_token: str | None = None
+        if twitch_entries:
+            try:
+                twitch_token = await _twitch_token_refresh(client)
+            except RuntimeError as e:
+                errors.append(str(e))
 
-        for entry in logins:
-            platform, login = _parse_watch_entry(entry)
+        async def _do_kick(entry: str) -> list[dict]:
+            _, login = _parse_watch_entry(entry)
+            entry_errors: list[str] = []
+            result = await _fetch_kick_clips(
+                client, login, clip_dir, seen, entry_errors,
+                kick_token_getter=lambda: _kick_token_refresh(client),
+            )
+            errors.extend(entry_errors)
+            return result
 
-            if platform == "kick":
-                metadata_list = await _fetch_kick_clips(
-                    client, login, clip_dir, seen, errors,
-                    kick_token_getter=lambda: _kick_token_refresh(client),
-                )
-                # cache the token for subsequent Kick entries
-                if _kick_token:
-                    kick_token = _kick_token
-                fetched.extend(metadata_list)
-                for m in metadata_list:
-                    seen.add(m["clip_id"])
-            else:
-                if twitch_token is None:
-                    try:
-                        twitch_token = await _twitch_token_refresh(client)
-                    except RuntimeError as e:
-                        errors.append(str(e))
-                        continue
-                metadata_list = await _fetch_twitch_clips(
-                    client, twitch_token, login, clip_dir, seen, since, errors,
-                )
-                fetched.extend(metadata_list)
-                for m in metadata_list:
+        async def _do_twitch(entry: str) -> list[dict]:
+            if twitch_token is None:
+                return []
+            _, login = _parse_watch_entry(entry)
+            entry_errors: list[str] = []
+            result = await _fetch_twitch_clips(
+                client, twitch_token, login, clip_dir, seen, since, entry_errors,
+            )
+            errors.extend(entry_errors)
+            return result
+
+        tasks = [_do_kick(e) for e in kick_entries] + [_do_twitch(e) for e in twitch_entries]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, list):
+                fetched.extend(r)
+                for m in r:
                     seen.add(m["clip_id"])
 
     if fetched:
@@ -632,9 +641,15 @@ def _download_hls_sync(m3u8_url: str, dest: Path) -> bool:
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         result = subprocess.run(
-            ["ffmpeg", "-y", "-i", m3u8_url, "-c", "copy", str(dest)],
+            [
+                "ffmpeg", "-y", "-i", m3u8_url,
+                "-vf", "scale=1280:-2",
+                "-c:v", "libx264", "-crf", "28", "-preset", "fast",
+                "-c:a", "aac", "-b:a", "96k",
+                str(dest),
+            ],
             capture_output=True,
-            timeout=120,
+            timeout=180,
         )
         return result.returncode == 0 and dest.exists() and dest.stat().st_size > 10_000
     except Exception:
