@@ -196,9 +196,9 @@ async def _get_clips(client: httpx.AsyncClient, token: str, broadcaster_id: str,
     if r.status_code != 200:
         return []
     clips = r.json().get("data", [])
-    # Skip anything under 30s — prefer clips closer to the 60s max
+    # Skip anything under 45s — prefer clips closer to the 60s max
     return sorted(
-        [c for c in clips if c.get("duration", 0) >= 30],
+        [c for c in clips if c.get("duration", 0) >= 45],
         key=lambda c: c.get("duration", 0),
         reverse=True,
     )
@@ -310,7 +310,10 @@ async def fetch_clips() -> dict:
                 errors.append(f"Could not resolve broadcaster_id for {login}")
                 continue
             clips = await _get_clips(client, token, broadcaster_id, since)
+            per_streamer = 0
             for clip in clips:
+                if per_streamer >= 3:
+                    break
                 clip_id = clip.get("id", "")
                 if not clip_id or clip_id in seen:
                     continue
@@ -341,6 +344,7 @@ async def fetch_clips() -> dict:
                 }
                 fetched.append(metadata)
                 seen.add(clip_id)
+                per_streamer += 1
 
     if fetched:
         await _publish_clips_to_kafka(fetched)

@@ -133,21 +133,19 @@ function ClipCard({
       </div>
 
       {/* Transcript toggle */}
-      {clip.transcript && (
-        <div>
-          <button
-            onClick={() => setTranscriptOpen((o) => !o)}
-            className="text-xs text-muted underline"
-          >
-            {transcriptOpen ? "Hide transcript" : "Show transcript"}
-          </button>
-          {transcriptOpen && (
-            <p className="mt-1 text-xs font-mono text-muted border border-border rounded p-2 bg-panel max-h-24 overflow-y-auto">
-              {clip.transcript}
-            </p>
-          )}
-        </div>
-      )}
+      <div>
+        <button
+          onClick={() => setTranscriptOpen((o) => !o)}
+          className="text-xs text-muted underline"
+        >
+          {transcriptOpen ? "Hide transcript" : "Show transcript"}
+        </button>
+        {transcriptOpen && (
+          <p className="mt-1 text-xs font-mono text-muted border border-border rounded p-2 bg-panel max-h-24 overflow-y-auto">
+            {clip.transcript?.trim() || "No transcript — Whisper may have timed out or returned empty."}
+          </p>
+        )}
+      </div>
 
       {/* Caption (editable) */}
       <div className="space-y-1">
