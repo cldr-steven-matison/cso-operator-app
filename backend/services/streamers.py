@@ -740,6 +740,7 @@ async def process_clip(clip: dict) -> dict:
                                 "role": "user",
                                 "content": (
                                     f"Write one punchy, witty tweet reaction (max 220 chars) to this {clip.get('source', 'twitch').capitalize()} clip. "
+                                    f"You MUST include the word '{'Kick' if clip.get('source') == 'kick' else 'Twitch'}' somewhere in the tweet. "
                                     f"Use 2-4 emojis and gaming slang naturally. "
                                     f"Examples: 'bro said what 💀', 'no way he actually did that 😭🔥', 'chat was NOT ready 👀'. "
                                     f"Clip: '{clip.get('title', '')}' by {clip.get('streamer', 'unknown')}. "
