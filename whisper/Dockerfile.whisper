@@ -83,7 +83,7 @@ pipe = pipeline(
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
     try:

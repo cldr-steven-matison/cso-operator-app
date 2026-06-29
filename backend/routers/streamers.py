@@ -1,3 +1,5 @@
+import json
+import os
 import re
 from pathlib import Path
 
@@ -54,7 +56,6 @@ class PublishRequest(BaseModel):
 @router.post("/publish")
 async def publish(body: PublishRequest):
     """Upload clip to X and create a tweet. Requires X credentials in config."""
-    import os
     if not body.clip_path or not body.tweet_text:
         raise HTTPException(status_code=400, detail="clip_path and tweet_text are required")
     if not os.path.exists(body.clip_path):
@@ -110,7 +111,6 @@ async def process_clip(request: Request):
     return enriched JSON. Called by the ProcessClips NiFi ConsumeKafka → InvokeHTTP flow."""
     body = await request.body()
     try:
-        import json
         clip = json.loads(body)
     except Exception:
         raise HTTPException(status_code=400, detail="Expected JSON clip metadata")
