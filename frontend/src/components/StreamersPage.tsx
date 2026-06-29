@@ -126,7 +126,7 @@ function ClipCard({
         <div>
           <p className="text-sm font-semibold text-text">{clip.title ?? "Untitled Clip"}</p>
           <p className="text-xs text-muted flex items-center gap-1.5">
-            {clip.source && <PlatformBadge platform={clip.source as "twitch" | "kick"} />}
+            <PlatformBadge platform={(clip.source ?? "twitch") as "twitch" | "kick"} />
             {clip.streamer ?? "Unknown"} · {clip.duration ? `${Math.round(clip.duration)}s` : "—"}
           </p>
         </div>
