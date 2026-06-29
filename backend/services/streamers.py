@@ -9,6 +9,7 @@ X publishing is called directly from the Review UI Approve button.
 import asyncio
 import glob
 import json
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -433,6 +434,25 @@ async def _publish_clips_to_kafka(clips: list[dict]):
 
 # ── ProcessClip — Whisper + vLLM ──────────────────────────────────────────────
 
+def _clean_caption(text: str) -> str:
+    """Strip model formatting artifacts from vLLM caption output.
+
+    Small models often wrap the answer in a label like:
+      **Punchy Reaction:** "actual tweet text"
+    followed by self-commentary sections starting with — or —.
+    This extracts just the bare tweet text.
+    """
+    text = text.strip()
+    # Only the first paragraph is the caption; the rest is model commentary
+    text = text.split("\n\n")[0].strip()
+    # Strip leading label: **Word(s):** or "Word(s):"
+    text = re.sub(r'^\*{0,2}[\w][\w ]*\*{0,2}:\s*', '', text)
+    # Strip surrounding double-quotes that the model adds around the answer
+    if text.startswith('"') and text.endswith('"'):
+        text = text[1:-1]
+    return text.strip()
+
+
 async def process_clip(clip: dict) -> dict:
     """Transcribe clip audio with Whisper, generate caption with vLLM.
     Returns enriched clip dict ready to publish to processed_clips."""
@@ -458,25 +478,33 @@ async def process_clip(clip: dict) -> dict:
         caption = ""
         if transcript and not transcript.startswith("["):
             try:
-                prompt = (
-                    f"You are a hype social media editor for a gaming clip account on X (Twitter). "
-                    f"Write one punchy, witty reaction (max 220 chars) to this Twitch clip. "
-                    f"Use relevant emojis and gaming slang naturally — 2-4 emojis max, don't overdo it. "
-                    f"Examples of tone: 'bro said what 💀', 'no way he actually did that 😭🔥', 'chat was NOT ready 👀'. "
-                    f"Clip: '{clip.get('title', '')}' by {clip.get('streamer', 'unknown')}. "
-                    f"Transcript: {transcript[:500]}"
-                )
                 r = await client.post(
                     f"{settings.VLLM_URL}/v1/chat/completions",
                     json={
                         "model": settings.VLLM_MODEL,
-                        "messages": [{"role": "user", "content": prompt}],
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a hype social media editor. Output ONLY the tweet text — no labels, no headers, no explanation, no surrounding quotes.",
+                            },
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Write one punchy, witty tweet reaction (max 220 chars) to this Twitch clip. "
+                                    f"Use 2-4 emojis and gaming slang naturally. "
+                                    f"Examples: 'bro said what 💀', 'no way he actually did that 😭🔥', 'chat was NOT ready 👀'. "
+                                    f"Clip: '{clip.get('title', '')}' by {clip.get('streamer', 'unknown')}. "
+                                    f"Transcript: {transcript[:500]}"
+                                ),
+                            },
+                        ],
                         "max_tokens": 100,
                         "temperature": 0.8,
                     },
                 )
                 if r.status_code == 200:
-                    caption = r.json()["choices"][0]["message"]["content"].strip()
+                    raw = r.json()["choices"][0]["message"]["content"]
+                    caption = _clean_caption(raw)
             except Exception as e:
                 caption = f"[caption error: {e}]"
 
