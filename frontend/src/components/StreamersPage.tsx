@@ -411,7 +411,7 @@ export function StreamersPage() {
   useEffect(() => {
     refreshFlows();
     refreshQueue();
-    // topics are expensive (Kafka consumer lifecycle) — manual Refresh only
+    refreshTopics();
 
     const startPoll = () => {
       if (pollRef.current) clearInterval(pollRef.current);
