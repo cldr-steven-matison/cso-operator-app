@@ -33,8 +33,20 @@ export function NifiControls() {
 
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 4000);
-    return () => clearInterval(id);
+    let id = setInterval(refresh, 30000);
+    const onVisibility = () => {
+      if (document.hidden) {
+        clearInterval(id);
+      } else {
+        refresh();
+        id = setInterval(refresh, 30000);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, []);
 
   const act = async (name: string, op: Optimistic, fn: () => Promise<unknown>) => {

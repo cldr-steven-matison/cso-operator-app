@@ -27,10 +27,20 @@ export function Operators() {
       }
     };
     refresh();
-    const id = setInterval(refresh, 15000);
+    let id = setInterval(refresh, 60000);
+    const onVisibility = () => {
+      if (document.hidden) {
+        clearInterval(id);
+      } else {
+        refresh();
+        id = setInterval(refresh, 60000);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       alive = false;
       clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 

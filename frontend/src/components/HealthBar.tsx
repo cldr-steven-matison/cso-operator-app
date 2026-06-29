@@ -26,10 +26,20 @@ export function HealthBar() {
       }
     };
     tick();
-    const id = setInterval(tick, 30000);
+    let id = setInterval(tick, 60000);
+    const onVisibility = () => {
+      if (document.hidden) {
+        clearInterval(id);
+      } else {
+        tick();
+        id = setInterval(tick, 60000);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       alive = false;
       clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
