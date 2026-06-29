@@ -644,13 +644,11 @@ def _download_hls_sync(m3u8_url: str, dest: Path) -> bool:
         result = subprocess.run(
             [
                 "ffmpeg", "-y", "-i", m3u8_url,
-                "-vf", "scale=1280:-2",
-                "-c:v", "libx264", "-crf", "28", "-preset", "fast",
-                "-c:a", "aac", "-b:a", "96k",
+                "-c", "copy", "-movflags", "+faststart",
                 str(dest),
             ],
             capture_output=True,
-            timeout=180,
+            timeout=120,
         )
         return result.returncode == 0 and dest.exists() and dest.stat().st_size > 10_000
     except Exception:
