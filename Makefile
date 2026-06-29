@@ -15,7 +15,7 @@ STACK ?= gpu
 #   MODULES=efm,rag,streamers   — full install (matches configmap default)
 #   MODULES=streamers           — Operator + Streamers only
 #   MODULES=                    — Operator only (bare minimum)
-MODULES ?= efm,rag,streamers
+MODULES ?=
 
 help:
 	@echo "Targets (STACK=$(STACK) MODULES=$(MODULES)):"
