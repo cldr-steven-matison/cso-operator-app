@@ -15,6 +15,9 @@ kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 
+echo "==> Restarting pod to pick up new image (imagePullPolicy: Never requires explicit restart)"
+kubectl rollout restart deploy/cso-operator-app
+
 echo "==> Waiting for rollout"
 kubectl rollout status deploy/cso-operator-app --timeout=120s
 
