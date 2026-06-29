@@ -607,7 +607,7 @@ async def _fetch_kick_clips(
                 errors.append(f"Kick: no clip_url for {clip_id}")
                 continue
             ok = await asyncio.get_event_loop().run_in_executor(
-                None, lambda u=m3u8_url, d=dest: asyncio.run(_download_hls_sync(u, d))
+                None, lambda u=m3u8_url, d=dest: _download_hls_sync(u, d)
             )
             if not ok:
                 errors.append(f"Kick: download failed for {clip_id}")
