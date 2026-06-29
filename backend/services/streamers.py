@@ -458,6 +458,11 @@ async def clip_queue(limit: int = 20) -> list[dict]:
         for msg in batch.get(tp, []):
             try:
                 record = json.loads(msg.value.decode("utf-8"))
+                # Only surface clips whose file is on disk — skip anything
+                # still downloading or where the path is stale
+                clip_path = record.get("clip_path", "")
+                if not clip_path or not Path(clip_path).exists():
+                    continue
                 record["_offset"] = msg.offset
                 record["_partition"] = msg.partition
                 record["_ts"] = msg.timestamp
