@@ -15,14 +15,18 @@ import { StreamersPage } from "@/components/StreamersPage";
 import { cn } from "@/lib/utils";
 
 const _modules = (import.meta.env.VITE_MODULES ?? "").split(",").map((s: string) => s.trim());
-const _streamers = _modules.includes("streamers") || _modules.includes("all");
+const _has = (m: string) => _modules.includes(m) || _modules.includes("all");
+const _efm = _has("efm");
+const _rag = _has("rag");
+const _streamers = _has("streamers");
 
 type Tab = "operator" | "efm" | "rag" | "streamers";
 
+// Operator is always present. EFM, RAG, Streamers require the matching MODULES flag.
 const TABS: { id: Tab; label: string }[] = [
   { id: "operator", label: "Operator" },
-  { id: "efm", label: "EFM" },
-  { id: "rag", label: "RAG" },
+  ...(_efm ? [{ id: "efm" as Tab, label: "EFM" }] : []),
+  ...(_rag ? [{ id: "rag" as Tab, label: "RAG" }] : []),
   ...(_streamers ? [{ id: "streamers" as Tab, label: "Streamers" }] : []),
 ];
 
@@ -54,7 +58,7 @@ export default function App() {
             <PodSummary />
           </>
         )}
-        {tab === "efm" && <EfmPage />}
+        {tab === "efm" && _efm && <EfmPage />}
         {tab === "streamers" && _streamers && <StreamersPage />}
         {tab === "rag" && (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">

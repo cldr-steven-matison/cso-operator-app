@@ -19,8 +19,9 @@ data:
   KAFKA_BOOTSTRAP: "my-cluster-kafka-bootstrap.cld-streaming.svc:9092"
   TOPIC_AUDIO: "new_audio"
   TOPIC_DOCS: "new_documents"
-  # Streamers module (set MODULES=streamers to activate)
-  MODULES: ""
+  # Active modules — controls which tabs and backend routes are enabled.
+  # Operator is always on. Add/remove: efm, rag, streamers
+  MODULES: "efm,rag,streamers"
   STREAMERS_WATCH_LIST: ""
   CLIP_STORAGE_PATH: "/clips"
   NEW_CLIPS_TOPIC: "new_clips"

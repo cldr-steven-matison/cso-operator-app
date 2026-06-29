@@ -10,11 +10,12 @@ IMAGE := cso-operator-app:latest
 # Kafka, NiFi, and the app image itself are identical on both paths.
 STACK ?= gpu
 
-# MODULES controls which optional modules are baked into the image.
-#   MODULES=streamers   — include the Twitch clip pipeline module
-#   MODULES=all         — include every known optional module
-#   MODULES=            — base image only (default)
-MODULES ?=
+# MODULES controls which optional tabs/routes are enabled.
+# Operator tab is always on. Add any combination of: efm, rag, streamers
+#   MODULES=efm,rag,streamers   — full install (matches configmap default)
+#   MODULES=streamers           — Operator + Streamers only
+#   MODULES=                    — Operator only (bare minimum)
+MODULES ?= efm,rag,streamers
 
 help:
 	@echo "Targets (STACK=$(STACK) MODULES=$(MODULES)):"
@@ -26,9 +27,10 @@ help:
 	@echo "  deploy      build + kubectl apply"
 	@echo "  clean       kubectl delete the app (leaves backing stack alone)"
 	@echo ""
-	@echo "Override the stack:   make bootstrap STACK=cpu"
-	@echo "Enable streamers:     make build MODULES=streamers"
-	@echo "All modules:          make build MODULES=all"
+	@echo "Override the stack:         make bootstrap STACK=cpu"
+	@echo "Operator only (default):    make deploy MODULES="
+	@echo "Full install (all modules): make deploy MODULES=efm,rag,streamers"
+	@echo "Streamers only:             make deploy MODULES=streamers"
 
 bootstrap:
 	STACK=$(STACK) bash scripts/bootstrap-stack.sh
@@ -50,7 +52,7 @@ build:
 	@eval $$(minikube docker-env) && docker build -t $(IMAGE) --build-arg MODULES=$(MODULES) .
 
 deploy:
-	bash scripts/deploy.sh
+	MODULES=$(MODULES) bash scripts/deploy.sh
 
 clean:
 	-kubectl delete -f k8s/service.yaml
