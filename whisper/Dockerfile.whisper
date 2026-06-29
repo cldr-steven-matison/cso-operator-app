@@ -65,15 +65,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # FastAPI Inference Logic
 COPY <<EOF /app/main.py
-import asyncio
-import os
-import tempfile
-from functools import partial
-
-import torch
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
+import torch
 from transformers import pipeline
+import tempfile, os
 
 app = FastAPI(title="StreamToWhisper")
 
@@ -85,28 +81,16 @@ pipe = pipeline(
     model_kwargs={"attn_implementation": "flash_attention_2"}
 )
 
-# Serialize GPU access — concurrent requests queue here rather than blocking
-# the event loop. The executor thread runs pipe() while FastAPI accepts the
-# next upload.
-_gpu_sem = asyncio.Semaphore(1)
-
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
     try:
-        loop = asyncio.get_event_loop()
-        async with _gpu_sem:
-            result = await loop.run_in_executor(
-                None,
-                partial(pipe, tmp_path, chunk_length_s=60, batch_size=24, return_timestamps=True),
-            )
+        result = pipe(tmp_path, chunk_length_s=60, batch_size=24, return_timestamps=True)
         os.unlink(tmp_path)
         return {"text": result["text"]}
     except Exception as e:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 if __name__ == "__main__":
