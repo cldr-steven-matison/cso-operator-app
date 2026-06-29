@@ -10,6 +10,7 @@ import asyncio
 import glob
 import json
 import re
+import subprocess
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -710,18 +711,25 @@ async def process_clip(clip: dict) -> dict:
         return {**clip, "transcript": "", "caption": "", "error": f"File not found: {clip_path}"}
 
     async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
-        # Whisper transcription
+        # Whisper transcription — extract 16kHz mono WAV first (soundfile in Whisper can't read MP4)
         transcript = ""
+        wav_path = Path(clip_path).with_suffix(".wav")
         try:
-            with open(clip_path, "rb") as f:
+            await asyncio.get_event_loop().run_in_executor(None, lambda: subprocess.run(
+                ["ffmpeg", "-y", "-i", clip_path, "-vn", "-ac", "1", "-ar", "16000", str(wav_path)],
+                capture_output=True, timeout=60,
+            ))
+            with open(wav_path, "rb") as f:
                 r = await client.post(
                     f"{settings.WHISPER_URL}/transcribe",
-                    files={"file": (Path(clip_path).name, f, "video/mp4")},
+                    files={"file": ("clip.wav", f, "audio/wav")},
                 )
             if r.status_code == 200:
                 transcript = r.json().get("text", "")
         except Exception as e:
             transcript = f"[transcription error: {e}]"
+        finally:
+            wav_path.unlink(missing_ok=True)
 
         # vLLM caption generation
         caption = ""
