@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 echo "==> Building app image into Minikube docker daemon"
 eval "$(minikube docker-env)"
-docker build -t cso-operator-app:latest .
+docker build -t cso-operator-app:latest --build-arg MODULES="${MODULES:-}" .
 
 echo "==> Applying app manifests"
 kubectl apply -f k8s/rbac.yaml
