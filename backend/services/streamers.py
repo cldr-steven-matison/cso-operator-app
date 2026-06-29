@@ -295,6 +295,17 @@ async def _gql_clip_mp4_url(client: httpx.AsyncClient, clip_id: str) -> str | No
 
 _KICK_TOKEN_URL = "https://id.kick.com/oauth/token"
 _KICK_API_BASE = "https://api.kick.com/public/v1"
+_KICK_WEB_CLIPS = "https://kick.com/api/v2/clips"
+_KICK_BROWSER_HEADERS = {
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://kick.com/",
+}
 
 
 async def _kick_token_refresh(client: httpx.AsyncClient) -> str:
@@ -339,25 +350,22 @@ async def _get_kick_broadcaster_id(client: httpx.AsyncClient, token: str, slug: 
     return data[0].get("broadcaster_user_id")
 
 
-async def _get_kick_clips(client: httpx.AsyncClient, token: str, broadcaster_id: int) -> list[dict]:
+async def _get_kick_clips(client: httpx.AsyncClient, slug: str) -> list[dict]:
     r = await client.get(
-        f"{_KICK_API_BASE}/clips",
-        params={
-            "broadcaster_id": broadcaster_id,
-            "sort": "view_count",
-            "time_range": "day",
-        },
-        headers=_kick_headers(token),
+        _KICK_WEB_CLIPS,
+        params={"channel": slug, "sort": "date"},
+        headers=_KICK_BROWSER_HEADERS,
         timeout=10.0,
     )
     if r.status_code != 200:
         return []
-    clips = r.json().get("data", [])
+    clips = r.json().get("clips", [])
     return sorted(
         [c for c in clips if c.get("duration", 0) >= 45],
         key=lambda c: c.get("duration", 0),
         reverse=True,
     )
+
 
 
 async def _download_clip(client: httpx.AsyncClient, url: str, dest: Path) -> bool:
@@ -581,22 +589,12 @@ async def _fetch_kick_clips(
     errors: list[str],
     kick_token_getter,
 ) -> list[dict]:
-    try:
-        token = await kick_token_getter()
-    except RuntimeError as e:
-        errors.append(str(e))
-        return []
-    broadcaster_id = await _get_kick_broadcaster_id(client, token, login)
-    if not broadcaster_id:
-        errors.append(f"Kick: could not resolve broadcaster_id for {login}")
-        return []
-    clips = await _get_kick_clips(client, token, broadcaster_id)
+    clips = await _get_kick_clips(client, login)
     result: list[dict] = []
     for clip in clips:
         if len(result) >= 5:
             break
-        # Kick uses UUIDs — prefix with kick_ to namespace from Twitch IDs
-        raw_id = clip.get("clip_id", "")
+        raw_id = clip.get("id", "")
         if not raw_id:
             continue
         clip_id = f"kick_{raw_id.replace('-', '')}"
@@ -604,29 +602,44 @@ async def _fetch_kick_clips(
             continue
         dest = clip_dir / f"{clip_id}.mp4"
         if not dest.exists():
-            mp4_url = clip.get("clip_url", "")
-            if not mp4_url:
+            m3u8_url = clip.get("clip_url") or clip.get("video_url", "")
+            if not m3u8_url:
                 errors.append(f"Kick: no clip_url for {clip_id}")
                 continue
-            ok = await _download_clip(client, mp4_url, dest)
+            ok = await asyncio.get_event_loop().run_in_executor(
+                None, lambda u=m3u8_url, d=dest: asyncio.run(_download_hls_sync(u, d))
+            )
             if not ok:
                 errors.append(f"Kick: download failed for {clip_id}")
                 continue
-        broadcaster = clip.get("broadcaster", {})
         result.append({
             "clip_id": clip_id,
             "source": "kick",
             "streamer": login,
-            "broadcaster_id": broadcaster_id,
             "title": clip.get("title", ""),
             "url": clip.get("clip_url", ""),
             "thumbnail_url": clip.get("thumbnail_url", ""),
             "duration": clip.get("duration", 0),
             "created_at": clip.get("created_at", ""),
             "clip_path": str(dest),
-            "view_count": clip.get("views", 0),
+            "view_count": clip.get("view_count", 0),
         })
     return result
+
+
+def _download_hls_sync(m3u8_url: str, dest: Path) -> bool:
+    import subprocess
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", m3u8_url, "-c", "copy", str(dest)],
+            capture_output=True,
+            timeout=120,
+        )
+        return result.returncode == 0 and dest.exists() and dest.stat().st_size > 10_000
+    except Exception:
+        dest.unlink(missing_ok=True)
+        return False
 
 
 async def _publish_clips_to_kafka(clips: list[dict]):
