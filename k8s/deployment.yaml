@@ -22,24 +22,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: cso-operator-app-config
-          env:
-            # NiFi REST API password — sourced from the same Secret the
-            # cfm-streaming admin user is provisioned with. Cross-namespace
-            # Secret refs aren't supported, so the deploy script mirrors
-            # `nifi-admin-creds` from cfm-streaming into `default` (the app's
-            # namespace) as `nifi-app-creds`.
-            - name: NIFI_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: nifi-app-creds
-                  key: password
-                  optional: true
-            - name: NIFI_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: nifi-app-creds
-                  key: username
-                  optional: true
           resources:
             requests:
               cpu: "100m"
