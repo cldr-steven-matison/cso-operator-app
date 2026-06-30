@@ -9,7 +9,4 @@ spec:
     - protocol: TCP
       port: 8000
       targetPort: 8000
-      # 30080 was claimed by an orphan minifi-test-service on the dev
-      # cluster — we moved to 30090. Update both sides if you change it.
-      nodePort: 30090
-  type: NodePort
+  type: LoadBalancer
