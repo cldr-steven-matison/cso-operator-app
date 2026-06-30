@@ -419,6 +419,38 @@ def _pending_path() -> Path:
     return Path(settings.CLIP_STORAGE_PATH) / ".pending_publish.json"
 
 
+# Catalog: bare login (lowercase) → X handle (no @ prefix).
+# Source of truth: DesktopShare/streamers.md — keep both in sync when adding streamers.
+_STREAMER_CATALOG: dict[str, str] = {
+    # Twitch
+    "xqc":            "xQc",
+    "ishowspeed":     "ishowspeedsui",
+    "stableronaldo":  "StableRonaldo",
+    "jynxzi":         "jynxzi",
+    "agent00":        "CallMeAgent00",
+    "extraemily":     "ExtraEmily",
+    "eliasn97":       "EliasN97",
+    "hello_kiko":     "hello_kiko",
+    "theburntpeanut": "theburntpeanut",
+    "jasontheween":   "jasontheween",
+    "zackrawrr":      "zackrawrr",
+    "lacy":           "LacyHimself",
+    # Kick
+    "roshtein":       "roshtein",
+    "deenthegreat":   "DeenTheGreat",
+    "hstikkytokky":   "HSTikkyTokky",
+    "odablock":       "Odablock",
+    "iceposeidon":    "REALIcePoseidon",
+    "adinross":       "adinross",
+    "n3on":           "N3on",
+}
+
+
+def get_x_handle(login: str) -> str:
+    """Return X handle (no @) for a bare login, or empty string if not in catalog."""
+    return _STREAMER_CATALOG.get(login.lower(), "")
+
+
 def _load_pending() -> list[dict]:
     p = _pending_path()
     if p.exists():
@@ -676,13 +708,7 @@ async def _publish_clips_to_kafka(clips: list[dict]):
 # ── ProcessClip — Whisper + vLLM ──────────────────────────────────────────────
 
 def _clean_caption(text: str) -> str:
-    """Strip model formatting artifacts from vLLM caption output.
-
-    Small models often wrap the answer in a label like:
-      **Punchy Reaction:** "actual tweet text"
-    followed by self-commentary sections starting with — or —.
-    This extracts just the bare tweet text.
-    """
+    """Strip model formatting artifacts from vLLM caption output."""
     text = text.strip()
     # Only the first paragraph is the caption; the rest is model commentary
     text = text.split("\n\n")[0].strip()
@@ -691,16 +717,21 @@ def _clean_caption(text: str) -> str:
     # Strip surrounding double-quotes that the model adds around the answer
     if text.startswith('"') and text.endswith('"'):
         text = text[1:-1]
-    # Normalize weird hashtags: #ALL_CAPS or #WORD_WORD → #TitleCase
-    def _fix_tag(m: re.Match) -> str:
-        tag = m.group(1)
-        if '_' in tag:
-            return '#' + ''.join(w.capitalize() for w in tag.split('_'))
-        if tag.isupper() and len(tag) > 3:
-            return '#' + tag.capitalize()
-        return m.group(0)
-    text = re.sub(r'#([A-Za-z_]+)', _fix_tag, text)
+    # Strip all hashtags — platform/handle suffix is added by _build_tweet
+    text = re.sub(r'\s*#\w+', '', text)
     return text.strip()
+
+
+def _build_tweet(caption: str, source: str, streamer: str, x_handle: str = "") -> str:
+    """Assemble final tweet: reaction body + platform | @handle suffix. Always ≤ 280 chars."""
+    platform = "Kick" if source == "kick" else "Twitch"
+    handle = f"@{x_handle}" if x_handle else streamer
+    suffix = f"\n\n{platform} | {handle}"
+    max_body = 280 - len(suffix)
+    body = caption.strip()
+    if len(body) > max_body:
+        body = body[:max_body - 1].rstrip() + "…"
+    return body + suffix
 
 
 async def process_clip(clip: dict) -> dict:
@@ -742,16 +773,19 @@ async def process_clip(clip: dict) -> dict:
                         "messages": [
                             {
                                 "role": "system",
-                                "content": "You are a hype social media editor. Output ONLY the tweet text — no labels, no headers, no explanation, no surrounding quotes.",
+                                "content": (
+                                    "You are a hype social media editor. Output ONLY the reaction text — "
+                                    "no labels, no headers, no explanation, no surrounding quotes, no hashtags, no @mentions."
+                                ),
                             },
                             {
                                 "role": "user",
                                 "content": (
-                                    f"Write one punchy, witty tweet reaction (max 220 chars) to this {clip.get('source', 'twitch').capitalize()} clip. "
-                                    f"You MUST include the word '{'Kick' if clip.get('source') == 'kick' else 'Twitch'}' somewhere in the tweet. "
-                                    f"Use 2-4 emojis and gaming slang naturally. "
+                                    f"Write one punchy, witty reaction (under 200 chars) to this gaming clip by {clip.get('streamer', 'unknown')}. "
+                                    f"DO NOT include hashtags, platform names, or @mentions — those are added separately. "
+                                    f"Use 1-2 emojis and natural gaming slang. "
                                     f"Examples: 'bro said what 💀', 'no way he actually did that 😭🔥', 'chat was NOT ready 👀'. "
-                                    f"Clip: '{clip.get('title', '')}' by {clip.get('streamer', 'unknown')}. "
+                                    f"Clip: '{clip.get('title', '')}'. "
                                     f"Transcript: {transcript[:500]}"
                                 ),
                             },
@@ -763,6 +797,9 @@ async def process_clip(clip: dict) -> dict:
                 if r.status_code == 200:
                     raw = r.json()["choices"][0]["message"]["content"]
                     caption = _clean_caption(raw)
+                    # Assemble final tweet: reaction + platform | @handle suffix
+                    x_handle = get_x_handle(clip.get("streamer", ""))
+                    caption = _build_tweet(caption, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle)
             except Exception as e:
                 caption = f"[caption error: {e}]"
 

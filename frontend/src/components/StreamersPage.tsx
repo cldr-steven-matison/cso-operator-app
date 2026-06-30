@@ -323,7 +323,6 @@ function WatchList() {
       <CardTitle>Watch List</CardTitle>
       <div className="space-y-3">
         <div className="flex gap-2">
-          {/* Platform picker */}
           <div className="flex rounded border border-border overflow-hidden shrink-0 text-xs font-semibold">
             <button
               onClick={() => setPlatform("twitch")}
