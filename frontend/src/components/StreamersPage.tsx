@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { api, type StreamerClip, type StreamerFlows, type StreamerTopics } from "@/lib/api";
+import { TopicPeek } from "./TopicPeek";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -90,12 +91,11 @@ function ClipCard({
   onSkip: (offset: number) => void;
 }) {
   const [caption, setCaption] = useState(clip.caption?.trim() || fallbackCaption());
-  const [commentary, setCommentary] = useState("");
   const [publishing, setPublishing] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; position?: number; error?: string } | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
 
-  const tweetText = [caption, commentary].filter(Boolean).join("\n\n");
+  const tweetText = caption;
 
   async function doPublish() {
     if (!clip.clip_path || !tweetText.trim()) return;
@@ -123,12 +123,38 @@ function ClipCard({
     <div className="border border-border rounded p-4 bg-bg space-y-3">
       {/* Header */}
       <div className="flex items-start justify-between gap-2">
-        <div>
-          <p className="text-sm font-semibold text-text">{clip.title ?? "Untitled Clip"}</p>
-          <p className="text-xs text-muted flex items-center gap-1.5">
+        <div className="space-y-1 min-w-0">
+          {clip.url ? (
+            <a href={clip.url} target="_blank" rel="noopener noreferrer"
+               className="text-sm font-semibold text-text hover:text-accent block truncate">
+              {clip.title ?? "Untitled Clip"}
+            </a>
+          ) : (
+            <p className="text-sm font-semibold text-text truncate">{clip.title ?? "Untitled Clip"}</p>
+          )}
+          <div className="flex items-center gap-1.5 flex-wrap text-xs text-muted">
             <PlatformBadge platform={(clip.source ?? "twitch") as "twitch" | "kick"} />
-            {clip.streamer ?? "Unknown"} · {clip.duration ? `${Math.round(clip.duration)}s` : "—"}
-          </p>
+            <a
+              href={clip.source === "kick" ? `https://kick.com/${clip.streamer}` : `https://www.twitch.tv/${clip.streamer}`}
+              target="_blank" rel="noopener noreferrer"
+              className="text-text hover:text-accent font-mono"
+            >
+              {clip.streamer ?? "Unknown"}
+            </a>
+            {clip.x_handle && (
+              <a href={`https://x.com/${clip.x_handle}`} target="_blank" rel="noopener noreferrer"
+                 className="text-accent hover:underline">
+                @{clip.x_handle}
+              </a>
+            )}
+            {clip.duration && <span>· {Math.round(clip.duration)}s</span>}
+            {clip.view_count != null && clip.view_count > 0 && (
+              <span>· {clip.view_count.toLocaleString()} views</span>
+            )}
+            {clip.created_at && (
+              <span>· {new Date(clip.created_at).toLocaleDateString()}</span>
+            )}
+          </div>
         </div>
         {clip.thumbnail_url && (
           <img
@@ -167,24 +193,11 @@ function ClipCard({
 
       {/* Caption (editable) */}
       <div className="space-y-1">
-        <label className="text-xs text-muted">Caption (vLLM generated — edit freely)</label>
         <textarea
-          rows={2}
+          rows={4}
           value={caption}
           onChange={(e) => setCaption(e.target.value)}
           className="w-full bg-bg border border-border rounded px-2 py-1 text-xs font-mono text-text resize-y"
-        />
-      </div>
-
-      {/* Commentary */}
-      <div className="space-y-1">
-        <label className="text-xs text-muted">Your commentary</label>
-        <textarea
-          rows={2}
-          value={commentary}
-          onChange={(e) => setCommentary(e.target.value)}
-          placeholder="Add your take…"
-          className="w-full bg-bg border border-border rounded px-2 py-1 text-xs text-text resize-y"
         />
       </div>
 
@@ -217,7 +230,7 @@ function ClipCard({
         {result && (
           <span className={result.ok ? "text-accent text-xs" : "text-bad text-xs"}>
             {result.ok
-              ? `Queued #${result.position} — posts in ~2 min ✓`
+              ? `Queued #${result.position} ✓`
               : result.error}
           </span>
         )}
@@ -286,10 +299,17 @@ function WatchList() {
   const [input, setInput] = useState("");
   const [platform, setPlatform] = useState<"twitch" | "kick">("twitch");
   const [saving, setSaving] = useState(false);
+  const [fetchMode, setFetchMode] = useState<{ mode: string; period: string }>({ mode: "recent", period: "month" });
 
   useEffect(() => {
     api.streamersWatchlist().then((r) => setLogins(r.logins)).catch(() => {});
+    api.streamersFetchMode().then(setFetchMode).catch(() => {});
   }, []);
+
+  async function updateFetchMode(mode: string, period: string) {
+    const updated = await api.streamersSetFetchMode(mode, period);
+    setFetchMode(updated);
+  }
 
   async function add() {
     const bare = input.trim().toLowerCase();
@@ -383,6 +403,39 @@ function WatchList() {
             })}
           </div>
         )}
+        <div className="pt-2 border-t border-border flex items-center gap-3 flex-wrap">
+          <span className="text-xs text-muted">Fetch mode:</span>
+          <div className="flex rounded border border-border overflow-hidden text-xs font-semibold">
+            <button
+              onClick={() => updateFetchMode("recent", fetchMode.period)}
+              className={`px-2 py-1 transition-colors ${fetchMode.mode === "recent" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+            >
+              Recent
+            </button>
+            <button
+              onClick={() => updateFetchMode("top", fetchMode.period)}
+              className={`px-2 py-1 border-l border-border transition-colors ${fetchMode.mode === "top" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+            >
+              Top Clips
+            </button>
+          </div>
+          {fetchMode.mode === "top" && (
+            <div className="flex rounded border border-border overflow-hidden text-xs font-semibold">
+              <button
+                onClick={() => updateFetchMode("top", "month")}
+                className={`px-2 py-1 transition-colors ${fetchMode.period === "month" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+              >
+                1 Month
+              </button>
+              <button
+                onClick={() => updateFetchMode("top", "all")}
+                className={`px-2 py-1 border-l border-border transition-colors ${fetchMode.period === "all" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+              >
+                All Time
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </Card>
   );
@@ -397,6 +450,7 @@ export function StreamersPage() {
   const [dismissed, setDismissed] = useState<Set<number>>(new Set());
   const [topics, setTopics] = useState<StreamerTopics | null>(null);
   const [topicsLoading, setTopicsLoading] = useState(false);
+  const [peekOpen, setPeekOpen] = useState<Record<string, boolean>>({});
   const [resetting, setResetting] = useState(false);
   const [resetResult, setResetResult] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -435,7 +489,6 @@ export function StreamersPage() {
       const r = await api.streamersReset();
       const errs = r.errors?.length ? ` Errors: ${r.errors.join(", ")}` : "";
       setResetResult(`Deleted: ${r.deleted_topics.join(", ")} | Clips removed: ${r.removed_clips}${errs} — waiting for Kafka…`);
-      // Give Strimzi ~4s to actually remove the topics before querying
       await new Promise((res) => setTimeout(res, 4000));
       await refreshQueue();
       await refreshTopics();
@@ -533,8 +586,18 @@ export function StreamersPage() {
           </p>
         )}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <TopicPanel label="new_clips" stats={topics?.new_clips} />
-          <TopicPanel label="processed_clips" stats={topics?.processed_clips} />
+          {(["new_clips", "processed_clips"] as const).map((t) => (
+            <div key={t}>
+              <TopicPanel label={t} stats={topics?.[t]} />
+              <div
+                className={`mt-2 border rounded p-2 cursor-pointer text-xs border-accent/40 bg-accent/5 ${peekOpen[t] ? "ring-1 ring-accent/60" : ""}`}
+                onClick={() => setPeekOpen((o) => ({ ...o, [t]: !o[t] }))}
+              >
+                <span className="font-mono font-semibold text-text">{peekOpen[t] ? "▾ " : "▸ "}{t} payload</span>
+                {peekOpen[t] && <TopicPeek topic={t} limit={10} />}
+              </div>
+            </div>
+          ))}
         </div>
       </Card>
 
@@ -577,6 +640,7 @@ export function StreamersPage() {
 
       {/* ── Section 3: Watch List ──────────────────────────────────── */}
       <WatchList />
+
     </div>
   );
 }

@@ -168,3 +168,20 @@ class WatchlistUpdate(BaseModel):
 async def set_watchlist(body: WatchlistUpdate):
     streamers.set_watchlist(body.logins)
     return {"logins": streamers.get_watchlist()}
+
+
+# ── Fetch mode ────────────────────────────────────────────────────────────────
+
+@router.get("/fetch-mode")
+async def get_fetch_mode():
+    return streamers.get_fetch_mode()
+
+
+class FetchModeUpdate(BaseModel):
+    mode: str   # "recent" | "top"
+    period: str = "month"  # "month" | "all"
+
+
+@router.post("/fetch-mode")
+async def set_fetch_mode(body: FetchModeUpdate):
+    return streamers.set_fetch_mode(body.mode, body.period)

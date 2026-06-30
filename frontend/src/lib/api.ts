@@ -92,10 +92,12 @@ export type StreamerClip = {
   clip_id?: string;
   source?: string;
   streamer?: string;
+  x_handle?: string;
   title?: string;
   url?: string;
   thumbnail_url?: string;
   duration?: number;
+  view_count?: number;
   created_at?: string;
   clip_path?: string;
   transcript?: string;
@@ -212,6 +214,9 @@ export const api = {
     jpost<WatchlistResponse>("/api/streamers/watchlist", { logins }),
   streamersTopics: () => jget<StreamerTopics>("/api/streamers/topics"),
   streamersReset: () => jpost<KafkaResetResult>("/api/streamers/reset"),
+  streamersFetchMode: () => jget<{ mode: string; period: string }>("/api/streamers/fetch-mode"),
+  streamersSetFetchMode: (mode: string, period: string) =>
+    jpost<{ mode: string; period: string }>("/api/streamers/fetch-mode", { mode, period }),
 };
 
 async function uploadFile(url: string, file: File) {

@@ -318,7 +318,7 @@ def main():
     print("\nNext steps:")
     print("  1. Start FetchClips and ProcessClips from the Streamers tab in the app")
     print("  2. Add Twitch credentials: kubectl set env deploy/cso-operator-app TWITCH_CLIENT_ID=... TWITCH_CLIENT_SECRET=...")
-    print("  3. Set watch list from the Streamers tab or: kubectl set env deploy/cso-operator-app STREAMERS_WATCH_LIST=xQc,summit1g")
+    print("  3. Watch list pre-populates with 2 random Twitch + 2 random Kick on startup. Add/remove from the Streamers tab.")
 
 
 if __name__ == "__main__":

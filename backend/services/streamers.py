@@ -9,6 +9,7 @@ X publishing is called directly from the Review UI Approve button.
 import asyncio
 import glob
 import json
+import random
 import re
 import subprocess
 import time
@@ -22,6 +23,17 @@ from aiokafka.admin import AIOKafkaAdminClient
 from config import settings
 
 STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClip")
+
+_TWITCH_LOGINS: list[str] = [
+    "xqc", "ishowspeed", "stableronaldo", "jynxzi", "agent00",
+    "extraemily", "eliasn97", "hello_kiko", "theburntpeanut",
+    "jasontheween", "zackrawrr", "lacy",
+]
+
+_KICK_LOGINS: list[str] = [
+    "roshtein", "deenthegreat", "hstikkytokky", "odablock",
+    "iceposeidon", "adinross", "n3on",
+]
 
 _watchlist: list[str] = []
 _twitch_token: str = ""
@@ -42,7 +54,9 @@ _TOPIC_STATS_TTL = 30.0
 
 def _init_watchlist():
     global _watchlist
-    _watchlist = [l.strip() for l in settings.STREAMERS_WATCH_LIST.split(",") if l.strip()]
+    twitch_picks = random.sample(_TWITCH_LOGINS, min(2, len(_TWITCH_LOGINS)))
+    kick_picks = [f"kick:{l}" for l in random.sample(_KICK_LOGINS, min(2, len(_KICK_LOGINS)))]
+    _watchlist = twitch_picks + kick_picks
 
 
 _init_watchlist()
@@ -214,26 +228,29 @@ async def _get_broadcaster_id(client: httpx.AsyncClient, token: str, login: str)
     return data[0]["id"] if data else None
 
 
-async def _get_clips(client: httpx.AsyncClient, token: str, broadcaster_id: str, since: datetime) -> list[dict]:
+async def _get_clips(
+    client: httpx.AsyncClient,
+    token: str,
+    broadcaster_id: str,
+    since: datetime | None,
+    top_mode: bool = False,
+) -> list[dict]:
+    params: dict = {"broadcaster_id": broadcaster_id, "first": "20"}
+    if since is not None:
+        params["started_at"] = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     r = await client.get(
         "https://api.twitch.tv/helix/clips",
-        params={
-            "broadcaster_id": broadcaster_id,
-            "first": "20",
-            "started_at": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        },
+        params=params,
         headers=_twitch_headers(token),
         timeout=10.0,
     )
     if r.status_code != 200:
         return []
     clips = r.json().get("data", [])
-    # Skip anything under 45s — prefer clips closer to the 60s max
-    return sorted(
-        [c for c in clips if c.get("duration", 0) >= 45],
-        key=lambda c: c.get("duration", 0),
-        reverse=True,
-    )
+    valid = [c for c in clips if c.get("duration", 0) >= 45]
+    if top_mode:
+        return sorted(valid, key=lambda c: c.get("view_count", 0), reverse=True)
+    return sorted(valid, key=lambda c: c.get("duration", 0), reverse=True)
 
 
 _TWITCH_WEB_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"  # public Twitch web player client
@@ -351,21 +368,26 @@ async def _get_kick_broadcaster_id(client: httpx.AsyncClient, token: str, slug: 
     return data[0].get("broadcaster_user_id")
 
 
-async def _get_kick_clips(client: httpx.AsyncClient, slug: str) -> list[dict]:
+async def _get_kick_clips(
+    client: httpx.AsyncClient,
+    slug: str,
+    top_mode: bool = False,
+    period: str = "week",
+) -> list[dict]:
+    # Kick channel endpoint only supports sort=date — no time window or views sort available.
+    # Fetch 20 most recent clips and sort by view_count client-side.
+    # top_mode/period are Twitch-only; Kick ignores them.
     r = await client.get(
-        _KICK_WEB_CLIPS,
-        params={"channel": slug, "sort": "date"},
+        f"https://kick.com/api/v2/channels/{slug}/clips",
         headers=_KICK_BROWSER_HEADERS,
         timeout=10.0,
     )
     if r.status_code != 200:
         return []
-    clips = r.json().get("clips", [])
-    return sorted(
-        [c for c in clips if c.get("duration", 0) >= 45],
-        key=lambda c: c.get("duration", 0),
-        reverse=True,
-    )
+    data = r.json()
+    clips = data.get("clips", data.get("data", []))
+    valid = [c for c in clips if 45 <= c.get("duration", 0) <= 90]
+    return sorted(valid, key=lambda c: c.get("view_count", 0), reverse=True)
 
 
 
@@ -419,6 +441,27 @@ def _pending_path() -> Path:
     return Path(settings.CLIP_STORAGE_PATH) / ".pending_publish.json"
 
 
+def _fetch_mode_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".fetch_mode.json"
+
+
+def get_fetch_mode() -> dict:
+    p = _fetch_mode_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            pass
+    return {"mode": "recent", "period": "week"}
+
+
+def set_fetch_mode(mode: str, period: str) -> dict:
+    data = {"mode": mode, "period": period}
+    _fetch_mode_path().parent.mkdir(parents=True, exist_ok=True)
+    _fetch_mode_path().write_text(json.dumps(data))
+    return data
+
+
 # Catalog: bare login (lowercase) → X handle (no @ prefix).
 # Source of truth: DesktopShare/streamers.md — keep both in sync when adding streamers.
 _STREAMER_CATALOG: dict[str, str] = {
@@ -444,7 +487,6 @@ _STREAMER_CATALOG: dict[str, str] = {
     "adinross":       "adinross",
     "n3on":           "N3on",
 }
-
 
 def get_x_handle(login: str) -> str:
     """Return X handle (no @) for a bare login, or empty string if not in catalog."""
@@ -524,7 +566,17 @@ async def fetch_clips() -> dict:
         except Exception:
             pass
 
-    since = datetime.now(timezone.utc) - timedelta(hours=6)
+    fm = get_fetch_mode()
+    top_mode = fm.get("mode") == "top"
+    period = fm.get("period", "week")
+
+    if top_mode and period == "all":
+        since = None
+    elif top_mode:
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+    else:
+        since = datetime.now(timezone.utc) - timedelta(hours=6)
+
     fetched: list[dict] = []
     errors: list[str] = []
 
@@ -546,6 +598,7 @@ async def fetch_clips() -> dict:
             result = await _fetch_kick_clips(
                 client, login, clip_dir, seen, entry_errors,
                 kick_token_getter=lambda: _kick_token_refresh(client),
+                top_mode=top_mode, period=period,
             )
             errors.extend(entry_errors)
             return result
@@ -557,6 +610,7 @@ async def fetch_clips() -> dict:
             entry_errors: list[str] = []
             result = await _fetch_twitch_clips(
                 client, twitch_token, login, clip_dir, seen, since, entry_errors,
+                top_mode=top_mode,
             )
             errors.extend(entry_errors)
             return result
@@ -582,14 +636,15 @@ async def _fetch_twitch_clips(
     login: str,
     clip_dir: Path,
     seen: set[str],
-    since: datetime,
+    since: datetime | None,
     errors: list[str],
+    top_mode: bool = False,
 ) -> list[dict]:
     broadcaster_id = await _get_broadcaster_id(client, token, login)
     if not broadcaster_id:
         errors.append(f"Twitch: could not resolve broadcaster_id for {login}")
         return []
-    clips = await _get_clips(client, token, broadcaster_id, since)
+    clips = await _get_clips(client, token, broadcaster_id, since, top_mode=top_mode)
     result: list[dict] = []
     for clip in clips:
         if len(result) >= 2:
@@ -631,8 +686,10 @@ async def _fetch_kick_clips(
     seen: set[str],
     errors: list[str],
     kick_token_getter,
+    top_mode: bool = False,
+    period: str = "week",
 ) -> list[dict]:
-    clips = await _get_kick_clips(client, login)
+    clips = await _get_kick_clips(client, login, top_mode=top_mode, period=period)
     result: list[dict] = []
     for clip in clips:
         if len(result) >= 2:
@@ -707,6 +764,19 @@ async def _publish_clips_to_kafka(clips: list[dict]):
 
 # ── ProcessClip — Whisper + vLLM ──────────────────────────────────────────────
 
+_EMOJI_RE = re.compile(
+    "[\U0001F1E0-\U0001F1FF"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0000FE00-\U0000FE0F"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
 def _clean_caption(text: str) -> str:
     """Strip model formatting artifacts from vLLM caption output."""
     text = text.strip()
@@ -719,14 +789,24 @@ def _clean_caption(text: str) -> str:
         text = text[1:-1]
     # Strip all hashtags — platform/handle suffix is added by _build_tweet
     text = re.sub(r'\s*#\w+', '', text)
+    # Cap emojis — if model spammed more than 3 total, strip them all
+    emoji_matches = _EMOJI_RE.findall(text)
+    if sum(len(m) for m in emoji_matches) > 3:
+        text = _EMOJI_RE.sub("", text)
     return text.strip()
 
 
 def _build_tweet(caption: str, source: str, streamer: str, x_handle: str = "") -> str:
-    """Assemble final tweet: reaction body + platform | @handle suffix. Always ≤ 280 chars."""
+    """Assemble final tweet: reaction body + attribution line. Always ≤ 280 chars.
+
+    Format with X handle:    '{reaction}\n\nTwitch streaming stableronaldo find me on X @StableRonaldo'
+    Format without X handle: '{reaction}\n\nTwitch streaming stableronaldo'
+    """
     platform = "Kick" if source == "kick" else "Twitch"
-    handle = f"@{x_handle}" if x_handle else streamer
-    suffix = f"\n\n{platform} | {handle}"
+    if x_handle:
+        suffix = f"\n\n{platform} streaming {streamer} find me on X @{x_handle}"
+    else:
+        suffix = f"\n\n{platform} streaming {streamer}"
     max_body = 280 - len(suffix)
     body = caption.strip()
     if len(body) > max_body:
@@ -741,22 +821,30 @@ async def process_clip(clip: dict) -> dict:
     if not clip_path or not Path(clip_path).exists():
         return {**clip, "transcript": "", "caption": "", "error": f"File not found: {clip_path}"}
 
-    async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
-        # Whisper transcription — extract 16kHz mono WAV first (soundfile in Whisper can't read MP4)
+    # Disqualify clips with no usable title — vLLM has nothing to work with
+    if len(clip.get("title", "").strip()) < 2:
+        return {**clip, "transcript": "", "caption": "", "error": "disqualified: no title"}
+
+    async with httpx.AsyncClient(verify=False, timeout=300.0) as client:
+        # Extract 16kHz mono WAV — much smaller upload to Whisper than raw MP4
         transcript = ""
         wav_path = Path(clip_path).with_suffix(".wav")
         try:
-            await asyncio.get_event_loop().run_in_executor(None, lambda: subprocess.run(
+            proc = await asyncio.to_thread(
+                subprocess.run,
                 ["ffmpeg", "-y", "-i", clip_path, "-vn", "-ac", "1", "-ar", "16000", str(wav_path)],
-                capture_output=True, timeout=60,
-            ))
+                capture_output=True,
+                timeout=60,
+            )
+            if proc.returncode != 0 or not wav_path.exists():
+                raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()[:200]}")
             with open(wav_path, "rb") as f:
                 r = await client.post(
                     f"{settings.WHISPER_URL}/transcribe",
                     files={"file": ("clip.wav", f, "audio/wav")},
                 )
             if r.status_code == 200:
-                transcript = r.json().get("text", "")
+                transcript = r.json().get("text", "").strip()
         except Exception as e:
             transcript = f"[transcription error: {e}]"
         finally:
@@ -773,31 +861,26 @@ async def process_clip(clip: dict) -> dict:
                         "messages": [
                             {
                                 "role": "system",
-                                "content": (
-                                    "You are a hype social media editor. Output ONLY the reaction text — "
-                                    "no labels, no headers, no explanation, no surrounding quotes, no hashtags, no @mentions."
-                                ),
+                                "content": "You are a hype gaming content creator writing tweets. Output ONLY the tweet text — no labels, no quotes around it.",
                             },
                             {
                                 "role": "user",
                                 "content": (
-                                    f"Write one punchy, witty reaction (under 200 chars) to this gaming clip by {clip.get('streamer', 'unknown')}. "
-                                    f"DO NOT include hashtags, platform names, or @mentions — those are added separately. "
-                                    f"Use 1-2 emojis and natural gaming slang. "
-                                    f"Examples: 'bro said what 💀', 'no way he actually did that 😭🔥', 'chat was NOT ready 👀'. "
-                                    f"Clip: '{clip.get('title', '')}'. "
-                                    f"Transcript: {transcript[:500]}"
+                                    f"React to this clip by {clip.get('streamer', 'unknown')} like you're live in their Twitch chat. "
+                                    f"Talk directly to the streamer, quote the wildest line, or just react like a viewer who can't believe what they just saw. "
+                                    f"Stay grounded in the transcript. Do not invent facts. Under 200 chars. Exactly 1 emoji. No hashtags. "
+                                    f"Clip title: '{clip.get('title', '')}'. "
+                                    f"Transcript: {transcript[:600]}"
                                 ),
                             },
                         ],
-                        "max_tokens": 100,
-                        "temperature": 0.8,
+                        "max_tokens": 120,
+                        "temperature": 0.85,
                     },
                 )
                 if r.status_code == 200:
                     raw = r.json()["choices"][0]["message"]["content"]
                     caption = _clean_caption(raw)
-                    # Assemble final tweet: reaction + platform | @handle suffix
                     x_handle = get_x_handle(clip.get("streamer", ""))
                     caption = _build_tweet(caption, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle)
             except Exception as e:
@@ -843,19 +926,24 @@ async def clip_queue(limit: int = 20) -> list[dict]:
         )
         skipped = get_skipped()
         published = get_published()
+        pending = {p["clip_id"] for p in _load_pending()}
         for msg in batch.get(tp, []):
             try:
                 record = json.loads(msg.value.decode("utf-8"))
                 clip_id = record.get("clip_id", "")
-                # Filter: missing file, already skipped, or already published
+                # Filter: missing file, skipped, pending, published, or disqualified/errored
                 clip_path = record.get("clip_path", "")
                 if not clip_path or not Path(clip_path).exists():
                     continue
-                if clip_id in skipped or clip_id in published:
+                if clip_id in skipped or clip_id in published or clip_id in pending:
+                    continue
+                caption = record.get("caption", "")
+                if not caption or caption.startswith("["):
                     continue
                 record["_offset"] = msg.offset
                 record["_partition"] = msg.partition
                 record["_ts"] = msg.timestamp
+                record["x_handle"] = get_x_handle(record.get("streamer", ""))
                 clips.append(record)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
