@@ -110,6 +110,12 @@ export type StreamerClip = {
 export type StreamerPublishResult = { ok: boolean; tweet_id: string; url: string };
 export type WatchlistResponse = { logins: string[] };
 
+export type PendingClip = {
+  clip_id: string;
+  clip_path: string;
+  tweet_text: string;
+};
+
 export type TopicRecord = {
   offset: number;
   source?: string;
@@ -217,6 +223,9 @@ export const api = {
   streamersFetchMode: () => jget<{ mode: string; period: string }>("/api/streamers/fetch-mode"),
   streamersSetFetchMode: (mode: string, period: string) =>
     jpost<{ mode: string; period: string }>("/api/streamers/fetch-mode", { mode, period }),
+  streamersPending: () => jget<{ pending: PendingClip[] }>("/api/streamers/pending"),
+  streamersCancelPending: (clip_id: string) =>
+    jpost<{ ok: boolean; clip_id: string }>(`/api/streamers/pending/${encodeURIComponent(clip_id)}/cancel`),
 };
 
 async function uploadFile(url: string, file: File) {

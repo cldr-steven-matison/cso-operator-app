@@ -7,6 +7,8 @@ X publishing is called directly from the Review UI Approve button.
 """
 
 import asyncio
+import contextlib
+import fcntl
 import glob
 import json
 import random
@@ -391,6 +393,115 @@ async def _get_kick_clips(
 
 
 
+_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+_OVERLAY_FONT = _ASSETS_DIR / "fonts" / "DejaVuSans-Bold.ttf"
+_OVERLAY_LOGOS = {
+    "kick": _ASSETS_DIR / "logos" / "kick.png",
+    "twitch": _ASSETS_DIR / "logos" / "twitch.png",
+}
+_OVERLAY_DOMAINS = {"kick": "KICK.COM", "twitch": "TWITCH.TV"}
+# Kick's cropped wordmark reads smaller than Twitch's at the same pixel height, so it gets a bigger ratio.
+_OVERLAY_LOGO_HEIGHT_RATIO = {"kick": 0.09, "twitch": 0.1111}
+
+# Re-encoding one clip at a time keeps CPU/memory bounded under the pod's
+# 1 CPU / 1Gi limits — running several ffmpeg burns in parallel (one per
+# streamer in fetch_clips' asyncio.gather, or an ad-hoc reprocessing script
+# racing the live app) pegged both and risked an OOM kill. An in-memory
+# threading.Semaphore only protects one process's own module state, so any
+# separate process (a standalone script, a `kubectl exec` test) gets its own
+# lock and doesn't see the live app's — use a flock on a shared file instead,
+# which serializes across every process in the pod.
+_OVERLAY_LOCK_PATH = Path("/tmp/.overlay_ffmpeg.lock")
+
+
+@contextlib.contextmanager
+def _overlay_lock():
+    with open(_OVERLAY_LOCK_PATH, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _probe_video_dims(path: Path) -> tuple[int, int] | None:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        w_str, h_str = result.stdout.strip().split(",")
+        return int(w_str), int(h_str)
+    except Exception:
+        return None
+
+
+def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> bool:
+    """Add a top bar above the clip: platform logo on the left, PLATFORM.COM/HANDLE on the right.
+
+    The bar extends the canvas (via `pad`) rather than compositing over the
+    top of the frame, so none of the original footage is cropped or covered —
+    the output is simply taller, which also makes the clip visibly distinct
+    from a straight scrape rather than a copy with a stamp on it.
+
+    Sizes are computed in literal pixels from the clip's actual resolution
+    (via ffprobe) so the bar looks consistent whatever Twitch/Kick hands
+    back. Deliberately avoids ffmpeg's `scale2ref` filter — it silently
+    collapsed the small Twitch logo (151x51) down to ~9x5px instead of
+    scaling it up, making the logo invisible; plain `scale` with pixel
+    values sidesteps the bug entirely.
+    """
+    logo_path = _OVERLAY_LOGOS.get(source)
+    if not logo_path or not logo_path.exists():
+        return True
+    dims = _probe_video_dims(dest)
+    if not dims:
+        return False
+    width, height = dims
+    bar_h = round(height * 0.1481 / 2) * 2  # keep even — libx264 needs even dimensions
+    new_height = height + bar_h
+    logo_h = round(height * _OVERLAY_LOGO_HEIGHT_RATIO.get(source, 0.1111))
+    font_size = round(height * 0.0519)
+    left_pad = round(width * 0.0146)
+    right_pad = round(width * 0.0208)
+    label = f"{_OVERLAY_DOMAINS.get(source, source.upper())}/{streamer.upper()}"
+    tmp = dest.with_suffix(".overlay.mp4")
+    filter_complex = (
+        f"[0:v]pad=width={width}:height={new_height}:x=0:y={bar_h}:color=black[padded];"
+        f"[1:v]scale=-1:{logo_h}[logo];"
+        f"[padded][logo]overlay=x={left_pad}:y=({bar_h}-overlay_h)/2[v1];"
+        f"[v1]drawtext=fontfile={_OVERLAY_FONT}:text='{label}':fontcolor=white:"
+        f"fontsize={font_size}:x=w-tw-{right_pad}:y=({bar_h}-th)/2[vout]"
+    )
+    try:
+        with _overlay_lock():
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-threads", "1", "-i", str(dest), "-i", str(logo_path),
+                    "-filter_complex", filter_complex,
+                    "-map", "[vout]", "-map", "0:a?",
+                    "-threads", "1", "-c:v", "libx264", "-preset", "veryfast",
+                    "-x264opts", "threads=1:sliced-threads=0:rc-lookahead=20",
+                    "-crf", "23", "-c:a", "copy", "-movflags", "+faststart",
+                    str(tmp),
+                ],
+                capture_output=True,
+                timeout=240,
+            )
+        if result.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 10_000:
+            tmp.unlink(missing_ok=True)
+            return False
+        tmp.replace(dest)
+        return True
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        return False
+
+
 async def _download_clip(client: httpx.AsyncClient, url: str, dest: Path) -> bool:
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -471,7 +582,7 @@ _STREAMER_CATALOG: dict[str, str] = {
     "stableronaldo":  "StableRonaldo",
     "jynxzi":         "jynxzi",
     "agent00":        "CallMeAgent00",
-    "extraemily":     "ExtraEmily",
+    "extraemily":     "ExtraEmilyy",
     "eliasn97":       "EliasN97",
     "hello_kiko":     "hello_kiko",
     "theburntpeanut": "theburntpeanut",
@@ -548,6 +659,30 @@ async def publish_next() -> dict:
     return {**result, "queue_remaining": len(pending) - 1}
 
 
+def get_pending() -> list[dict]:
+    """List clips queued for X publish, in post order."""
+    return _load_pending()
+
+
+def cancel_pending(clip_id: str) -> dict:
+    """Remove a clip from the publish queue before NiFi drains it."""
+    pending = _load_pending()
+    remaining = [p for p in pending if p["clip_id"] != clip_id]
+    if len(remaining) == len(pending):
+        return {"ok": False, "clip_id": clip_id, "reason": "not in queue"}
+    _save_pending(remaining)
+    return {"ok": True, "clip_id": clip_id}
+
+
+def _clips_per_streamer_cap(num_streamers: int) -> int:
+    """Scale clips-per-streamer up when the watch list is small, to keep total fetch volume reasonable."""
+    if num_streamers == 1:
+        return 5
+    if num_streamers == 2:
+        return 3
+    return 2
+
+
 async def fetch_clips() -> dict:
     """Poll Twitch and Kick for clips from the watch list, download to PVC, publish to new_clips.
 
@@ -556,6 +691,8 @@ async def fetch_clips() -> dict:
     logins = get_watchlist()
     if not logins:
         return {"fetched": 0, "clips": [], "error": "Watch list is empty"}
+
+    clip_cap = _clips_per_streamer_cap(len(logins))
 
     clip_dir = Path(settings.CLIP_STORAGE_PATH)
     seen_file = clip_dir / ".seen_clips.json"
@@ -598,7 +735,7 @@ async def fetch_clips() -> dict:
             result = await _fetch_kick_clips(
                 client, login, clip_dir, seen, entry_errors,
                 kick_token_getter=lambda: _kick_token_refresh(client),
-                top_mode=top_mode, period=period,
+                top_mode=top_mode, period=period, clip_cap=clip_cap,
             )
             errors.extend(entry_errors)
             return result
@@ -610,7 +747,7 @@ async def fetch_clips() -> dict:
             entry_errors: list[str] = []
             result = await _fetch_twitch_clips(
                 client, twitch_token, login, clip_dir, seen, since, entry_errors,
-                top_mode=top_mode,
+                top_mode=top_mode, clip_cap=clip_cap,
             )
             errors.extend(entry_errors)
             return result
@@ -639,6 +776,7 @@ async def _fetch_twitch_clips(
     since: datetime | None,
     errors: list[str],
     top_mode: bool = False,
+    clip_cap: int = 2,
 ) -> list[dict]:
     broadcaster_id = await _get_broadcaster_id(client, token, login)
     if not broadcaster_id:
@@ -647,7 +785,7 @@ async def _fetch_twitch_clips(
     clips = await _get_clips(client, token, broadcaster_id, since, top_mode=top_mode)
     result: list[dict] = []
     for clip in clips:
-        if len(result) >= 2:
+        if len(result) >= clip_cap:
             break
         clip_id = clip.get("id", "")
         if not clip_id or clip_id in seen:
@@ -663,6 +801,9 @@ async def _fetch_twitch_clips(
             if not ok:
                 errors.append(f"Twitch: download failed for {clip_id}")
                 continue
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda d=dest, l=login: _burn_platform_overlay(d, "twitch", l)
+            )
         result.append({
             "clip_id": clip_id,
             "source": "twitch",
@@ -688,11 +829,12 @@ async def _fetch_kick_clips(
     kick_token_getter,
     top_mode: bool = False,
     period: str = "week",
+    clip_cap: int = 2,
 ) -> list[dict]:
     clips = await _get_kick_clips(client, login, top_mode=top_mode, period=period)
     result: list[dict] = []
     for clip in clips:
-        if len(result) >= 2:
+        if len(result) >= clip_cap:
             break
         raw_id = clip.get("id", "")
         if not raw_id:
@@ -713,6 +855,9 @@ async def _fetch_kick_clips(
             if not ok:
                 errors.append(f"Kick: download failed for {clip_id}")
                 continue
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda d=dest, l=login: _burn_platform_overlay(d, "kick", l)
+            )
         result.append({
             "clip_id": clip_id,
             "source": "kick",

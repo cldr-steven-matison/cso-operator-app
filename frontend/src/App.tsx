@@ -24,14 +24,14 @@ type Tab = "operator" | "efm" | "rag" | "streamers";
 
 // Operator is always present. EFM, RAG, Streamers require the matching MODULES flag.
 const TABS: { id: Tab; label: string }[] = [
+  ...(_streamers ? [{ id: "streamers" as Tab, label: "Streamers" }] : []),
+  ...(_rag ? [{ id: "rag" as Tab, label: "RAG" }] : []),
   { id: "operator", label: "Operator" },
   ...(_efm ? [{ id: "efm" as Tab, label: "EFM" }] : []),
-  ...(_rag ? [{ id: "rag" as Tab, label: "RAG" }] : []),
-  ...(_streamers ? [{ id: "streamers" as Tab, label: "Streamers" }] : []),
 ];
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("operator");
+  const [tab, setTab] = useState<Tab>(TABS[0].id);
   return (
     <div className="min-h-full flex flex-col">
       <HealthBar />

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
-import { api, type StreamerClip, type StreamerFlows, type StreamerTopics } from "@/lib/api";
+import { api, type PendingClip, type StreamerClip, type StreamerFlows, type StreamerTopics } from "@/lib/api";
 import { TopicPeek } from "./TopicPeek";
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -282,6 +282,59 @@ function TopicPanel({ label, stats }: { label: string; stats?: StreamerTopics["n
   );
 }
 
+// ── PendingPanel ───────────────────────────────────────────────────────────
+
+function PendingPanel({
+  pending,
+  loading,
+  onCancel,
+}: {
+  pending: PendingClip[];
+  loading: boolean;
+  onCancel: (clip_id: string) => void;
+}) {
+  const [cancelingId, setCancelingId] = useState<string | null>(null);
+
+  async function doCancel(clip_id: string) {
+    setCancelingId(clip_id);
+    try {
+      await api.streamersCancelPending(clip_id);
+      onCancel(clip_id);
+    } finally {
+      setCancelingId(null);
+    }
+  }
+
+  if (loading) return <p className="text-muted text-sm">Loading pending publish queue…</p>;
+  if (pending.length === 0) return <p className="text-muted text-sm">Queue empty — nothing waiting to post.</p>;
+
+  return (
+    <div className="space-y-2">
+      {pending.map((p, i) => (
+        <div
+          key={p.clip_id || i}
+          className="flex items-start justify-between gap-3 border border-border rounded p-3 bg-bg"
+        >
+          <div className="min-w-0 space-y-1">
+            <div className="flex items-center gap-2 text-xs text-muted">
+              <span className="font-semibold text-text">#{i + 1}</span>
+              <span className="font-mono truncate">{p.clip_id || "unknown clip"}</span>
+            </div>
+            <p className="text-xs text-text whitespace-pre-wrap line-clamp-2">{p.tweet_text}</p>
+          </div>
+          <Button
+            onClick={() => doCancel(p.clip_id)}
+            disabled={cancelingId === p.clip_id}
+            className="text-xs opacity-60 shrink-0"
+          >
+            {cancelingId === p.clip_id ? "Canceling…" : "Cancel"}
+          </Button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── WatchList ──────────────────────────────────────────────────────────────
 
 function PlatformBadge({ platform }: { platform: "twitch" | "kick" }) {
@@ -453,6 +506,8 @@ export function StreamersPage() {
   const [peekOpen, setPeekOpen] = useState<Record<string, boolean>>({});
   const [resetting, setResetting] = useState(false);
   const [resetResult, setResetResult] = useState<string | null>(null);
+  const [pending, setPending] = useState<PendingClip[]>([]);
+  const [pendingLoading, setPendingLoading] = useState(true);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refreshFlows = async () => {
@@ -460,6 +515,15 @@ export function StreamersPage() {
       const f = await api.streamersFlows();
       setFlows(f);
     } catch {}
+  };
+
+  const refreshPending = async () => {
+    try {
+      const r = await api.streamersPending();
+      setPending(r.pending);
+    } catch {} finally {
+      setPendingLoading(false);
+    }
   };
 
   const refreshQueue = async () => {
@@ -503,15 +567,27 @@ export function StreamersPage() {
   const dismiss = (offset: number) =>
     setDismissed((prev) => new Set(prev).add(offset));
 
+  const onApproved = (offset: number) => {
+    dismiss(offset);
+    refreshPending();
+  };
+
+  const cancelPending = (clip_id: string) =>
+    setPending((prev) => prev.filter((p) => p.clip_id !== clip_id));
+
   useEffect(() => {
     refreshFlows();
     refreshQueue();
     refreshTopics();
+    refreshPending();
 
     const startPoll = () => {
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = setInterval(() => {
-        if (!document.hidden) refreshFlows();
+        if (!document.hidden) {
+          refreshFlows();
+          refreshPending();
+        }
       }, 30000);
     };
 
@@ -520,6 +596,7 @@ export function StreamersPage() {
         if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
       } else {
         refreshFlows();
+        refreshPending();
         startPoll();
       }
     };
@@ -630,7 +707,7 @@ export function StreamersPage() {
               <ClipCard
                 key={clip._offset ?? i}
                 clip={clip}
-                onPublished={dismiss}
+                onPublished={onApproved}
                 onSkip={dismiss}
               />
             ))}
@@ -638,7 +715,25 @@ export function StreamersPage() {
         )}
       </Card>
 
-      {/* ── Section 3: Watch List ──────────────────────────────────── */}
+      {/* ── Section 4: Pending Publish ──────────────────────────────── */}
+      <Card>
+        <div className="flex items-center justify-between mb-2">
+          <CardTitle>
+            Pending Publish
+            {pending.length > 0 && (
+              <span className="ml-2 text-xs text-muted font-normal">
+                {pending.length} queued
+              </span>
+            )}
+          </CardTitle>
+          <Button className="text-xs" onClick={refreshPending}>
+            Refresh
+          </Button>
+        </div>
+        <PendingPanel pending={pending} loading={pendingLoading} onCancel={cancelPending} />
+      </Card>
+
+      {/* ── Section 5: Watch List ──────────────────────────────────── */}
       <WatchList />
 
     </div>

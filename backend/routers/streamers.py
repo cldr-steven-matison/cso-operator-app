@@ -72,6 +72,18 @@ async def publish_next():
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.get("/pending")
+async def pending_queue():
+    """List clips queued for X publish, in post order."""
+    return {"pending": streamers.get_pending()}
+
+
+@router.post("/pending/{clip_id}/cancel")
+async def cancel_pending(clip_id: str):
+    """Remove a clip from the publish queue before NiFi drains it."""
+    return streamers.cancel_pending(clip_id)
+
+
 @router.post("/publish")
 async def publish(body: PublishRequest):
     """Direct publish (bypasses queue). Kept for manual/debug use."""
