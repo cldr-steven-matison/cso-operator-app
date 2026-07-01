@@ -25,7 +25,7 @@ import httpx
 NIFI_URL = os.environ.get("NIFI_URL", "https://mynifi-web.cfm-streaming.svc.cluster.local:8443")
 NIFI_USERNAME = os.environ.get("NIFI_USERNAME", "admin")
 NIFI_PASSWORD = os.environ.get("NIFI_PASSWORD", "admin12345678")
-APP_URL = os.environ.get("APP_URL", "http://cso-operator-app.default.svc.cluster.local:8000")
+APP_URL = os.environ.get("APP_URL", "http://cso-operator-app.default.svc.cluster.local:8090")
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "my-cluster-kafka-bootstrap.cld-streaming.svc:9092")
 
 NAR_KAFKA = {"group": "org.apache.nifi", "artifact": "nifi-kafka-2-6-nar", "version": "1.28.1.2.3.17.0-9"}
