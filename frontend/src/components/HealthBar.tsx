@@ -4,6 +4,9 @@ import { Dot } from "@/components/ui/Badge";
 import { api, type Health } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+// Full known set — filtered per-render to whichever ones the backend actually
+// reports, since /api/health only pings services owned by an active MODULES flag
+// (e.g. no "efm" key at all when the EFM module isn't baked into this image).
 const ORDER: (keyof Health["services"])[] = ["vllm", "embedding", "qdrant", "whisper", "nifi", "kafka", "efm"];
 
 export function HealthBar() {
@@ -45,7 +48,7 @@ export function HealthBar() {
     <div className="flex items-center gap-4 px-4 py-2 border-b border-border bg-panel">
       <span className="font-bold tracking-wide">CSO Operator App</span>
       <div className="flex items-center gap-3 ml-auto text-xs">
-        {ORDER.map((k) => {
+        {ORDER.filter((k) => !h || k in h.services).map((k) => {
           const s = h?.services[k];
           const tone = !s ? "neutral" : s.ok ? "ok" : "bad";
           const label = `${k}${s && !s.ok && s.error ? `: ${s.error.slice(0, 40)}` : ""}`;

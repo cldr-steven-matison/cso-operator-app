@@ -14,6 +14,7 @@ import json
 import random
 import re
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -29,12 +30,13 @@ STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClip")
 _TWITCH_LOGINS: list[str] = [
     "xqc", "ishowspeed", "stableronaldo", "jynxzi", "agent00",
     "extraemily", "eliasn97", "hello_kiko", "theburntpeanut",
-    "jasontheween", "zackrawrr", "lacy",
+    "jasontheween", "zackrawrr", "lacy", "kaicenat",
 ]
 
 _KICK_LOGINS: list[str] = [
     "roshtein", "deenthegreat", "hstikkytokky", "odablock",
     "iceposeidon", "adinross", "n3on",
+    "chickenandy", "asmongold", "mrbeast", "clavicular",
 ]
 
 _watchlist: list[str] = []
@@ -71,6 +73,22 @@ def get_watchlist() -> list[str]:
 def set_watchlist(logins: list[str]):
     global _watchlist
     _watchlist = [l.strip() for l in logins if l.strip()]
+
+
+def rotate_watchlist() -> list[str]:
+    """Swap the current watch list for 4 new streamers (2 Twitch, 2 Kick) not already on it.
+
+    Only updates in-memory state — FetchClips reads the watch list once at flow
+    start, so the new picks take effect on the next stop/start of that PG.
+    """
+    global _watchlist
+    current = set(_watchlist)
+    twitch_pool = [l for l in _TWITCH_LOGINS if l not in current]
+    kick_pool = [l for l in _KICK_LOGINS if f"kick:{l}" not in current]
+    twitch_picks = random.sample(twitch_pool, min(2, len(twitch_pool)))
+    kick_picks = [f"kick:{l}" for l in random.sample(kick_pool, min(2, len(kick_pool)))]
+    _watchlist = twitch_picks + kick_picks
+    return list(_watchlist)
 
 
 # ── NiFi flow control ─────────────────────────────────────────────────────────
@@ -440,7 +458,7 @@ def _probe_video_dims(path: Path) -> tuple[int, int] | None:
         return None
 
 
-def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> bool:
+def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> int:
     """Add a top bar above the clip: platform logo on the left, PLATFORM.COM/HANDLE on the right.
 
     The bar extends the canvas (via `pad`) rather than compositing over the
@@ -454,13 +472,17 @@ def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> bool:
     collapsed the small Twitch logo (151x51) down to ~9x5px instead of
     scaling it up, making the logo invisible; plain `scale` with pixel
     values sidesteps the bug entirely.
+
+    Returns the bar height in pixels on success (0 if no bar was added), so
+    the caller can pass it straight to _burn_glitch_intro without having to
+    re-derive it from the now-taller clip.
     """
     logo_path = _OVERLAY_LOGOS.get(source)
     if not logo_path or not logo_path.exists():
-        return True
+        return 0
     dims = _probe_video_dims(dest)
     if not dims:
-        return False
+        return 0
     width, height = dims
     bar_h = round(height * 0.1481 / 2) * 2  # keep even — libx264 needs even dimensions
     new_height = height + bar_h
@@ -494,11 +516,180 @@ def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> bool:
             )
         if result.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 10_000:
             tmp.unlink(missing_ok=True)
-            return False
+            return 0
         tmp.replace(dest)
-        return True
+        return bar_h
     except Exception:
         tmp.unlink(missing_ok=True)
+        return 0
+
+
+def _burn_glitch_intro(dest: Path, bar_h: int) -> bool:
+    """Prepend a freeze-frame -> color-mosaic strobe -> hard-snap intro to a fresh clip.
+
+    Only ever called immediately after download + overlay burn in
+    _fetch_twitch_clips/_fetch_kick_clips — never re-applied to clips already sitting
+    in /clips/, so existing videos are untouched.
+
+    The platform bar (top bar_h pixels, already burned in by _burn_platform_overlay)
+    is cropped out, held perfectly crisp for the whole intro, and stacked back on top
+    so it never animates — only the footage below it freezes, pixelates, and strobes.
+    Mosaic colors are sampled from the clip's own first frame, so every intro is
+    unique to that clip rather than a generic effect. Hold/fade durations and which
+    mosaic variants get used are randomized per clip so consecutive intros don't look
+    identical.
+
+    Every ffmpeg segment is encoded with zero B-frames (-bf 0). A version that used
+    default B-frames crashed VLC on playback: stream-copy concatenating independently
+    encoded B-frame segments produces DTS discontinuities at each splice that ffmpeg's
+    own decoder tolerates (just a warning) but VLC's demuxer does not.
+    """
+    dims = _probe_video_dims(dest)
+    if not dims:
+        return False
+    width, height = dims
+    vid_h = height - bar_h
+    if vid_h < 100:
+        return False
+
+    def run(args: list[str], timeout: int = 30) -> bool:
+        try:
+            r = subprocess.run(args, capture_output=True, timeout=timeout)
+            if r.returncode != 0:
+                print(f"[_burn_glitch_intro] ffmpeg failed ({dest.name}): {' '.join(args)}\n"
+                      f"{r.stderr.decode(errors='replace')[-800:]}")
+            return r.returncode == 0
+        except Exception as e:
+            print(f"[_burn_glitch_intro] ffmpeg exception ({dest.name}): {' '.join(args)} -> {e!r}")
+            return False
+
+    def encode_still(img: Path, dur: float, out: Path) -> bool:
+        # -threads 1 + threads=1:sliced-threads=0 matches _burn_platform_overlay — without it,
+        # libx264 auto-detects the *host's* full core count (seen: threads=24) instead of the
+        # pod's 1-CPU cgroup limit, which produced silent zero-frame encodes under this pod's
+        # actual constraints even though the same command worked fine on an unconstrained machine.
+        return run([
+            "ffmpeg", "-y", "-threads", "1", "-loop", "1", "-i", str(img), "-t", str(dur),
+            "-vf", "format=yuv420p", "-r", "60", "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "1",
+            "-bf", "0", "-x264opts", "threads=1:sliced-threads=0:scenecut=0", str(out),
+        ], timeout=30)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="glitch_") as tmpdir, _overlay_lock():
+            tmp = Path(tmpdir)
+            frame0, vid0, bar0 = tmp / "frame0.png", tmp / "vid0.png", tmp / "bar0.png"
+
+            if not run(["ffmpeg", "-y", "-i", str(dest), "-frames:v", "1", str(frame0)]):
+                return False
+            if bar_h > 0 and not run(["ffmpeg", "-y", "-i", str(frame0), "-vf",
+                                       f"crop={width}:{bar_h}:0:0", str(bar0)]):
+                return False
+            if not run(["ffmpeg", "-y", "-i", str(frame0), "-vf",
+                        f"crop={width}:{vid_h}:0:{bar_h}", str(vid0)]):
+                return False
+
+            # Randomized per-clip mosaic grids (denser = more visible color detail)
+            base_cols = random.randint(48, 60)
+            grids = [base_cols, round(base_cols * 0.85), round(base_cols * 1.2)]
+            mosaics = []
+            for i, cols in enumerate(grids):
+                rows = max(1, round(cols * vid_h / width))
+                out = tmp / f"grid_{i}.png"
+                if not run(["ffmpeg", "-y", "-i", str(vid0), "-vf",
+                            f"scale={cols}:{rows}:flags=neighbor,scale={width}:{vid_h}:flags=neighbor",
+                            str(out)]):
+                    return False
+                mosaics.append(out)
+
+            primary = mosaics[0]
+            flip_variants = []
+            for j, flip in enumerate(["hflip", "vflip", "hflip,vflip"]):
+                out = tmp / f"grid_flip_{j}.png"
+                if not run(["ffmpeg", "-y", "-i", str(primary), "-vf", flip, str(out)]):
+                    return False
+                flip_variants.append(out)
+            flash = tmp / "flash.png"
+            run(["ffmpeg", "-y", "-i", str(primary), "-vf",
+                 "eq=brightness=0.45:contrast=1.3", str(flash)])
+
+            variant_pool = mosaics + flip_variants + [flash]
+            random.shuffle(variant_pool)
+            strobe_variants = variant_pool[:6]
+
+            hold_dur = round(random.uniform(0.8, 1.3), 2)
+            fade_dur = round(random.uniform(1.1, 1.5), 2)
+
+            hold_mp4 = tmp / "hold.mp4"
+            if not encode_still(vid0, hold_dur, hold_mp4):
+                return False
+
+            strobe_step = round(fade_dur / len(strobe_variants) + 0.02, 2)
+            strobe_parts = []
+            for k, img in enumerate(strobe_variants):
+                out = tmp / f"strobe_{k}.mp4"
+                if not encode_still(img, strobe_step, out):
+                    return False
+                strobe_parts.append(out)
+            strobe_list = tmp / "strobe_list.txt"
+            strobe_list.write_text("\n".join(f"file '{p}'" for p in strobe_parts))
+            strobe_seq = tmp / "strobe_seq.mp4"
+            if not run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(strobe_list),
+                        "-c", "copy", str(strobe_seq)]):
+                return False
+
+            crisp_clip = tmp / "crisp.mp4"
+            if not encode_still(vid0, fade_dur + 0.2, crisp_clip):
+                return False
+            fadeflash = tmp / "fadeflash.mp4"
+            if not run(["ffmpeg", "-y", "-threads", "1", "-i", str(crisp_clip), "-i", str(strobe_seq),
+                        "-filter_complex",
+                        f"[0:v][1:v]xfade=transition=fade:duration={fade_dur}:offset=0[v]",
+                        "-map", "[v]", "-an", "-c:v", "libx264", "-preset", "veryfast", "-threads", "1",
+                        "-crf", "20", "-bf", "0", "-x264opts", "threads=1:sliced-threads=0:scenecut=0",
+                        str(fadeflash)]):
+                return False
+
+            region_list = tmp / "region_list.txt"
+            region_list.write_text(f"file '{hold_mp4}'\nfile '{fadeflash}'")
+            region_mp4 = tmp / "region.mp4"
+            if not run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(region_list),
+                        "-c", "copy", str(region_mp4)]):
+                return False
+
+            if bar_h > 0:
+                total_dur = hold_dur + fade_dur
+                bar_loop = tmp / "bar_loop.mp4"
+                if not encode_still(bar0, total_dur, bar_loop):
+                    return False
+                intro_noaudio = tmp / "intro_noaudio.mp4"
+                if not run(["ffmpeg", "-y", "-threads", "1", "-i", str(bar_loop), "-i", str(region_mp4),
+                            "-filter_complex", "[0:v][1:v]vstack=inputs=2[v]", "-map", "[v]",
+                            "-an", "-c:v", "libx264", "-preset", "veryfast", "-threads", "1", "-crf", "20",
+                            "-bf", "0", "-x264opts", "threads=1:sliced-threads=0:scenecut=0",
+                            str(intro_noaudio)]):
+                    return False
+            else:
+                intro_noaudio = region_mp4
+
+            intro_full = tmp / "intro_full.mp4"
+            if not run(["ffmpeg", "-y", "-i", str(intro_noaudio), "-f", "lavfi",
+                        "-i", "anullsrc=r=48000:cl=stereo", "-c:v", "copy", "-c:a", "aac",
+                        "-shortest", str(intro_full)]):
+                return False
+
+            final_list = tmp / "final_list.txt"
+            final_list.write_text(f"file '{intro_full}'\nfile '{dest.resolve()}'")
+            out_final = dest.with_suffix(".glitch.mp4")
+            if not run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(final_list),
+                        "-c", "copy", str(out_final)], timeout=60):
+                return False
+            if not out_final.exists() or out_final.stat().st_size < 10_000:
+                out_final.unlink(missing_ok=True)
+                return False
+            out_final.replace(dest)
+            return True
+    except Exception:
         return False
 
 
@@ -589,6 +780,7 @@ _STREAMER_CATALOG: dict[str, str] = {
     "jasontheween":   "jasontheween",
     "zackrawrr":      "zackrawrr",
     "lacy":           "LacyHimself",
+    "kaicenat":       "KaiCenat",
     # Kick
     "roshtein":       "roshtein",
     "deenthegreat":   "DeenTheGreat",
@@ -597,11 +789,28 @@ _STREAMER_CATALOG: dict[str, str] = {
     "iceposeidon":    "REALIcePoseidon",
     "adinross":       "adinross",
     "n3on":           "N3on",
+    "chickenandy":    "ChickenAndy_",
+    "asmongold":      "asmongold",
+    "mrbeast":        "mrbeast",
+    "clavicular":     "Clavicular0",
 }
 
 def get_x_handle(login: str) -> str:
     """Return X handle (no @) for a bare login, or empty string if not in catalog."""
     return _STREAMER_CATALOG.get(login.lower(), "")
+
+
+_PENDING_LOCK_PATH = Path("/tmp/.pending_publish.lock")
+
+
+@contextlib.contextmanager
+def _pending_lock():
+    with open(_PENDING_LOCK_PATH, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _load_pending() -> list[dict]:
@@ -639,23 +848,36 @@ def get_published() -> set[str]:
     return _load_id_set(_published_path())
 
 
-def approve_clip(clip_id: str, clip_path: str, tweet_text: str) -> dict:
-    """Queue a clip for X publishing. Returns immediately — NiFi drains the queue."""
-    pending = _load_pending()
-    if not any(p["clip_id"] == clip_id for p in pending):
-        pending.append({"clip_id": clip_id, "clip_path": clip_path, "tweet_text": tweet_text})
-        _save_pending(pending)
+def approve_clip(clip_id: str, clip_path: str, tweet_text: str, title: str = "") -> dict:
+    """Queue a clip for X publishing. Returns immediately — NiFi drains the queue.
+
+    Locked read-modify-write: without this, two near-simultaneous approvals (or an
+    approval racing publish_next) can each read the same pending list and overwrite
+    each other's append, silently dropping an approved clip from the queue.
+    """
+    with _pending_lock():
+        pending = _load_pending()
+        if not any(p["clip_id"] == clip_id for p in pending):
+            pending.append({"clip_id": clip_id, "clip_path": clip_path, "tweet_text": tweet_text, "title": title})
+            _save_pending(pending)
     return {"queued": True, "clip_id": clip_id, "position": len(pending)}
 
 
 async def publish_next() -> dict:
-    """Pop the first pending clip and publish it to X. Called by NiFi timer every 2 min."""
-    pending = _load_pending()
-    if not pending:
-        return {"published": False, "reason": "queue empty"}
-    clip = pending[0]
-    result = await publish_clip(clip["clip_path"], clip["tweet_text"], clip["clip_id"])
-    _save_pending(pending[1:])
+    """Pop the first pending clip and publish it to X. Called by NiFi timer every 2 min.
+
+    The pop-and-save happens under the same lock as approve_clip/cancel_pending so the
+    queue stays strict FIFO even if NiFi fires overlapping calls (e.g. a slow upload
+    causing the next GenerateFlowFile tick to overlap the previous InvokeHTTP). The
+    slow network publish itself runs outside the lock so it doesn't block approvals.
+    """
+    with _pending_lock():
+        pending = _load_pending()
+        if not pending:
+            return {"published": False, "reason": "queue empty"}
+        clip = pending[0]
+        _save_pending(pending[1:])
+    result = await publish_clip(clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""))
     return {**result, "queue_remaining": len(pending) - 1}
 
 
@@ -666,21 +888,24 @@ def get_pending() -> list[dict]:
 
 def cancel_pending(clip_id: str) -> dict:
     """Remove a clip from the publish queue before NiFi drains it."""
-    pending = _load_pending()
-    remaining = [p for p in pending if p["clip_id"] != clip_id]
-    if len(remaining) == len(pending):
-        return {"ok": False, "clip_id": clip_id, "reason": "not in queue"}
-    _save_pending(remaining)
+    with _pending_lock():
+        pending = _load_pending()
+        remaining = [p for p in pending if p["clip_id"] != clip_id]
+        if len(remaining) == len(pending):
+            return {"ok": False, "clip_id": clip_id, "reason": "not in queue"}
+        _save_pending(remaining)
     return {"ok": True, "clip_id": clip_id}
 
 
 def _clips_per_streamer_cap(num_streamers: int) -> int:
-    """Scale clips-per-streamer up when the watch list is small, to keep total fetch volume reasonable."""
+    """Scale clips-per-streamer down as the watch list grows, to keep total fetch volume reasonable."""
     if num_streamers == 1:
         return 5
     if num_streamers == 2:
         return 3
-    return 2
+    if num_streamers == 3:
+        return 2
+    return 1
 
 
 async def fetch_clips() -> dict:
@@ -801,8 +1026,11 @@ async def _fetch_twitch_clips(
             if not ok:
                 errors.append(f"Twitch: download failed for {clip_id}")
                 continue
-            await asyncio.get_event_loop().run_in_executor(
+            bar_h = await asyncio.get_event_loop().run_in_executor(
                 None, lambda d=dest, l=login: _burn_platform_overlay(d, "twitch", l)
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda d=dest, b=bar_h: _burn_glitch_intro(d, b)
             )
         result.append({
             "clip_id": clip_id,
@@ -855,8 +1083,11 @@ async def _fetch_kick_clips(
             if not ok:
                 errors.append(f"Kick: download failed for {clip_id}")
                 continue
-            await asyncio.get_event_loop().run_in_executor(
+            bar_h = await asyncio.get_event_loop().run_in_executor(
                 None, lambda d=dest, l=login: _burn_platform_overlay(d, "kick", l)
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda d=dest, b=bar_h: _burn_glitch_intro(d, b)
             )
         result.append({
             "clip_id": clip_id,
@@ -1104,7 +1335,45 @@ async def clip_queue(limit: int = 20) -> list[dict]:
 
 # ── X publish ─────────────────────────────────────────────────────────────────
 
-def _publish_sync(clip_path: str, tweet_text: str) -> dict:
+_JUNK_TITLES = {"", "untitled", "untitled broadcast", "no title", "n/a", "live"}
+
+
+def _is_junk_title(title: str) -> bool:
+    t = title.strip().lower()
+    return len(t) < 4 or t in _JUNK_TITLES
+
+
+def _video_title_for(source_title: str, tweet_text: str) -> str:
+    """Prefer the platform's own clip title; fall back to the generated caption body.
+
+    X's media analytics reads the MP4 container's title tag, not the tweet
+    text — clips uploaded without one show up as "Untitled" in Analytics.
+    """
+    if not _is_junk_title(source_title):
+        return source_title.strip()[:100]
+    body = tweet_text.split("\n\n")[0].strip()
+    return body[:100] if body else "Clip"
+
+
+def _stamp_video_title(clip_path: str, title: str) -> None:
+    """Embed `title` as the MP4 container's title metadata via a cheap -c copy remux."""
+    path = Path(clip_path)
+    tmp = path.with_suffix(".titled.mp4")
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(path), "-c", "copy", "-metadata", f"title={title}",
+             "-movflags", "+faststart", str(tmp)],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode == 0 and tmp.exists() and tmp.stat().st_size > 10_000:
+            tmp.replace(path)
+        else:
+            tmp.unlink(missing_ok=True)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+
+
+def _publish_sync(clip_path: str, tweet_text: str, title: str = "") -> dict:
     import tweepy
 
     if not all([settings.X_API_KEY, settings.X_API_SECRET,
@@ -1114,6 +1383,8 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     path = Path(clip_path)
     if not path.exists():
         raise FileNotFoundError(f"Clip not found: {clip_path}")
+
+    _stamp_video_title(clip_path, _video_title_for(title, tweet_text))
 
     auth = tweepy.OAuth1UserHandler(
         settings.X_API_KEY,
@@ -1139,8 +1410,8 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     }
 
 
-async def publish_clip(clip_path: str, tweet_text: str, clip_id: str = "") -> dict:
-    result = await asyncio.to_thread(_publish_sync, clip_path, tweet_text)
+async def publish_clip(clip_path: str, tweet_text: str, clip_id: str = "", title: str = "") -> dict:
+    result = await asyncio.to_thread(_publish_sync, clip_path, tweet_text, title)
     if result.get("ok") and clip_id:
         mark_published(clip_id)
     return result

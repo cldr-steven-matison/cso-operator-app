@@ -9,6 +9,12 @@ from services import nifi as nifi_svc
 
 router = APIRouter()
 
+_enabled_modules = [m.strip() for m in settings.MODULES.split(",") if m.strip()]
+
+
+def _module_active(*names: str) -> bool:
+    return any(n in _enabled_modules for n in names) or "all" in _enabled_modules
+
 
 async def _ping(client: httpx.AsyncClient, url: str) -> dict:
     try:
@@ -84,25 +90,26 @@ async def _ping_kafka() -> dict:
 
 @router.get("/health")
 async def health(request: Request):
+    """Only pings services owned by a module actually baked into this image
+    (settings.MODULES) — an EFM-less deploy shouldn't burn a request (and show
+    a permanently red dot) probing an EFM agent-manager that was never installed."""
     client: httpx.AsyncClient = request.app.state.http
+    rag_or_streamers = _module_active("rag", "streamers")
 
-    vllm, qdrant, embed, whisper, nifi, kafka, efm = await asyncio.gather(
-        _ping_vllm(client),
-        _ping(client, f"{settings.QDRANT_URL}/collections"),
-        _ping(client, f"{settings.EMBED_URL}/health"),
-        _ping(client, f"{settings.WHISPER_URL}/docs"),
-        _ping_nifi(client),
-        _ping_kafka(),
-        _ping_efm(client),
-    )
+    checks = {}
+    if rag_or_streamers:
+        checks["vllm"] = _ping_vllm(client)
+        checks["nifi"] = _ping_nifi(client)
+        checks["kafka"] = _ping_kafka()
+    if _module_active("rag"):
+        checks["qdrant"] = _ping(client, f"{settings.QDRANT_URL}/collections")
+        checks["embedding"] = _ping(client, f"{settings.EMBED_URL}/health")
+    if _module_active("streamers"):
+        checks["whisper"] = _ping(client, f"{settings.WHISPER_URL}/docs")
+    if _module_active("efm"):
+        checks["efm"] = _ping_efm(client)
 
-    services = {
-        "vllm": vllm,
-        "qdrant": qdrant,
-        "embedding": embed,
-        "whisper": whisper,
-        "nifi": nifi,
-        "kafka": kafka,
-        "efm": efm,
-    }
+    names = list(checks.keys())
+    results = await asyncio.gather(*checks.values())
+    services = dict(zip(names, results))
     return {"ok": all(s["ok"] for s in services.values()), "services": services}

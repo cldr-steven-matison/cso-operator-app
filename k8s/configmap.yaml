@@ -21,7 +21,7 @@ data:
   TOPIC_DOCS: "new_documents"
   # Active modules — controls which tabs and backend routes are enabled.
   # Operator is always on. Add/remove: efm, rag, streamers
-  MODULES: "efm,rag,streamers"
+  MODULES: "rag,streamers"
   CLIP_STORAGE_PATH: "/clips"
   NEW_CLIPS_TOPIC: "new_clips"
   PROCESSED_CLIPS_TOPIC: "processed_clips"

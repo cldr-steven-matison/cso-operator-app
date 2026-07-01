@@ -51,6 +51,7 @@ class PublishRequest(BaseModel):
     clip_path: str
     tweet_text: str
     clip_id: str = ""
+    title: str = ""
 
 
 @router.post("/approve")
@@ -60,7 +61,7 @@ async def approve(body: PublishRequest):
         raise HTTPException(status_code=400, detail="clip_path and tweet_text are required")
     if not os.path.exists(body.clip_path):
         raise HTTPException(status_code=404, detail=f"Clip file not found: {body.clip_path} — re-fetch clips first")
-    return streamers.approve_clip(body.clip_id, body.clip_path, body.tweet_text)
+    return streamers.approve_clip(body.clip_id, body.clip_path, body.tweet_text, body.title)
 
 
 @router.post("/publish-next")
@@ -92,7 +93,7 @@ async def publish(body: PublishRequest):
     if not os.path.exists(body.clip_path):
         raise HTTPException(status_code=404, detail=f"Clip file not found: {body.clip_path} — re-fetch clips first")
     try:
-        return await streamers.publish_clip(body.clip_path, body.tweet_text, body.clip_id)
+        return await streamers.publish_clip(body.clip_path, body.tweet_text, body.clip_id, body.title)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -180,6 +181,12 @@ class WatchlistUpdate(BaseModel):
 async def set_watchlist(body: WatchlistUpdate):
     streamers.set_watchlist(body.logins)
     return {"logins": streamers.get_watchlist()}
+
+
+@router.post("/watchlist/rotate")
+async def rotate_watchlist():
+    """Swap the watch list for 4 new streamers. Takes effect on the next FetchClips stop/start."""
+    return {"logins": streamers.rotate_watchlist()}
 
 
 # ── Fetch mode ────────────────────────────────────────────────────────────────

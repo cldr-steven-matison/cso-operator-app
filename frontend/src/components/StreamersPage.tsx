@@ -102,7 +102,7 @@ function ClipCard({
     setPublishing(true);
     setResult(null);
     try {
-      const r = await api.streamersApprove(clip.clip_path, tweetText, clip.clip_id);
+      const r = await api.streamersApprove(clip.clip_path, tweetText, clip.clip_id, clip.title);
       setResult({ ok: true, position: r.position });
       setTimeout(() => onPublished(clip._offset ?? -1), 1200);
     } catch (e) {
@@ -352,6 +352,7 @@ function WatchList() {
   const [input, setInput] = useState("");
   const [platform, setPlatform] = useState<"twitch" | "kick">("twitch");
   const [saving, setSaving] = useState(false);
+  const [rotating, setRotating] = useState(false);
   const [fetchMode, setFetchMode] = useState<{ mode: string; period: string }>({ mode: "recent", period: "month" });
 
   useEffect(() => {
@@ -391,9 +392,24 @@ function WatchList() {
     }
   }
 
+  async function rotate() {
+    setRotating(true);
+    try {
+      const r = await api.streamersRotateWatchlist();
+      setLogins(r.logins);
+    } finally {
+      setRotating(false);
+    }
+  }
+
   return (
     <Card>
-      <CardTitle>Watch List</CardTitle>
+      <div className="flex items-center justify-between mb-3">
+        <CardTitle className="mb-0">Watch List</CardTitle>
+        <Button onClick={rotate} disabled={rotating}>
+          {rotating ? "Rotating…" : "Rotate"}
+        </Button>
+      </div>
       <div className="space-y-3">
         <div className="flex gap-2">
           <div className="flex rounded border border-border overflow-hidden shrink-0 text-xs font-semibold">
@@ -457,7 +473,7 @@ function WatchList() {
           </div>
         )}
         <div className="pt-2 border-t border-border flex items-center gap-3 flex-wrap">
-          <span className="text-xs text-muted">Fetch mode:</span>
+          <span className="text-xs text-muted">Twitch Fetch Mode:</span>
           <div className="flex rounded border border-border overflow-hidden text-xs font-semibold">
             <button
               onClick={() => updateFetchMode("recent", fetchMode.period)}
@@ -640,7 +656,10 @@ export function StreamersPage() {
         </div>
       </Card>
 
-      {/* ── Section 2: Kafka Topics ────────────────────────────────── */}
+      {/* ── Section 2: Watch List ──────────────────────────────────── */}
+      <WatchList />
+
+      {/* ── Section 3: Kafka Topics ────────────────────────────────── */}
       <Card>
         <div className="flex items-center justify-between mb-3">
           <CardTitle>Kafka Topics</CardTitle>
@@ -678,7 +697,7 @@ export function StreamersPage() {
         </div>
       </Card>
 
-      {/* ── Section 3: Clip Review Queue ───────────────────────────── */}
+      {/* ── Section 4: Clip Review Queue ───────────────────────────── */}
       <Card>
         <div className="flex items-center justify-between mb-2">
           <CardTitle>
@@ -715,7 +734,7 @@ export function StreamersPage() {
         )}
       </Card>
 
-      {/* ── Section 4: Pending Publish ──────────────────────────────── */}
+      {/* ── Section 5: Pending Publish ──────────────────────────────── */}
       <Card>
         <div className="flex items-center justify-between mb-2">
           <CardTitle>
@@ -732,9 +751,6 @@ export function StreamersPage() {
         </div>
         <PendingPanel pending={pending} loading={pendingLoading} onCancel={cancelPending} />
       </Card>
-
-      {/* ── Section 5: Watch List ──────────────────────────────────── */}
-      <WatchList />
 
     </div>
   );

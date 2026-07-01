@@ -9,7 +9,8 @@ export type HealthService = {
 };
 export type Health = {
   ok: boolean;
-  services: Record<"vllm" | "qdrant" | "embedding" | "whisper" | "nifi" | "kafka" | "efm", HealthService>;
+  // Partial: /api/health only includes keys for services owned by an active MODULES flag.
+  services: Partial<Record<"vllm" | "qdrant" | "embedding" | "whisper" | "nifi" | "kafka" | "efm", HealthService>>;
 };
 
 export type EfmAgentClass = { name: string; agentCount: number };
@@ -209,15 +210,17 @@ export const api = {
   streamersFlowStart: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/start`),
   streamersFlowStop: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/stop`),
   streamersQueue: () => jget<StreamerClip[]>("/api/streamers/queue"),
-  streamersApprove: (clip_path: string, tweet_text: string, clip_id?: string) =>
-    jpost<{ queued: boolean; clip_id: string; position: number }>("/api/streamers/approve", { clip_path, tweet_text, clip_id }),
-  streamersPublish: (clip_path: string, tweet_text: string, clip_id?: string) =>
-    jpost<StreamerPublishResult>("/api/streamers/publish", { clip_path, tweet_text, clip_id }),
+  streamersApprove: (clip_path: string, tweet_text: string, clip_id?: string, title?: string) =>
+    jpost<{ queued: boolean; clip_id: string; position: number }>("/api/streamers/approve", { clip_path, tweet_text, clip_id, title }),
+  streamersPublish: (clip_path: string, tweet_text: string, clip_id?: string, title?: string) =>
+    jpost<StreamerPublishResult>("/api/streamers/publish", { clip_path, tweet_text, clip_id, title }),
   streamersSkip: (clip_id: string) =>
     jpost<{ ok: boolean; clip_id: string }>("/api/streamers/skip", { clip_id }),
   streamersWatchlist: () => jget<WatchlistResponse>("/api/streamers/watchlist"),
   streamersSetWatchlist: (logins: string[]) =>
     jpost<WatchlistResponse>("/api/streamers/watchlist", { logins }),
+  streamersRotateWatchlist: () =>
+    jpost<WatchlistResponse>("/api/streamers/watchlist/rotate", {}),
   streamersTopics: () => jget<StreamerTopics>("/api/streamers/topics"),
   streamersReset: () => jpost<KafkaResetResult>("/api/streamers/reset"),
   streamersFetchMode: () => jget<{ mode: string; period: string }>("/api/streamers/fetch-mode"),
