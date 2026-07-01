@@ -7,6 +7,6 @@ spec:
     app: cso-operator-app
   ports:
     - protocol: TCP
-      port: 8000
+      port: 8090
       targetPort: 8000
   type: LoadBalancer

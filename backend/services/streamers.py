@@ -255,19 +255,36 @@ async def _get_clips(
     since: datetime | None,
     top_mode: bool = False,
 ) -> list[dict]:
-    params: dict = {"broadcaster_id": broadcaster_id, "first": "20"}
+    """Twitch's Helix /clips returns clips in recency order, not by views, and a single
+    page tops out at 100. For top_mode we page through the whole window before ranking
+    by view_count — otherwise "top clips" is really just "highest-viewed among the 20
+    (or 100) most recent clips", missing anything popular from earlier in the window."""
+    params: dict = {"broadcaster_id": broadcaster_id, "first": "100"}
     if since is not None:
         params["started_at"] = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    r = await client.get(
-        "https://api.twitch.tv/helix/clips",
-        params=params,
-        headers=_twitch_headers(token),
-        timeout=10.0,
-    )
-    if r.status_code != 200:
-        return []
-    clips = r.json().get("data", [])
-    valid = [c for c in clips if c.get("duration", 0) >= 45]
+
+    all_clips: list[dict] = []
+    cursor: str | None = None
+    max_pages = 5 if top_mode else 1
+    for _ in range(max_pages):
+        page_params = dict(params)
+        if cursor:
+            page_params["after"] = cursor
+        r = await client.get(
+            "https://api.twitch.tv/helix/clips",
+            params=page_params,
+            headers=_twitch_headers(token),
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            break
+        body = r.json()
+        all_clips.extend(body.get("data", []))
+        cursor = body.get("pagination", {}).get("cursor")
+        if not cursor:
+            break
+
+    valid = [c for c in all_clips if c.get("duration", 0) >= 45]
     if top_mode:
         return sorted(valid, key=lambda c: c.get("view_count", 0), reverse=True)
     return sorted(valid, key=lambda c: c.get("duration", 0), reverse=True)
