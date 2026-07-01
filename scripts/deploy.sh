@@ -22,4 +22,4 @@ echo "==> Waiting for rollout"
 kubectl rollout status deploy/cso-operator-app --timeout=120s
 
 echo
-echo "App URL: http://127.0.0.1:8000  (requires: minikube tunnel)"
+echo "App URL: http://127.0.0.1:8090  (requires: minikube tunnel)"

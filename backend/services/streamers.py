@@ -1352,45 +1352,7 @@ async def clip_queue(limit: int = 20) -> list[dict]:
 
 # ── X publish ─────────────────────────────────────────────────────────────────
 
-_JUNK_TITLES = {"", "untitled", "untitled broadcast", "no title", "n/a", "live"}
-
-
-def _is_junk_title(title: str) -> bool:
-    t = title.strip().lower()
-    return len(t) < 4 or t in _JUNK_TITLES
-
-
-def _video_title_for(source_title: str, tweet_text: str) -> str:
-    """Prefer the platform's own clip title; fall back to the generated caption body.
-
-    X's media analytics reads the MP4 container's title tag, not the tweet
-    text — clips uploaded without one show up as "Untitled" in Analytics.
-    """
-    if not _is_junk_title(source_title):
-        return source_title.strip()[:100]
-    body = tweet_text.split("\n\n")[0].strip()
-    return body[:100] if body else "Clip"
-
-
-def _stamp_video_title(clip_path: str, title: str) -> None:
-    """Embed `title` as the MP4 container's title metadata via a cheap -c copy remux."""
-    path = Path(clip_path)
-    tmp = path.with_suffix(".titled.mp4")
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(path), "-c", "copy", "-metadata", f"title={title}",
-             "-movflags", "+faststart", str(tmp)],
-            capture_output=True, timeout=30,
-        )
-        if result.returncode == 0 and tmp.exists() and tmp.stat().st_size > 10_000:
-            tmp.replace(path)
-        else:
-            tmp.unlink(missing_ok=True)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-
-
-def _publish_sync(clip_path: str, tweet_text: str, title: str = "") -> dict:
+def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     import tweepy
 
     if not all([settings.X_API_KEY, settings.X_API_SECRET,
@@ -1400,8 +1362,6 @@ def _publish_sync(clip_path: str, tweet_text: str, title: str = "") -> dict:
     path = Path(clip_path)
     if not path.exists():
         raise FileNotFoundError(f"Clip not found: {clip_path}")
-
-    _stamp_video_title(clip_path, _video_title_for(title, tweet_text))
 
     auth = tweepy.OAuth1UserHandler(
         settings.X_API_KEY,
@@ -1428,7 +1388,7 @@ def _publish_sync(clip_path: str, tweet_text: str, title: str = "") -> dict:
 
 
 async def publish_clip(clip_path: str, tweet_text: str, clip_id: str = "", title: str = "") -> dict:
-    result = await asyncio.to_thread(_publish_sync, clip_path, tweet_text, title)
+    result = await asyncio.to_thread(_publish_sync, clip_path, tweet_text)
     if result.get("ok") and clip_id:
         mark_published(clip_id)
     return result
