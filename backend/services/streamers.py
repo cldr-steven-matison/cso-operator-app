@@ -30,7 +30,7 @@ STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClip")
 _TWITCH_LOGINS: list[str] = [
     "xqc", "ishowspeed", "stableronaldo", "jynxzi", "agent00",
     "extraemily", "eliasn97", "hello_kiko", "theburntpeanut",
-    "jasontheween", "zackrawrr", "lacy", "kaicenat",
+    "jasontheween", "zackrawrr", "lacy", "kaicenat", "2xrakai",
 ]
 
 _KICK_LOGINS: list[str] = [
@@ -798,6 +798,7 @@ _STREAMER_CATALOG: dict[str, str] = {
     "zackrawrr":      "zackrawrr",
     "lacy":           "LacyHimself",
     "kaicenat":       "KaiCenat",
+    "2xrakai":        "2xrakai",
     # Kick
     "roshtein":       "roshtein",
     "deenthegreat":   "DeenTheGreat",
@@ -1189,6 +1190,49 @@ def _clean_caption(text: str) -> str:
     return text.strip()
 
 
+def _is_junk_title(title: str) -> bool:
+    """True if a streamer-supplied title is too thin for vLLM to work with —
+    e.g. '1', '.', 'asdf123' typed just to get the clip creation flow started."""
+    title = title.strip()
+    return len(title) < 3 or not any(c.isalpha() for c in title)
+
+
+async def _generate_title(client: httpx.AsyncClient, transcript: str, streamer: str) -> str:
+    """Ask vLLM for a short clip title when the streamer-supplied one is junk."""
+    try:
+        r = await client.post(
+            f"{settings.VLLM_URL}/v1/chat/completions",
+            json={
+                "model": settings.VLLM_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You write short, punchy titles for gaming clips. Output ONLY the title text — no labels, no quotes, no hashtags.",
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Write a short catchy title (under 60 characters) for this Twitch clip "
+                            f"based on the transcript. Stay grounded in the transcript, do not invent facts. "
+                            f"Streamer: {streamer}. Transcript: {transcript[:600]}"
+                        ),
+                    },
+                ],
+                "max_tokens": 30,
+                "temperature": 0.7,
+            },
+        )
+        if r.status_code == 200:
+            raw = r.json()["choices"][0]["message"]["content"].strip()
+            raw = raw.split("\n")[0].strip()
+            if raw.startswith('"') and raw.endswith('"'):
+                raw = raw[1:-1]
+            return raw[:100].strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _build_tweet(caption: str, source: str, streamer: str, x_handle: str = "") -> str:
     """Assemble final tweet: reaction body + attribution line. Always ≤ 280 chars.
 
@@ -1214,9 +1258,7 @@ async def process_clip(clip: dict) -> dict:
     if not clip_path or not Path(clip_path).exists():
         return {**clip, "transcript": "", "caption": "", "error": f"File not found: {clip_path}"}
 
-    # Disqualify clips with no usable title — vLLM has nothing to work with
-    if len(clip.get("title", "").strip()) < 2:
-        return {**clip, "transcript": "", "caption": "", "error": "disqualified: no title"}
+    title = clip.get("title", "").strip()
 
     async with httpx.AsyncClient(verify=False, timeout=300.0) as client:
         # Extract 16kHz mono WAV — much smaller upload to Whisper than raw MP4
@@ -1243,9 +1285,18 @@ async def process_clip(clip: dict) -> dict:
         finally:
             wav_path.unlink(missing_ok=True)
 
+        # Streamers often type filler ("1", ".") just to get the clip flow started —
+        # backfill a real title from the transcript instead of disqualifying the clip.
+        has_transcript = bool(transcript) and not transcript.startswith("[")
+        if _is_junk_title(title) and has_transcript:
+            title = await _generate_title(client, transcript, clip.get("streamer", "unknown")) or title
+
+        if _is_junk_title(title):
+            return {**clip, "title": title, "transcript": transcript, "caption": "", "error": "disqualified: no title"}
+
         # vLLM caption generation
         caption = ""
-        if transcript and not transcript.startswith("["):
+        if has_transcript:
             try:
                 r = await client.post(
                     f"{settings.VLLM_URL}/v1/chat/completions",
@@ -1262,7 +1313,7 @@ async def process_clip(clip: dict) -> dict:
                                     f"React to this clip by {clip.get('streamer', 'unknown')} like you're live in their Twitch chat. "
                                     f"Talk directly to the streamer, quote the wildest line, or just react like a viewer who can't believe what they just saw. "
                                     f"Stay grounded in the transcript. Do not invent facts. Under 200 chars. Exactly 1 emoji. No hashtags. "
-                                    f"Clip title: '{clip.get('title', '')}'. "
+                                    f"Clip title: '{title}'. "
                                     f"Transcript: {transcript[:600]}"
                                 ),
                             },
@@ -1279,7 +1330,7 @@ async def process_clip(clip: dict) -> dict:
             except Exception as e:
                 caption = f"[caption error: {e}]"
 
-    return {**clip, "transcript": transcript, "caption": caption}
+    return {**clip, "title": title, "transcript": transcript, "caption": caption}
 
 
 # ── Clip queue ────────────────────────────────────────────────────────────────
