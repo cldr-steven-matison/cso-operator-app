@@ -284,7 +284,7 @@ async def _get_clips(
         if not cursor:
             break
 
-    valid = [c for c in all_clips if c.get("duration", 0) >= 45]
+    valid = [c for c in all_clips if 45 <= c.get("duration", 0) <= 100]
     if top_mode:
         return sorted(valid, key=lambda c: c.get("view_count", 0), reverse=True)
     return sorted(valid, key=lambda c: c.get("duration", 0), reverse=True)
@@ -888,6 +888,11 @@ async def publish_next() -> dict:
     queue stays strict FIFO even if NiFi fires overlapping calls (e.g. a slow upload
     causing the next GenerateFlowFile tick to overlap the previous InvokeHTTP). The
     slow network publish itself runs outside the lock so it doesn't block approvals.
+
+    If the publish attempt raises (e.g. X rejects the clip), the clip is put back at
+    the front of the queue instead of being dropped — a permanently-unpublishable
+    clip (like an oversized video) can then be seen and cancelled via /pending
+    instead of silently vanishing.
     """
     with _pending_lock():
         pending = _load_pending()
@@ -895,7 +900,12 @@ async def publish_next() -> dict:
             return {"published": False, "reason": "queue empty"}
         clip = pending[0]
         _save_pending(pending[1:])
-    result = await publish_clip(clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""))
+    try:
+        result = await publish_clip(clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""))
+    except Exception:
+        with _pending_lock():
+            _save_pending([clip] + _load_pending())
+        raise
     return {**result, "queue_remaining": len(pending) - 1}
 
 
