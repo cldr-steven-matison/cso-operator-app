@@ -806,7 +806,7 @@ _STREAMER_CATALOG: dict[str, str] = {
     "odablock":       "Odablock",
     "iceposeidon":    "REALIcePoseidon",
     "adinross":       "adinross",
-    "n3on":           "N3on",
+    "n3on":           "n3ononyt",
     "chickenandy":    "ChickenAndy_",
     "asmongold":      "asmongold",
     "mrbeast":        "mrbeast",
