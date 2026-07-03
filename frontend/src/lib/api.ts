@@ -115,6 +115,12 @@ export type PendingClip = {
   clip_id: string;
   clip_path: string;
   tweet_text: string;
+  title?: string;
+  source?: string;
+  streamer?: string;
+  url?: string;
+  thumbnail_url?: string;
+  x_handle?: string;
 };
 
 export type TopicRecord = {
@@ -210,8 +216,13 @@ export const api = {
   streamersFlowStart: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/start`),
   streamersFlowStop: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/stop`),
   streamersQueue: () => jget<StreamerClip[]>("/api/streamers/queue"),
-  streamersApprove: (clip_path: string, tweet_text: string, clip_id?: string, title?: string) =>
-    jpost<{ queued: boolean; clip_id: string; position: number }>("/api/streamers/approve", { clip_path, tweet_text, clip_id, title }),
+  streamersApprove: (
+    clip_path: string, tweet_text: string, clip_id?: string, title?: string,
+    source?: string, streamer?: string, url?: string, thumbnail_url?: string, x_handle?: string,
+  ) =>
+    jpost<{ queued: boolean; clip_id: string; position: number }>("/api/streamers/approve", {
+      clip_path, tweet_text, clip_id, title, source, streamer, url, thumbnail_url, x_handle,
+    }),
   streamersPublish: (clip_path: string, tweet_text: string, clip_id?: string, title?: string) =>
     jpost<StreamerPublishResult>("/api/streamers/publish", { clip_path, tweet_text, clip_id, title }),
   streamersSkip: (clip_id: string) =>
@@ -229,6 +240,10 @@ export const api = {
   streamersPending: () => jget<{ pending: PendingClip[] }>("/api/streamers/pending"),
   streamersCancelPending: (clip_id: string) =>
     jpost<{ ok: boolean; clip_id: string }>(`/api/streamers/pending/${encodeURIComponent(clip_id)}/cancel`),
+  streamersPendingPublishNow: (clip_id: string) =>
+    jpost<{ published: boolean; ok?: boolean; url?: string; queue_remaining?: number; reason?: string }>(
+      `/api/streamers/pending/${encodeURIComponent(clip_id)}/publish-now`,
+    ),
 };
 
 async function uploadFile(url: string, file: File) {

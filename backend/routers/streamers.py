@@ -52,6 +52,11 @@ class PublishRequest(BaseModel):
     tweet_text: str
     clip_id: str = ""
     title: str = ""
+    source: str = ""
+    streamer: str = ""
+    url: str = ""
+    thumbnail_url: str = ""
+    x_handle: str = ""
 
 
 @router.post("/approve")
@@ -61,7 +66,10 @@ async def approve(body: PublishRequest):
         raise HTTPException(status_code=400, detail="clip_path and tweet_text are required")
     if not os.path.exists(body.clip_path):
         raise HTTPException(status_code=404, detail=f"Clip file not found: {body.clip_path} — re-fetch clips first")
-    return streamers.approve_clip(body.clip_id, body.clip_path, body.tweet_text, body.title)
+    return streamers.approve_clip(
+        body.clip_id, body.clip_path, body.tweet_text, body.title,
+        body.source, body.streamer, body.url, body.thumbnail_url, body.x_handle,
+    )
 
 
 @router.post("/publish-next")
@@ -83,6 +91,15 @@ async def pending_queue():
 async def cancel_pending(clip_id: str):
     """Remove a clip from the publish queue before NiFi drains it."""
     return streamers.cancel_pending(clip_id)
+
+
+@router.post("/pending/{clip_id}/publish-now")
+async def pending_publish_now(clip_id: str):
+    """Publish one specific pending clip immediately, regardless of its queue position."""
+    try:
+        return await streamers.publish_pending(clip_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.post("/publish")

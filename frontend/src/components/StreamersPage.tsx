@@ -106,7 +106,10 @@ function ClipCard({
     setPublishing(true);
     setResult(null);
     try {
-      const r = await api.streamersApprove(clip.clip_path, tweetText, clip.clip_id, clip.title);
+      const r = await api.streamersApprove(
+        clip.clip_path, tweetText, clip.clip_id, clip.title,
+        clip.source, clip.streamer, clip.url, clip.thumbnail_url, clip.x_handle,
+      );
       setResult({ ok: true, position: r.position });
       setTimeout(() => onPublished(clip._offset ?? -1), 1200);
     } catch (e) {
@@ -328,12 +331,16 @@ function PendingPanel({
   pending,
   loading,
   onCancel,
+  onPostedNow,
 }: {
   pending: PendingClip[];
   loading: boolean;
   onCancel: (clip_id: string) => void;
+  onPostedNow: (clip_id: string) => void;
 }) {
   const [cancelingId, setCancelingId] = useState<string | null>(null);
+  const [postingId, setPostingId] = useState<string | null>(null);
+  const [postResult, setPostResult] = useState<Record<string, { ok: boolean; url?: string; error?: string }>>({});
 
   async function doCancel(clip_id: string) {
     setCancelingId(clip_id);
@@ -345,32 +352,106 @@ function PendingPanel({
     }
   }
 
+  async function doPostNow(clip_id: string) {
+    setPostingId(clip_id);
+    try {
+      const r = await api.streamersPendingPublishNow(clip_id);
+      if (r.published === false) {
+        setPostResult((prev) => ({ ...prev, [clip_id]: { ok: false, error: r.reason || "not in queue" } }));
+      } else {
+        setPostResult((prev) => ({ ...prev, [clip_id]: { ok: true, url: r.url } }));
+        setTimeout(() => onPostedNow(clip_id), 1200);
+      }
+    } catch (e) {
+      setPostResult((prev) => ({ ...prev, [clip_id]: { ok: false, error: String(e) } }));
+    } finally {
+      setPostingId(null);
+    }
+  }
+
   if (loading) return <p className="text-muted text-sm">Loading pending publish queue…</p>;
   if (pending.length === 0) return <p className="text-muted text-sm">Queue empty — nothing waiting to post.</p>;
 
   return (
     <div className="space-y-2">
-      {pending.map((p, i) => (
-        <div
-          key={p.clip_id || i}
-          className="flex items-start justify-between gap-3 border border-border rounded p-3 bg-bg"
-        >
-          <div className="min-w-0 space-y-1">
-            <div className="flex items-center gap-2 text-xs text-muted">
-              <span className="font-semibold text-text">#{i + 1}</span>
-              <span className="font-mono truncate">{p.clip_id || "unknown clip"}</span>
-            </div>
-            <p className="text-xs text-text whitespace-pre-wrap line-clamp-2">{p.tweet_text}</p>
-          </div>
-          <Button
-            onClick={() => doCancel(p.clip_id)}
-            disabled={cancelingId === p.clip_id}
-            className="text-xs opacity-60 shrink-0"
+      {pending.map((p, i) => {
+        const result = postResult[p.clip_id];
+        return (
+          <div
+            key={p.clip_id || i}
+            className="flex items-start justify-between gap-3 border border-border rounded p-3 bg-bg"
           >
-            {cancelingId === p.clip_id ? "Canceling…" : "Cancel"}
-          </Button>
-        </div>
-      ))}
+            {p.thumbnail_url && (
+              <img
+                src={p.thumbnail_url}
+                alt="thumbnail"
+                loading="lazy"
+                className="w-20 h-12 object-cover rounded border border-border shrink-0"
+              />
+            )}
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
+                <span className="font-semibold text-text">#{i + 1}</span>
+                {p.source && <PlatformBadge platform={p.source as "twitch" | "kick"} />}
+                {p.streamer && (
+                  <a
+                    href={p.source === "kick" ? `https://kick.com/${p.streamer}` : `https://www.twitch.tv/${p.streamer}`}
+                    target="_blank" rel="noopener noreferrer"
+                    className="text-text hover:text-accent font-mono"
+                  >
+                    {p.streamer}
+                  </a>
+                )}
+                {p.x_handle && (
+                  <a href={`https://x.com/${p.x_handle}`} target="_blank" rel="noopener noreferrer"
+                     className="text-accent hover:underline">
+                    @{p.x_handle}
+                  </a>
+                )}
+              </div>
+              {p.url ? (
+                <a href={p.url} target="_blank" rel="noopener noreferrer"
+                   className="text-xs font-semibold text-text hover:text-accent block truncate">
+                  {p.title || p.clip_id || "Untitled Clip"}
+                </a>
+              ) : (
+                <p className="text-xs font-semibold text-text truncate">{p.title || p.clip_id || "unknown clip"}</p>
+              )}
+              <p className="text-xs text-text whitespace-pre-wrap line-clamp-2">{p.tweet_text}</p>
+              {result && (
+                <span className={result.ok ? "text-accent text-xs" : "text-bad text-xs"}>
+                  {result.ok ? (
+                    <>
+                      Posted ✓{" "}
+                      <a href={result.url} target="_blank" rel="noopener noreferrer" className="underline">
+                        {result.url}
+                      </a>
+                    </>
+                  ) : (
+                    result.error
+                  )}
+                </span>
+              )}
+            </div>
+            <div className="flex flex-col gap-1 shrink-0">
+              <Button
+                onClick={() => doPostNow(p.clip_id)}
+                disabled={postingId === p.clip_id || cancelingId === p.clip_id}
+                className="text-xs opacity-90"
+              >
+                {postingId === p.clip_id ? "Posting…" : "Post Now"}
+              </Button>
+              <Button
+                onClick={() => doCancel(p.clip_id)}
+                disabled={cancelingId === p.clip_id || postingId === p.clip_id}
+                className="text-xs opacity-60"
+              >
+                {cancelingId === p.clip_id ? "Canceling…" : "Cancel"}
+              </Button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -790,7 +871,7 @@ export function StreamersPage() {
             Refresh
           </Button>
         </div>
-        <PendingPanel pending={pending} loading={pendingLoading} onCancel={cancelPending} />
+        <PendingPanel pending={pending} loading={pendingLoading} onCancel={cancelPending} onPostedNow={cancelPending} />
       </Card>
 
     </div>

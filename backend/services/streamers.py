@@ -867,19 +867,54 @@ def get_published() -> set[str]:
     return _load_id_set(_published_path())
 
 
-def approve_clip(clip_id: str, clip_path: str, tweet_text: str, title: str = "") -> dict:
+def approve_clip(
+    clip_id: str, clip_path: str, tweet_text: str, title: str = "",
+    source: str = "", streamer: str = "", url: str = "",
+    thumbnail_url: str = "", x_handle: str = "",
+) -> dict:
     """Queue a clip for X publishing. Returns immediately — NiFi drains the queue.
 
     Locked read-modify-write: without this, two near-simultaneous approvals (or an
     approval racing publish_next) can each read the same pending list and overwrite
     each other's append, silently dropping an approved clip from the queue.
+
+    Carries the display metadata (source/streamer/url/thumbnail/x_handle) through so
+    the Pending Publish panel can render a full card instead of just clip_id + text.
     """
     with _pending_lock():
         pending = _load_pending()
         if not any(p["clip_id"] == clip_id for p in pending):
-            pending.append({"clip_id": clip_id, "clip_path": clip_path, "tweet_text": tweet_text, "title": title})
+            pending.append({
+                "clip_id": clip_id, "clip_path": clip_path, "tweet_text": tweet_text, "title": title,
+                "source": source, "streamer": streamer, "url": url,
+                "thumbnail_url": thumbnail_url, "x_handle": x_handle,
+            })
             _save_pending(pending)
     return {"queued": True, "clip_id": clip_id, "position": len(pending)}
+
+
+async def publish_pending(clip_id: str) -> dict:
+    """Publish one specific pending clip right now, regardless of its queue position.
+
+    Same pop-and-save-under-lock shape as publish_next(), except it removes the
+    matching clip_id from wherever it sits in the list instead of always index 0.
+    The pending list is a flat JSON file, not Kafka — removing one entry out of
+    order doesn't touch Kafka offsets or the relative order of the remaining clips.
+    """
+    with _pending_lock():
+        pending = _load_pending()
+        clip = next((p for p in pending if p["clip_id"] == clip_id), None)
+        if clip is None:
+            return {"published": False, "reason": "not in pending queue"}
+        remaining = [p for p in pending if p["clip_id"] != clip_id]
+        _save_pending(remaining)
+    try:
+        result = await publish_clip(clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""))
+    except Exception:
+        with _pending_lock():
+            _save_pending([clip] + _load_pending())
+        raise
+    return {**result, "queue_remaining": len(remaining)}
 
 
 async def publish_next() -> dict:
