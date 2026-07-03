@@ -124,6 +124,17 @@ async def published_clips():
     return {"published": streamers.get_published_history()}
 
 
+@router.post("/admin/backfill-metadata")
+async def backfill_metadata():
+    """One-time repair for pending/published entries that predate source/streamer/
+    url/thumbnail_url/x_handle being added to approve_clip()/mark_published().
+    Safe to re-run — a no-op once every entry already has its fields."""
+    try:
+        return await streamers.backfill_metadata()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 # ── Skip ──────────────────────────────────────────────────────────────────────
 
 class SkipRequest(BaseModel):

@@ -896,6 +896,89 @@ def get_published_history(limit: int = 60) -> list[dict]:
     return list(reversed(history))[:limit]
 
 
+def _patch_missing_metadata(entry: dict, meta: dict) -> bool:
+    changed = False
+    for field in ("title", "source", "streamer", "url", "thumbnail_url"):
+        if not entry.get(field) and meta.get(field):
+            entry[field] = meta[field]
+            changed = True
+    if not entry.get("x_handle") and entry.get("streamer"):
+        xh = get_x_handle(entry["streamer"])
+        if xh:
+            entry["x_handle"] = xh
+            changed = True
+    return changed
+
+
+async def backfill_metadata() -> dict:
+    """One-time repair for pending/published entries created before source/streamer/
+    url/thumbnail_url/x_handle were added to approve_clip()/mark_published(). Full
+    scan of processed_clips (every message still has the original fetch metadata,
+    since Kafka topics aren't mutated when a clip is later approved/published) to
+    build a clip_id -> metadata lookup, then fills in only the missing fields on
+    existing pending/published-history entries. Safe to re-run — a no-op once
+    every entry already has its fields.
+    """
+    topic = settings.PROCESSED_CLIPS_TOPIC
+    by_id: dict[str, dict] = {}
+    consumer = AIOKafkaConsumer(
+        bootstrap_servers=settings.KAFKA_BOOTSTRAP,
+        enable_auto_commit=False,
+        request_timeout_ms=15000,
+    )
+    await consumer.start()
+    try:
+        tp = TopicPartition(topic, 0)
+        consumer.assign([tp])
+        begin = (await consumer.beginning_offsets([tp]))[tp]
+        end = (await consumer.end_offsets([tp]))[tp]
+        consumer.seek(tp, begin)
+        fetched = 0
+        while fetched < (end - begin):
+            batch = await consumer.getmany(tp, timeout_ms=5000, max_records=500)
+            msgs = batch.get(tp, [])
+            if not msgs:
+                break
+            for msg in msgs:
+                try:
+                    rec = json.loads(msg.value.decode("utf-8"))
+                    cid = rec.get("clip_id", "")
+                    if cid:
+                        by_id[cid] = rec
+                except Exception:
+                    pass
+            fetched += len(msgs)
+    finally:
+        await consumer.stop()
+
+    with _pending_lock():
+        pending = _load_pending()
+        pending_patched = sum(
+            1 for entry in pending
+            if entry.get("clip_id") in by_id and _patch_missing_metadata(entry, by_id[entry["clip_id"]])
+        )
+        _save_pending(pending)
+
+        hist_path = _published_history_path()
+        history = []
+        if hist_path.exists():
+            try:
+                history = json.loads(hist_path.read_text())
+            except Exception:
+                history = []
+        history_patched = sum(
+            1 for entry in history
+            if entry.get("clip_id") in by_id and _patch_missing_metadata(entry, by_id[entry["clip_id"]])
+        )
+        hist_path.write_text(json.dumps(history))
+
+    return {
+        "indexed": len(by_id),
+        "pending_total": len(pending), "pending_patched": pending_patched,
+        "published_total": len(history), "published_patched": history_patched,
+    }
+
+
 def get_skipped() -> set[str]:
     return _load_id_set(_skipped_path())
 
