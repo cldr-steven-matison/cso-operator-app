@@ -84,15 +84,19 @@ function fallbackCaption() {
 function ClipCard({
   clip,
   onPublished,
+  onPostNow,
   onSkip,
 }: {
   clip: StreamerClip;
   onPublished: (offset: number) => void;
+  onPostNow: (offset: number) => void;
   onSkip: (offset: number) => void;
 }) {
   const [caption, setCaption] = useState(clip.caption?.trim() || fallbackCaption());
   const [publishing, setPublishing] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; position?: number; error?: string } | null>(null);
+  const [postingNow, setPostingNow] = useState(false);
+  const [postNowResult, setPostNowResult] = useState<{ ok: boolean; url?: string; error?: string } | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
 
   const tweetText = caption;
@@ -109,6 +113,21 @@ function ClipCard({
       setResult({ ok: false, error: String(e) });
     } finally {
       setPublishing(false);
+    }
+  }
+
+  async function doPostNow() {
+    if (!clip.clip_path || !tweetText.trim()) return;
+    setPostingNow(true);
+    setPostNowResult(null);
+    try {
+      const r = await api.streamersPublish(clip.clip_path, tweetText, clip.clip_id, clip.title);
+      setPostNowResult({ ok: true, url: r.url });
+      setTimeout(() => onPostNow(clip._offset ?? -1), 1200);
+    } catch (e) {
+      setPostNowResult({ ok: false, error: String(e) });
+    } finally {
+      setPostingNow(false);
     }
   }
 
@@ -216,13 +235,20 @@ function ClipCard({
       <div className="flex items-center gap-3 flex-wrap">
         <Button
           onClick={doPublish}
-          disabled={publishing || !tweetText.trim() || !clip.clip_path}
+          disabled={publishing || postingNow || !tweetText.trim() || !clip.clip_path}
         >
           {publishing ? "Queuing…" : "Approve"}
         </Button>
         <Button
+          onClick={doPostNow}
+          disabled={publishing || postingNow || !tweetText.trim() || !clip.clip_path}
+          className="opacity-90"
+        >
+          {postingNow ? "Posting…" : "Post Now"}
+        </Button>
+        <Button
           onClick={doSkip}
-          disabled={publishing}
+          disabled={publishing || postingNow}
           className="text-xs opacity-60"
         >
           Skip
@@ -232,6 +258,20 @@ function ClipCard({
             {result.ok
               ? `Queued #${result.position} ✓`
               : result.error}
+          </span>
+        )}
+        {postNowResult && (
+          <span className={postNowResult.ok ? "text-accent text-xs" : "text-bad text-xs"}>
+            {postNowResult.ok ? (
+              <>
+                Posted ✓{" "}
+                <a href={postNowResult.url} target="_blank" rel="noopener noreferrer" className="underline">
+                  {postNowResult.url}
+                </a>
+              </>
+            ) : (
+              postNowResult.error
+            )}
           </span>
         )}
       </div>
@@ -727,6 +767,7 @@ export function StreamersPage() {
                 key={clip._offset ?? i}
                 clip={clip}
                 onPublished={onApproved}
+                onPostNow={dismiss}
                 onSkip={dismiss}
               />
             ))}
