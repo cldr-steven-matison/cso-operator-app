@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
-import { api, type PendingClip, type StreamerClip, type StreamerFlows, type StreamerTopics } from "@/lib/api";
+import { api, type PendingClip, type PostedClip, type StreamerClip, type StreamerFlows, type StreamerTopics } from "@/lib/api";
 import { TopicPeek } from "./TopicPeek";
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -124,9 +124,12 @@ function ClipCard({
     setPostingNow(true);
     setPostNowResult(null);
     try {
-      const r = await api.streamersPublish(clip.clip_path, tweetText, clip.clip_id, clip.title);
+      const r = await api.streamersPublish(
+        clip.clip_path, tweetText, clip.clip_id, clip.title,
+        clip.source, clip.streamer, clip.url, clip.thumbnail_url, clip.x_handle,
+      );
       setPostNowResult({ ok: true, url: r.url });
-      setTimeout(() => onPostNow(clip._offset ?? -1), 1200);
+      setTimeout(() => onPostNow(clip._offset ?? -1), 6000);
     } catch (e) {
       setPostNowResult({ ok: false, error: String(e) });
     } finally {
@@ -360,7 +363,7 @@ function PendingPanel({
         setPostResult((prev) => ({ ...prev, [clip_id]: { ok: false, error: r.reason || "not in queue" } }));
       } else {
         setPostResult((prev) => ({ ...prev, [clip_id]: { ok: true, url: r.url } }));
-        setTimeout(() => onPostedNow(clip_id), 1200);
+        setTimeout(() => onPostedNow(clip_id), 6000);
       }
     } catch (e) {
       setPostResult((prev) => ({ ...prev, [clip_id]: { ok: false, error: String(e) } }));
@@ -452,6 +455,43 @@ function PendingPanel({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// ── PostedClipsPanel ───────────────────────────────────────────────────────
+
+function PostedClipsPanel({ posted, loading }: { posted: PostedClip[]; loading: boolean }) {
+  if (loading) return <p className="text-muted text-sm">Loading posted clips…</p>;
+  if (posted.length === 0) return <p className="text-muted text-sm">Nothing posted yet.</p>;
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+      {posted.map((p, i) => (
+        <div key={p.clip_id || i} className="border border-border rounded overflow-hidden bg-bg flex flex-col">
+          {p.thumbnail_url ? (
+            <img src={p.thumbnail_url} alt="thumbnail" loading="lazy" className="w-full aspect-video object-cover" />
+          ) : (
+            <div className="w-full aspect-video bg-panel" />
+          )}
+          <div className="p-2 space-y-1 min-w-0">
+            <div className="flex items-center gap-1.5 text-[11px] text-muted flex-wrap">
+              {p.source && <PlatformBadge platform={p.source as "twitch" | "kick"} />}
+              {p.streamer && <span className="font-mono truncate">{p.streamer}</span>}
+            </div>
+            <p className="text-xs font-semibold text-text line-clamp-2">{p.title || p.clip_id || "Untitled Clip"}</p>
+            {p.published_at && (
+              <p className="text-[10px] text-muted">{new Date(p.published_at).toLocaleString()}</p>
+            )}
+            {p.tweet_url && (
+              <a href={p.tweet_url} target="_blank" rel="noopener noreferrer"
+                 className="text-[11px] text-accent hover:underline block truncate">
+                View post →
+              </a>
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -645,6 +685,8 @@ export function StreamersPage() {
   const [resetResult, setResetResult] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingClip[]>([]);
   const [pendingLoading, setPendingLoading] = useState(true);
+  const [posted, setPosted] = useState<PostedClip[]>([]);
+  const [postedLoading, setPostedLoading] = useState(true);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refreshFlows = async () => {
@@ -660,6 +702,15 @@ export function StreamersPage() {
       setPending(r.pending);
     } catch {} finally {
       setPendingLoading(false);
+    }
+  };
+
+  const refreshPosted = async () => {
+    try {
+      const r = await api.streamersPublished();
+      setPosted(r.published);
+    } catch {} finally {
+      setPostedLoading(false);
     }
   };
 
@@ -709,14 +760,25 @@ export function StreamersPage() {
     refreshPending();
   };
 
+  const onReviewPostNow = (offset: number) => {
+    dismiss(offset);
+    refreshPosted();
+  };
+
   const cancelPending = (clip_id: string) =>
     setPending((prev) => prev.filter((p) => p.clip_id !== clip_id));
+
+  const onPendingPostNow = (clip_id: string) => {
+    cancelPending(clip_id);
+    refreshPosted();
+  };
 
   useEffect(() => {
     refreshFlows();
     refreshQueue();
     refreshTopics();
     refreshPending();
+    refreshPosted();
 
     const startPoll = () => {
       if (pollRef.current) clearInterval(pollRef.current);
@@ -848,7 +910,7 @@ export function StreamersPage() {
                 key={clip._offset ?? i}
                 clip={clip}
                 onPublished={onApproved}
-                onPostNow={dismiss}
+                onPostNow={onReviewPostNow}
                 onSkip={dismiss}
               />
             ))}
@@ -871,7 +933,25 @@ export function StreamersPage() {
             Refresh
           </Button>
         </div>
-        <PendingPanel pending={pending} loading={pendingLoading} onCancel={cancelPending} onPostedNow={cancelPending} />
+        <PendingPanel pending={pending} loading={pendingLoading} onCancel={cancelPending} onPostedNow={onPendingPostNow} />
+      </Card>
+
+      {/* ── Section 6: Posted Clips ─────────────────────────────────── */}
+      <Card>
+        <div className="flex items-center justify-between mb-2">
+          <CardTitle>
+            Posted Clips
+            {posted.length > 0 && (
+              <span className="ml-2 text-xs text-muted font-normal">
+                {posted.length} recent
+              </span>
+            )}
+          </CardTitle>
+          <Button className="text-xs" onClick={refreshPosted}>
+            Refresh
+          </Button>
+        </div>
+        <PostedClipsPanel posted={posted} loading={postedLoading} />
       </Card>
 
     </div>

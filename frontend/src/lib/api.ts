@@ -123,6 +123,19 @@ export type PendingClip = {
   x_handle?: string;
 };
 
+export type PostedClip = {
+  clip_id: string;
+  title?: string;
+  source?: string;
+  streamer?: string;
+  url?: string;
+  thumbnail_url?: string;
+  x_handle?: string;
+  tweet_id?: string;
+  tweet_url?: string;
+  published_at?: string;
+};
+
 export type TopicRecord = {
   offset: number;
   source?: string;
@@ -223,8 +236,13 @@ export const api = {
     jpost<{ queued: boolean; clip_id: string; position: number }>("/api/streamers/approve", {
       clip_path, tweet_text, clip_id, title, source, streamer, url, thumbnail_url, x_handle,
     }),
-  streamersPublish: (clip_path: string, tweet_text: string, clip_id?: string, title?: string) =>
-    jpost<StreamerPublishResult>("/api/streamers/publish", { clip_path, tweet_text, clip_id, title }),
+  streamersPublish: (
+    clip_path: string, tweet_text: string, clip_id?: string, title?: string,
+    source?: string, streamer?: string, url?: string, thumbnail_url?: string, x_handle?: string,
+  ) =>
+    jpost<StreamerPublishResult>("/api/streamers/publish", {
+      clip_path, tweet_text, clip_id, title, source, streamer, url, thumbnail_url, x_handle,
+    }),
   streamersSkip: (clip_id: string) =>
     jpost<{ ok: boolean; clip_id: string }>("/api/streamers/skip", { clip_id }),
   streamersWatchlist: () => jget<WatchlistResponse>("/api/streamers/watchlist"),
@@ -244,6 +262,7 @@ export const api = {
     jpost<{ published: boolean; ok?: boolean; url?: string; queue_remaining?: number; reason?: string }>(
       `/api/streamers/pending/${encodeURIComponent(clip_id)}/publish-now`,
     ),
+  streamersPublished: () => jget<{ published: PostedClip[] }>("/api/streamers/published"),
 };
 
 async function uploadFile(url: string, file: File) {

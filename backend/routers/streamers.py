@@ -110,9 +110,18 @@ async def publish(body: PublishRequest):
     if not os.path.exists(body.clip_path):
         raise HTTPException(status_code=404, detail=f"Clip file not found: {body.clip_path} — re-fetch clips first")
     try:
-        return await streamers.publish_clip(body.clip_path, body.tweet_text, body.clip_id, body.title)
+        return await streamers.publish_clip(
+            body.clip_path, body.tweet_text, body.clip_id, body.title,
+            body.source, body.streamer, body.url, body.thumbnail_url, body.x_handle,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/published")
+async def published_clips():
+    """Most-recently-published clips, for the Posted Clips tile gallery."""
+    return {"published": streamers.get_published_history()}
 
 
 # ── Skip ──────────────────────────────────────────────────────────────────────

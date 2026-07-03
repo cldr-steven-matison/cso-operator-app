@@ -760,6 +760,10 @@ def _pending_path() -> Path:
     return Path(settings.CLIP_STORAGE_PATH) / ".pending_publish.json"
 
 
+def _published_history_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".published_history.json"
+
+
 def _fetch_mode_path() -> Path:
     return Path(settings.CLIP_STORAGE_PATH) / ".fetch_mode.json"
 
@@ -853,10 +857,43 @@ def mark_skipped(clip_id: str) -> None:
     _save_id_set(_skipped_path(), ids)
 
 
-def mark_published(clip_id: str) -> None:
+def mark_published(
+    clip_id: str, title: str = "", source: str = "", streamer: str = "",
+    url: str = "", thumbnail_url: str = "", x_handle: str = "",
+    tweet_id: str = "", tweet_url: str = "",
+) -> None:
     ids = _load_id_set(_published_path())
     ids.add(clip_id)
     _save_id_set(_published_path(), ids)
+
+    with _pending_lock():
+        p = _published_history_path()
+        history = []
+        if p.exists():
+            try:
+                history = json.loads(p.read_text())
+            except Exception:
+                history = []
+        history.append({
+            "clip_id": clip_id, "title": title, "source": source, "streamer": streamer,
+            "url": url, "thumbnail_url": thumbnail_url, "x_handle": x_handle,
+            "tweet_id": tweet_id, "tweet_url": tweet_url,
+            "published_at": datetime.now(timezone.utc).isoformat(),
+        })
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(history[-500:]))
+
+
+def get_published_history(limit: int = 60) -> list[dict]:
+    """Most-recently-published clips first, for the Posted Clips tile gallery."""
+    p = _published_history_path()
+    if not p.exists():
+        return []
+    try:
+        history = json.loads(p.read_text())
+    except Exception:
+        return []
+    return list(reversed(history))[:limit]
 
 
 def get_skipped() -> set[str]:
@@ -909,7 +946,11 @@ async def publish_pending(clip_id: str) -> dict:
         remaining = [p for p in pending if p["clip_id"] != clip_id]
         _save_pending(remaining)
     try:
-        result = await publish_clip(clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""))
+        result = await publish_clip(
+            clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""),
+            clip.get("source", ""), clip.get("streamer", ""), clip.get("url", ""),
+            clip.get("thumbnail_url", ""), clip.get("x_handle", ""),
+        )
     except Exception:
         with _pending_lock():
             _save_pending([clip] + _load_pending())
@@ -937,7 +978,11 @@ async def publish_next() -> dict:
         clip = pending[0]
         _save_pending(pending[1:])
     try:
-        result = await publish_clip(clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""))
+        result = await publish_clip(
+            clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""),
+            clip.get("source", ""), clip.get("streamer", ""), clip.get("url", ""),
+            clip.get("thumbnail_url", ""), clip.get("x_handle", ""),
+        )
     except Exception:
         with _pending_lock():
             _save_pending([clip] + _load_pending())
@@ -1484,10 +1529,17 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     }
 
 
-async def publish_clip(clip_path: str, tweet_text: str, clip_id: str = "", title: str = "") -> dict:
+async def publish_clip(
+    clip_path: str, tweet_text: str, clip_id: str = "", title: str = "",
+    source: str = "", streamer: str = "", url: str = "",
+    thumbnail_url: str = "", x_handle: str = "",
+) -> dict:
     result = await asyncio.to_thread(_publish_sync, clip_path, tweet_text)
     if result.get("ok") and clip_id:
-        mark_published(clip_id)
+        mark_published(
+            clip_id, title, source, streamer, url, thumbnail_url, x_handle,
+            result.get("tweet_id", ""), result.get("url", ""),
+        )
     return result
 
 
