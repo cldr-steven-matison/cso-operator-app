@@ -226,6 +226,12 @@ async def rotate_watchlist():
     return {"logins": streamers.rotate_watchlist()}
 
 
+@router.get("/x-handle/{login}")
+async def get_x_handle(login: str):
+    """Passive catalog lookup for LiveStreamerAlert (NiFi) — X handle has no @, empty string if unknown."""
+    return {"login": login, "x_handle": streamers.get_x_handle(login)}
+
+
 # ── Fetch mode ────────────────────────────────────────────────────────────────
 
 @router.get("/fetch-mode")

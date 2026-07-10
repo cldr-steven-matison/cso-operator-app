@@ -687,6 +687,9 @@ export function StreamersPage() {
   const [pendingLoading, setPendingLoading] = useState(true);
   const [posted, setPosted] = useState<PostedClip[]>([]);
   const [postedLoading, setPostedLoading] = useState(true);
+  const [view, setView] = useState<"main" | "posted">("main");
+  const [approvingAll, setApprovingAll] = useState(false);
+  const [approveAllResult, setApproveAllResult] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refreshFlows = async () => {
@@ -755,6 +758,34 @@ export function StreamersPage() {
   const dismiss = (offset: number) =>
     setDismissed((prev) => new Set(prev).add(offset));
 
+  const doApproveAll = async () => {
+    if (visibleClips.length === 0) return;
+    setApprovingAll(true);
+    setApproveAllResult(null);
+    let approved = 0;
+    let failed = 0;
+    for (const clip of visibleClips) {
+      const text = clip.caption?.trim() || fallbackCaption();
+      if (!clip.clip_path || !text.trim()) {
+        failed++;
+        continue;
+      }
+      try {
+        await api.streamersApprove(
+          clip.clip_path, text, clip.clip_id, clip.title,
+          clip.source, clip.streamer, clip.url, clip.thumbnail_url, clip.x_handle,
+        );
+        approved++;
+        dismiss(clip._offset ?? -1);
+      } catch {
+        failed++;
+      }
+    }
+    await refreshPending();
+    setApproveAllResult(`Approved ${approved}${failed ? `, ${failed} failed` : ""}.`);
+    setApprovingAll(false);
+  };
+
   const onApproved = (offset: number) => {
     dismiss(offset);
     refreshPending();
@@ -814,6 +845,24 @@ export function StreamersPage() {
 
   return (
     <div className="space-y-4">
+      {/* ── Sub-nav pills ───────────────────────────────────────────── */}
+      <div className="flex rounded-full border border-border overflow-hidden text-xs font-semibold w-fit">
+        <button
+          onClick={() => setView("main")}
+          className={`px-3 py-1 transition-colors ${view === "main" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+        >
+          Overview
+        </button>
+        <button
+          onClick={() => setView("posted")}
+          className={`px-3 py-1 border-l border-border transition-colors ${view === "posted" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+        >
+          Posted Clips{posted.length > 0 ? ` (${posted.length})` : ""}
+        </button>
+      </div>
+
+      {view === "main" && (
+      <>
       {/* ── Section 1: Pipeline Status ─────────────────────────────── */}
       <Card>
         <CardTitle>Pipeline Status</CardTitle>
@@ -891,10 +940,22 @@ export function StreamersPage() {
               </span>
             )}
           </CardTitle>
-          <Button className="text-xs" onClick={refreshQueue}>
-            Refresh
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              className="text-xs"
+              onClick={doApproveAll}
+              disabled={approvingAll || visibleClips.length === 0}
+            >
+              {approvingAll ? "Approving…" : "Approve All"}
+            </Button>
+            <Button className="text-xs" onClick={refreshQueue}>
+              Refresh
+            </Button>
+          </div>
         </div>
+        {approveAllResult && (
+          <p className="text-xs mb-3 text-accent">{approveAllResult}</p>
+        )}
         {clipsLoading ? (
           <p className="text-muted text-sm">Loading queue…</p>
         ) : visibleClips.length === 0 ? (
@@ -935,8 +996,10 @@ export function StreamersPage() {
         </div>
         <PendingPanel pending={pending} loading={pendingLoading} onCancel={cancelPending} onPostedNow={onPendingPostNow} />
       </Card>
+      </>
+      )}
 
-      {/* ── Section 6: Posted Clips ─────────────────────────────────── */}
+      {view === "posted" && (
       <Card>
         <div className="flex items-center justify-between mb-2">
           <CardTitle>
@@ -953,6 +1016,7 @@ export function StreamersPage() {
         </div>
         <PostedClipsPanel posted={posted} loading={postedLoading} />
       </Card>
+      )}
 
     </div>
   );
