@@ -37,6 +37,7 @@ _KICK_LOGINS: list[str] = [
     "roshtein", "deenthegreat", "hstikkytokky", "odablock",
     "iceposeidon", "adinross", "n3on",
     "chickenandy", "asmongold", "mrbeast", "clavicular", "ac7ionman",
+    "adrienbroner", "bbjess",
 ]
 
 _watchlist: list[str] = []
@@ -816,6 +817,8 @@ _STREAMER_CATALOG: dict[str, str] = {
     "mrbeast":        "mrbeast",
     "clavicular":     "Clavicular0",
     "ac7ionman":      "Ac7ionMann",
+    "adrienbroner":   "AdrienBroner",
+    "bbjess":         "bbjess",
 }
 
 def get_x_handle(login: str) -> str:
