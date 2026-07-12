@@ -210,6 +210,13 @@ async def get_watchlist():
     return {"logins": streamers.get_watchlist()}
 
 
+@router.get("/roster")
+async def get_roster():
+    """Every catalog streamer, not just the watch list -- for LiveStreamerAlert's
+    live-status poll, same {"logins": [...]} shape as /watchlist."""
+    return {"logins": streamers.get_roster()}
+
+
 class WatchlistUpdate(BaseModel):
     logins: list[str]
 

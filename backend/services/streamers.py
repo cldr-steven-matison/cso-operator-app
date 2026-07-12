@@ -31,13 +31,14 @@ _TWITCH_LOGINS: list[str] = [
     "xqc", "ishowspeed", "stableronaldo", "jynxzi", "agent00",
     "extraemily", "eliasn97", "hello_kiko", "theburntpeanut",
     "jasontheween", "zackrawrr", "lacy", "kaicenat", "2xrakai",
+    "joe_bartolozzi",
 ]
 
 _KICK_LOGINS: list[str] = [
     "roshtein", "deenthegreat", "hstikkytokky", "odablock",
     "iceposeidon", "adinross", "n3on",
     "chickenandy", "asmongold", "mrbeast", "clavicular", "ac7ionman",
-    "adrienbroner", "bbjess",
+    "adrienbroner", "bbjess", "whiz",
 ]
 
 _watchlist: list[str] = []
@@ -69,6 +70,15 @@ _init_watchlist()
 
 def get_watchlist() -> list[str]:
     return list(_watchlist)
+
+
+def get_roster() -> list[str]:
+    """Every catalog streamer (not just the watch list), same login/kick:login shape.
+
+    For LiveStreamerAlert to poll the whole roster for live status instead of
+    just the 4-entry watch list -- the watch list still drives FetchClips.
+    """
+    return _TWITCH_LOGINS + [f"kick:{l}" for l in _KICK_LOGINS]
 
 
 def set_watchlist(logins: list[str]):
@@ -818,6 +828,7 @@ _STREAMER_CATALOG: dict[str, str] = {
     "lacy":           "LacyHimself",
     "kaicenat":       "KaiCenat",
     "2xrakai":        "2xrakai",
+    "joe_bartolozzi": "JoeBartolozzi_",
     # Kick
     "roshtein":       "roshtein",
     "deenthegreat":   "DeenTheGreat",
@@ -833,6 +844,7 @@ _STREAMER_CATALOG: dict[str, str] = {
     "ac7ionman":      "Ac7ionMann",
     "adrienbroner":   "AdrienBroner",
     "bbjess":         "bbjess",
+    "whiz":           "crashoverride",
 }
 
 def get_x_handle(login: str) -> str:
