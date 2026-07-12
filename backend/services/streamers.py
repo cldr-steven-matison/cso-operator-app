@@ -76,6 +76,20 @@ def set_watchlist(logins: list[str]):
     _watchlist = [l.strip() for l in logins if l.strip()]
 
 
+def add_to_watchlist(login: str) -> list[str]:
+    """Append one login (already-normalized, e.g. 'kick:n3on') if not already present.
+
+    Unlike set_watchlist/rotate_watchlist this doesn't cap or replace — meant for
+    LiveStreamerAlert to pin a streamer it just found live without disturbing the
+    rest of the list.
+    """
+    global _watchlist
+    login = login.strip()
+    if login and login not in _watchlist:
+        _watchlist.append(login)
+    return list(_watchlist)
+
+
 def rotate_watchlist() -> list[str]:
     """Swap the current watch list for 4 new streamers (2 Twitch, 2 Kick) not already on it.
 

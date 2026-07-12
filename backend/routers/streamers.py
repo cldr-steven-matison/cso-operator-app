@@ -226,6 +226,19 @@ async def rotate_watchlist():
     return {"logins": streamers.rotate_watchlist()}
 
 
+class WatchlistAdd(BaseModel):
+    login: str
+    platform: str  # "twitch" or "kick" — matches the flowfile attributes LiveStreamerAlert already has
+
+
+@router.post("/watchlist/add")
+async def add_to_watchlist(body: WatchlistAdd):
+    """Pin one streamer onto the watch list without disturbing the rest — for LiveStreamerAlert
+    to call when it finds someone live, passive/additive unlike POST /watchlist (full replace)."""
+    entry = f"kick:{body.login}" if body.platform == "kick" else body.login
+    return {"logins": streamers.add_to_watchlist(entry)}
+
+
 @router.get("/x-handle/{login}")
 async def get_x_handle(login: str):
     """Passive catalog lookup for LiveStreamerAlert (NiFi) — X handle has no @, empty string if unknown."""
