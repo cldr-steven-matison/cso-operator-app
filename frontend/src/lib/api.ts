@@ -121,6 +121,7 @@ export type PendingClip = {
   url?: string;
   thumbnail_url?: string;
   x_handle?: string;
+  view_count?: number;
 };
 
 export type PostedClip = {
@@ -232,9 +233,10 @@ export const api = {
   streamersApprove: (
     clip_path: string, tweet_text: string, clip_id?: string, title?: string,
     source?: string, streamer?: string, url?: string, thumbnail_url?: string, x_handle?: string,
+    view_count?: number,
   ) =>
     jpost<{ queued: boolean; clip_id: string; position: number }>("/api/streamers/approve", {
-      clip_path, tweet_text, clip_id, title, source, streamer, url, thumbnail_url, x_handle,
+      clip_path, tweet_text, clip_id, title, source, streamer, url, thumbnail_url, x_handle, view_count,
     }),
   streamersPublish: (
     clip_path: string, tweet_text: string, clip_id?: string, title?: string,

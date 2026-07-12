@@ -58,11 +58,30 @@ _topic_stats_ts: float = 0.0
 _TOPIC_STATS_TTL = 30.0
 
 
+def _watchlist_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".watchlist.json"
+
+
+def _save_watchlist():
+    _watchlist_path().parent.mkdir(parents=True, exist_ok=True)
+    _watchlist_path().write_text(json.dumps(_watchlist))
+
+
 def _init_watchlist():
+    """Load the persisted watch list (survives pod restarts/redeploys) or, on
+    first-ever run with nothing saved yet, seed a random starting pick."""
     global _watchlist
+    p = _watchlist_path()
+    if p.exists():
+        try:
+            _watchlist = json.loads(p.read_text())
+            return
+        except Exception:
+            pass
     twitch_picks = random.sample(_TWITCH_LOGINS, min(2, len(_TWITCH_LOGINS)))
     kick_picks = [f"kick:{l}" for l in random.sample(_KICK_LOGINS, min(2, len(_KICK_LOGINS)))]
     _watchlist = twitch_picks + kick_picks
+    _save_watchlist()
 
 
 _init_watchlist()
@@ -84,6 +103,7 @@ def get_roster() -> list[str]:
 def set_watchlist(logins: list[str]):
     global _watchlist
     _watchlist = [l.strip() for l in logins if l.strip()]
+    _save_watchlist()
 
 
 def add_to_watchlist(login: str) -> list[str]:
@@ -97,6 +117,7 @@ def add_to_watchlist(login: str) -> list[str]:
     login = login.strip()
     if login and login not in _watchlist:
         _watchlist.append(login)
+        _save_watchlist()
     return list(_watchlist)
 
 
@@ -113,6 +134,7 @@ def rotate_watchlist() -> list[str]:
     twitch_picks = random.sample(twitch_pool, min(2, len(twitch_pool)))
     kick_picks = [f"kick:{l}" for l in random.sample(kick_pool, min(2, len(kick_pool)))]
     _watchlist = twitch_picks + kick_picks
+    _save_watchlist()
     return list(_watchlist)
 
 
@@ -927,7 +949,7 @@ def get_published_history(limit: int = 60) -> list[dict]:
 
 def _patch_missing_metadata(entry: dict, meta: dict) -> bool:
     changed = False
-    for field in ("title", "source", "streamer", "url", "thumbnail_url"):
+    for field in ("title", "source", "streamer", "url", "thumbnail_url", "view_count"):
         if not entry.get(field) and meta.get(field):
             entry[field] = meta[field]
             changed = True
@@ -1019,7 +1041,7 @@ def get_published() -> set[str]:
 def approve_clip(
     clip_id: str, clip_path: str, tweet_text: str, title: str = "",
     source: str = "", streamer: str = "", url: str = "",
-    thumbnail_url: str = "", x_handle: str = "",
+    thumbnail_url: str = "", x_handle: str = "", view_count: int = 0,
 ) -> dict:
     """Queue a clip for X publishing. Returns immediately — NiFi drains the queue.
 
@@ -1027,8 +1049,9 @@ def approve_clip(
     approval racing publish_next) can each read the same pending list and overwrite
     each other's append, silently dropping an approved clip from the queue.
 
-    Carries the display metadata (source/streamer/url/thumbnail/x_handle) through so
-    the Pending Publish panel can render a full card instead of just clip_id + text.
+    Carries the display metadata (source/streamer/url/thumbnail/x_handle/view_count)
+    through so the Pending Publish panel can render a full card instead of just
+    clip_id + text.
     """
     with _pending_lock():
         pending = _load_pending()
@@ -1036,7 +1059,7 @@ def approve_clip(
             pending.append({
                 "clip_id": clip_id, "clip_path": clip_path, "tweet_text": tweet_text, "title": title,
                 "source": source, "streamer": streamer, "url": url,
-                "thumbnail_url": thumbnail_url, "x_handle": x_handle,
+                "thumbnail_url": thumbnail_url, "x_handle": x_handle, "view_count": view_count,
             })
             _save_pending(pending)
     return {"queued": True, "clip_id": clip_id, "position": len(pending)}

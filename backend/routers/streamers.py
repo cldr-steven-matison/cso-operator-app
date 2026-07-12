@@ -57,6 +57,7 @@ class PublishRequest(BaseModel):
     url: str = ""
     thumbnail_url: str = ""
     x_handle: str = ""
+    view_count: int = 0
 
 
 @router.post("/approve")
@@ -69,6 +70,7 @@ async def approve(body: PublishRequest):
     return streamers.approve_clip(
         body.clip_id, body.clip_path, body.tweet_text, body.title,
         body.source, body.streamer, body.url, body.thumbnail_url, body.x_handle,
+        body.view_count,
     )
 
 

@@ -109,6 +109,7 @@ function ClipCard({
       const r = await api.streamersApprove(
         clip.clip_path, tweetText, clip.clip_id, clip.title,
         clip.source, clip.streamer, clip.url, clip.thumbnail_url, clip.x_handle,
+        clip.view_count,
       );
       setResult({ ok: true, position: r.position });
       setTimeout(() => onPublished(clip._offset ?? -1), 1200);
@@ -410,6 +411,9 @@ function PendingPanel({
                      className="text-accent hover:underline">
                     @{p.x_handle}
                   </a>
+                )}
+                {p.view_count != null && p.view_count > 0 && (
+                  <span>· {p.view_count.toLocaleString()} views</span>
                 )}
               </div>
               {p.url ? (
@@ -774,6 +778,7 @@ export function StreamersPage() {
         await api.streamersApprove(
           clip.clip_path, text, clip.clip_id, clip.title,
           clip.source, clip.streamer, clip.url, clip.thumbnail_url, clip.x_handle,
+          clip.view_count,
         );
         approved++;
         dismiss(clip._offset ?? -1);
