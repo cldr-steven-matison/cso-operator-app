@@ -80,7 +80,7 @@ export function EfmPage() {
   // Captured at send time; the verdict watcher reads from this snapshot so
   // changing the demo selector mid-watch can't poison an in-flight result.
   const [activeExpect, setActiveExpect] = useState<
-    { topic: string; match?: string; deadline: number } | null
+    { topic: string; match?: string; deadline: number; sentAt: number } | null
   >(null);
   const [verdict, setVerdict] = useState<"pending" | "pass" | "fail" | null>(null);
 
@@ -116,38 +116,57 @@ export function EfmPage() {
     setActiveExpect(null);
   }
 
-  // Watch peek messages for the active expectation: PASS when a NEW message
-  // appears on the expected topic (and matches `match` substring if set);
-  // FAIL when the deadline passes with no match.
+  // Match a peek message against the current expectation. A message counts
+  // only if it (a) arrived after we sent, and (b) — when a `match` substring
+  // is set — the payload contains it.
+  function matchesExpect(
+    m: KafkaPeekMsg,
+    exp: { match?: string; sentAt: number },
+  ): boolean {
+    // If the broker reports a timestamp, require it to be after the send.
+    // Missing ts falls back to substring-only (best-effort) so we don't
+    // false-negative when the peek endpoint omits timestamps.
+    if (m.ts) {
+      const t = new Date(m.ts).getTime();
+      if (!Number.isNaN(t) && t < exp.sentAt) return false;
+    }
+    if (exp.match && !m.payload.includes(exp.match)) return false;
+    return true;
+  }
+
+  // Watch peek messages for the active expectation and PASS as soon as a
+  // matching one lands. Deadline-driven FAIL lives in the effect below; we
+  // never call setVerdict("fail") from here, because the peek auto-refresh
+  // cadence (5 s) is coarser than the 1 s deadline tick — a message can
+  // arrive between refreshes and get miscounted as FAIL.
   useEffect(() => {
     if (!activeExpect || verdict !== "pending") return;
-    // Only consider messages that arrived strictly after the send.
-    // peekedMsgs comes from kafkaPeek which returns up to 5 most recent.
-    const cutoff = activeExpect.deadline - 0; // we set deadline = now + withinSec*1000
-    const matched = peekedMsgs.some((m) => {
-      // ts may be null; if so, accept if substring matches (best-effort).
-      if (activeExpect.match && !m.payload.includes(activeExpect.match)) return false;
-      return true;
-    });
-    if (matched) {
+    if (peekedMsgs.some((m) => matchesExpect(m, activeExpect))) {
       setVerdict("pass");
-      return;
-    }
-    if (Date.now() >= cutoff) {
-      setVerdict("fail");
     }
   }, [peekedMsgs, activeExpect, verdict]);
 
-  // Deadline tick — without this, a PENDING verdict that never sees a new
-  // message would stay pending forever. Re-run the effect every second
-  // after a send so the deadline check above fires.
+  // Deadline enforcement. On tick, if we've past the deadline, do ONE final
+  // synchronous peek before declaring FAIL — this closes the window where
+  // Kafka has the message but our last cached peek doesn't. If the final
+  // peek still doesn't contain a match, it's a real FAIL.
   useEffect(() => {
     if (verdict !== "pending" || !activeExpect) return;
-    const id = setInterval(() => {
-      if (Date.now() >= activeExpect.deadline) {
-        setVerdict("fail");
-        clearInterval(id);
+    const exp = activeExpect;
+    const id = setInterval(async () => {
+      if (Date.now() < exp.deadline) return;
+      clearInterval(id);
+      try {
+        const msgs = await api.kafkaPeek(exp.topic, 5);
+        setPeekedMsgs(msgs);
+        if (msgs.some((m) => matchesExpect(m, exp))) {
+          setVerdict("pass");
+          return;
+        }
+      } catch {
+        // Fall through to FAIL — if we can't verify, we can't PASS.
       }
+      setVerdict("fail");
     }, 1000);
     return () => clearInterval(id);
   }, [verdict, activeExpect]);
@@ -203,6 +222,10 @@ export function EfmPage() {
     setVerdict(null);
     setActiveExpect(null);
     try {
+      // Capture sentAt just before the network call so the timestamp filter
+      // is a small underestimate — better to accept a message than reject
+      // one that raced ahead of our clock.
+      const sentAt = Date.now();
       const result = await api.efmSend(endpointUrl, payload, contentType);
       setSendResult(result);
       if (result.ok) {
@@ -211,7 +234,8 @@ export function EfmPage() {
           setActiveExpect({
             topic: demo.expect.topic,
             match: demo.expect.match,
-            deadline: Date.now() + demo.expect.withinSec * 1000,
+            deadline: sentAt + demo.expect.withinSec * 1000,
+            sentAt,
           });
           setVerdict("pending");
         }
