@@ -109,7 +109,7 @@ function ClipCard({
       const r = await api.streamersApprove(
         clip.clip_path, tweetText, clip.clip_id, clip.title,
         clip.source, clip.streamer, clip.url, clip.thumbnail_url, clip.x_handle,
-        clip.view_count,
+        clip.view_count, clip.duration, clip.created_at,
       );
       setResult({ ok: true, position: r.position });
       setTimeout(() => onPublished(clip._offset ?? -1), 1200);
@@ -174,7 +174,7 @@ function ClipCard({
               </a>
             )}
             {clip.duration && <span>· {Math.round(clip.duration)}s</span>}
-            {clip.view_count != null && clip.view_count > 0 && (
+            {clip.view_count != null && (
               <span>· {clip.view_count.toLocaleString()} views</span>
             )}
             {clip.created_at && (
@@ -412,8 +412,12 @@ function PendingPanel({
                     @{p.x_handle}
                   </a>
                 )}
-                {p.view_count != null && p.view_count > 0 && (
+                {p.duration != null && <span>· {Math.round(p.duration)}s</span>}
+                {p.view_count != null && (
                   <span>· {p.view_count.toLocaleString()} views</span>
+                )}
+                {p.created_at && (
+                  <span>· {new Date(p.created_at).toLocaleDateString()}</span>
                 )}
               </div>
               {p.url ? (
@@ -778,7 +782,7 @@ export function StreamersPage() {
         await api.streamersApprove(
           clip.clip_path, text, clip.clip_id, clip.title,
           clip.source, clip.streamer, clip.url, clip.thumbnail_url, clip.x_handle,
-          clip.view_count,
+          clip.view_count, clip.duration, clip.created_at,
         );
         approved++;
         dismiss(clip._offset ?? -1);

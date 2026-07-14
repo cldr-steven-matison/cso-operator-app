@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import fcntl
 import glob
+import html
 import json
 import random
 import re
@@ -26,6 +27,18 @@ from aiokafka.admin import AIOKafkaAdminClient
 from config import settings
 
 STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClip")
+
+# LiveStreamerAlert's PollTimer (GenerateFlowFile) rests STOPPED by design — a manual
+# per-poll trigger, not a recurring schedule. Not in STREAMER_PG_NAMES: this is a
+# processor-level pulse (start, one tick, stop), not a whole-PG start/stop toggle.
+LIVE_STREAMER_ALERT_PG_NAME = "LiveStreamerAlert"
+LIVE_STREAMER_ALERT_POLL_PROCESSOR = "PollTimer"
+
+# X rejects video posts longer than 120s on this account's tier ("This user is
+# not allowed to post a video longer than 2 minutes"); trim with a safety margin
+# rather than trust upstream duration fields, which aren't re-checked after the
+# glitch intro is burned on.
+MAX_TWEET_VIDEO_DURATION = 115.0
 
 _TWITCH_LOGINS: list[str] = [
     "xqc", "ishowspeed", "stableronaldo", "jynxzi", "agent00",
@@ -240,6 +253,75 @@ async def flow_set_state(client: httpx.AsyncClient, name: str, running: bool) ->
         "disconnectedNodeAcknowledged": False,
     }
     return await _put(client, f"/flow/process-groups/{pg['id']}", body)
+
+
+async def _find_pg_by_name(client: httpx.AsyncClient, target_name: str) -> dict | None:
+    """BFS from root for a single process group by name — a one-off lookup for PGs
+    outside STREAMER_PG_NAMES (e.g. LiveStreamerAlert), not cached like that set."""
+    queue: list[tuple[str, int]] = [("root", 0)]
+    visited: set[str] = set()
+    while queue:
+        gid, depth = queue.pop(0)
+        if gid in visited or depth > 5:
+            continue
+        visited.add(gid)
+        try:
+            children = await _children(client, gid)
+        except Exception:
+            continue
+        for pg in children:
+            if pg.get("component", {}).get("name") == target_name:
+                return {"id": pg["id"], "version": pg.get("revision", {}).get("version", 0)}
+            queue.append((pg["id"], depth + 1))
+    return None
+
+
+async def _find_processor(client: httpx.AsyncClient, pg_id: str, processor_name: str) -> dict | None:
+    from services.nifi import _get
+    data = await _get(client, f"/process-groups/{pg_id}/processors")
+    for p in data.get("processors", []):
+        if p.get("component", {}).get("name") == processor_name:
+            return p
+    return None
+
+
+async def _set_processor_state(client: httpx.AsyncClient, processor: dict, running: bool) -> dict:
+    """Processor-level run-status only — deliberately not a GET-then-PUT of the full
+    processor entity, which would round-trip masked '********' sensitive properties
+    back as literal values (the credential-wipe incident this pattern avoids)."""
+    from services.nifi import _put
+    body = {
+        "revision": processor["revision"],
+        "state": "RUNNING" if running else "STOPPED",
+        "disconnectedNodeAcknowledged": False,
+    }
+    return await _put(client, f"/processors/{processor['id']}/run-status", body)
+
+
+async def run_live_streamer_alert_once(client: httpx.AsyncClient) -> dict:
+    """Pulse PollTimer (GenerateFlowFile) on the LiveStreamerAlert PG for exactly one
+    poll cycle, then stop it again. PollTimer's normal resting state is STOPPED —
+    Steven triggers it manually per test run rather than running it on a recurring
+    schedule (still an open design question, see cso-operator-app-streamers.md).
+    This gives a Telegram-triggered manual run without changing that.
+    """
+    pg = await _find_pg_by_name(client, LIVE_STREAMER_ALERT_PG_NAME)
+    if not pg:
+        raise ValueError(f"Process group '{LIVE_STREAMER_ALERT_PG_NAME}' not found")
+    proc = await _find_processor(client, pg["id"], LIVE_STREAMER_ALERT_POLL_PROCESSOR)
+    if not proc:
+        raise ValueError(
+            f"Processor '{LIVE_STREAMER_ALERT_POLL_PROCESSOR}' not found in '{LIVE_STREAMER_ALERT_PG_NAME}'"
+        )
+
+    await _set_processor_state(client, proc, running=True)
+    await asyncio.sleep(5)
+    # Re-fetch: starting mutates the processor's revision — reusing the stale one
+    # from before the start would 409 the stop.
+    proc = await _find_processor(client, pg["id"], LIVE_STREAMER_ALERT_POLL_PROCESSOR)
+    if proc:
+        await _set_processor_state(client, proc, running=False)
+    return {"ok": True, "processor": LIVE_STREAMER_ALERT_POLL_PROCESSOR, "triggered": True}
 
 
 # ── Watch list helpers ────────────────────────────────────────────────────────
@@ -522,6 +604,20 @@ def _probe_video_dims(path: Path) -> tuple[int, int] | None:
         return None
 
 
+def _probe_video_duration(path: Path) -> float | None:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "csv=p=0", str(path),
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        return None
+
+
 def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> int:
     """Add a top bar above the clip: platform logo on the left, PLATFORM.COM/HANDLE on the right.
 
@@ -679,10 +775,12 @@ def _burn_glitch_intro(dest: Path, bar_h: int) -> bool:
 
             variant_pool = mosaics + flip_variants + [flash]
             random.shuffle(variant_pool)
-            strobe_variants = variant_pool[:6]
+            strobe_variants = variant_pool[:8]
 
-            hold_dur = round(random.uniform(0.8, 1.3), 2)
-            fade_dur = round(random.uniform(1.1, 1.5), 2)
+            # Longer, more dramatic front-loaded distortion (watch-rate hook —
+            # the strobe needs to read clearly in the first couple of seconds).
+            hold_dur = round(random.uniform(1.0, 1.8), 2)
+            fade_dur = round(random.uniform(1.8, 2.5), 2)
 
             hold_mp4 = tmp / "hold.mp4"
             if not encode_still(vid0, hold_dur, hold_mp4):
@@ -714,15 +812,26 @@ def _burn_glitch_intro(dest: Path, bar_h: int) -> bool:
                         str(fadeflash)]):
                 return False
 
+            # Snap-back: unwind the same distortion in reverse (strobe -> crisp) instead
+            # of hard-cutting straight into the real footage below.
+            fadeout = tmp / "fadeout.mp4"
+            if not run(["ffmpeg", "-y", "-threads", "1", "-i", str(strobe_seq), "-i", str(crisp_clip),
+                        "-filter_complex",
+                        f"[0:v][1:v]xfade=transition=fade:duration={fade_dur}:offset=0[v]",
+                        "-map", "[v]", "-an", "-c:v", "libx264", "-preset", "veryfast", "-threads", "1",
+                        "-crf", "20", "-bf", "0", "-x264opts", "threads=1:sliced-threads=0:scenecut=0",
+                        str(fadeout)]):
+                return False
+
             region_list = tmp / "region_list.txt"
-            region_list.write_text(f"file '{hold_mp4}'\nfile '{fadeflash}'")
+            region_list.write_text(f"file '{hold_mp4}'\nfile '{fadeflash}'\nfile '{fadeout}'")
             region_mp4 = tmp / "region.mp4"
             if not run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(region_list),
                         "-c", "copy", str(region_mp4)]):
                 return False
 
             if bar_h > 0:
-                total_dur = hold_dur + fade_dur
+                total_dur = hold_dur + fade_dur * 2
                 bar_loop = tmp / "bar_loop.mp4"
                 if not encode_still(bar0, total_dur, bar_loop):
                     return False
@@ -949,7 +1058,8 @@ def get_published_history(limit: int = 60) -> list[dict]:
 
 def _patch_missing_metadata(entry: dict, meta: dict) -> bool:
     changed = False
-    for field in ("title", "source", "streamer", "url", "thumbnail_url", "view_count"):
+    for field in ("title", "source", "streamer", "url", "thumbnail_url", "view_count",
+                  "duration", "created_at"):
         if not entry.get(field) and meta.get(field):
             entry[field] = meta[field]
             changed = True
@@ -1042,6 +1152,7 @@ def approve_clip(
     clip_id: str, clip_path: str, tweet_text: str, title: str = "",
     source: str = "", streamer: str = "", url: str = "",
     thumbnail_url: str = "", x_handle: str = "", view_count: int = 0,
+    duration: float = 0, created_at: str = "",
 ) -> dict:
     """Queue a clip for X publishing. Returns immediately — NiFi drains the queue.
 
@@ -1049,9 +1160,9 @@ def approve_clip(
     approval racing publish_next) can each read the same pending list and overwrite
     each other's append, silently dropping an approved clip from the queue.
 
-    Carries the display metadata (source/streamer/url/thumbnail/x_handle/view_count)
-    through so the Pending Publish panel can render a full card instead of just
-    clip_id + text.
+    Carries the display metadata (source/streamer/url/thumbnail/x_handle/view_count/
+    duration/created_at) through so the Pending Publish panel can render a full card
+    instead of just clip_id + text.
     """
     with _pending_lock():
         pending = _load_pending()
@@ -1060,6 +1171,7 @@ def approve_clip(
                 "clip_id": clip_id, "clip_path": clip_path, "tweet_text": tweet_text, "title": title,
                 "source": source, "streamer": streamer, "url": url,
                 "thumbnail_url": thumbnail_url, "x_handle": x_handle, "view_count": view_count,
+                "duration": duration, "created_at": created_at,
             })
             _save_pending(pending)
     return {"queued": True, "clip_id": clip_id, "position": len(pending)}
@@ -1281,7 +1393,7 @@ async def _fetch_twitch_clips(
             "source": "twitch",
             "streamer": login,
             "broadcaster_id": broadcaster_id,
-            "title": clip.get("title", ""),
+            "title": html.unescape(clip.get("title", "")),
             "url": clip.get("url", ""),
             "thumbnail_url": clip.get("thumbnail_url", ""),
             "duration": clip.get("duration", 0),
@@ -1337,7 +1449,7 @@ async def _fetch_kick_clips(
             "clip_id": clip_id,
             "source": "kick",
             "streamer": login,
-            "title": clip.get("title", ""),
+            "title": html.unescape(clip.get("title", "")),
             "url": clip.get("clip_url", ""),
             "thumbnail_url": clip.get("thumbnail_url", ""),
             "duration": clip.get("duration", 0),
@@ -1399,7 +1511,7 @@ _EMOJI_RE = re.compile(
 
 def _clean_caption(text: str) -> str:
     """Strip model formatting artifacts from vLLM caption output."""
-    text = text.strip()
+    text = html.unescape(text).strip()
     # Only the first paragraph is the caption; the rest is model commentary
     text = text.split("\n\n")[0].strip()
     # Strip leading label: **Word(s):** or "Word(s):"
@@ -1407,8 +1519,14 @@ def _clean_caption(text: str) -> str:
     # Strip surrounding double-quotes that the model adds around the answer
     if text.startswith('"') and text.endswith('"'):
         text = text[1:-1]
+    # Strip any raw HTML tags that slipped through from a title/transcript
+    text = re.sub(r'<[^>]+>', '', text)
     # Strip all hashtags — platform/handle suffix is added by _build_tweet
     text = re.sub(r'\s*#\w+', '', text)
+    # Strip any @mentions the model invented — the only @handle in a posted
+    # tweet must be the real streamer handle _build_tweet appends afterward
+    text = re.sub(r'\s*@\w+', '', text)
+    text = re.sub(r'\s{2,}', ' ', text)
     # Cap emojis — if model spammed more than 3 total, strip them all
     emoji_matches = _EMOJI_RE.findall(text)
     if sum(len(m) for m in emoji_matches) > 3:
@@ -1639,6 +1757,27 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     path = Path(clip_path)
     if not path.exists():
         raise FileNotFoundError(f"Clip not found: {clip_path}")
+
+    duration = _probe_video_duration(path)
+    if duration is not None and duration > MAX_TWEET_VIDEO_DURATION:
+        trimmed = path.with_suffix(".trimmed.mp4")
+        # Re-encode rather than -c copy: stream-copy trims can only cut at the
+        # nearest keyframe, which can overshoot the 5s safety margin and land
+        # back over X's 120s hard limit.
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(path), "-t", str(MAX_TWEET_VIDEO_DURATION),
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac",
+             str(trimmed)],
+            capture_output=True, timeout=90,
+        )
+        if r.returncode == 0 and trimmed.exists() and trimmed.stat().st_size > 10_000:
+            print(f"[_publish_sync] trimmed {path.name}: {duration:.1f}s -> "
+                  f"{MAX_TWEET_VIDEO_DURATION:.1f}s (exceeded X's 2min limit)")
+            trimmed.replace(path)
+        else:
+            print(f"[_publish_sync] trim failed for {path.name} ({duration:.1f}s): "
+                  f"{r.stderr.decode(errors='replace')[-500:]}")
+            trimmed.unlink(missing_ok=True)
 
     auth = tweepy.OAuth1UserHandler(
         settings.X_API_KEY,

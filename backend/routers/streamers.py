@@ -37,6 +37,17 @@ async def flow_stop(name: str, request: Request):
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.post("/flows/LiveStreamerAlert/run-once")
+async def live_streamer_alert_run_once(request: Request):
+    """Manual Telegram-triggered pulse of PollTimer for one poll cycle."""
+    try:
+        return await streamers.run_live_streamer_alert_once(request.app.state.http)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 # ── Clip queue ────────────────────────────────────────────────────────────────
 
 @router.get("/queue")
@@ -58,6 +69,8 @@ class PublishRequest(BaseModel):
     thumbnail_url: str = ""
     x_handle: str = ""
     view_count: int = 0
+    duration: float = 0
+    created_at: str = ""
 
 
 @router.post("/approve")
@@ -70,7 +83,7 @@ async def approve(body: PublishRequest):
     return streamers.approve_clip(
         body.clip_id, body.clip_path, body.tweet_text, body.title,
         body.source, body.streamer, body.url, body.thumbnail_url, body.x_handle,
-        body.view_count,
+        body.view_count, body.duration, body.created_at,
     )
 
 
