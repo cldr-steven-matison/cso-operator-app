@@ -4,10 +4,10 @@
     "agentClass": "KubernetesPod",
     "contentType": "application/json",
     "payload": "{\"hello\":\"from cso-operator-app\"}",
-    "kafkaTopic": "new_documents",
+    "kafkaTopic": "agent-k8s-mac",
     "expect": {
-      "topic": "new_documents",
-      "withinSec": 10,
+      "topic": "agent-k8s-mac",
+      "withinSec": 15,
       "match": "from cso-operator-app"
     }
   }
