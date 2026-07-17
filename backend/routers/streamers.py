@@ -150,6 +150,17 @@ async def backfill_metadata():
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.post("/admin/retrim-pending")
+async def retrim_pending():
+    """Probe every clip in the publish queue and re-encode-trim any that exceed
+    X's video length limit in place. Safe to re-run — a no-op once every pending
+    clip is already under the limit."""
+    try:
+        return streamers.retrim_pending_clips()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 # ── Skip ──────────────────────────────────────────────────────────────────────
 
 class SkipRequest(BaseModel):

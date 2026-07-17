@@ -1817,6 +1817,88 @@ async def clip_queue(limit: int = 20) -> list[dict]:
 
 # ── X publish ─────────────────────────────────────────────────────────────────
 
+def _trim_if_oversized(path: Path) -> tuple[float | None, bool, str]:
+    """Probe path's real duration; if it exceeds MAX_TWEET_VIDEO_DURATION, re-encode
+    trim it in place. Returns (duration_before, trimmed, error) — error is empty
+    whenever trimmed is True or no trim was needed.
+
+    Re-encodes rather than -c copy: stream-copy trims can only cut at the nearest
+    keyframe, which can overshoot the 5s safety margin and land back over X's 120s
+    hard limit.
+    """
+    duration = _probe_video_duration(path)
+    if duration is None or duration <= MAX_TWEET_VIDEO_DURATION:
+        return duration, False, ""
+    trimmed = path.with_suffix(".trimmed.mp4")
+    try:
+        r = subprocess.run(
+            # x264 auto-detects thread count from the host's visible CPU count, not
+            # this pod's 1-CPU/1Gi limit (k8s/deployment.yaml) — at 24 threads on a
+            # 1920x1240 frame, per-thread encode buffers blow the memory limit and
+            # the kernel OOM-kills ffmpeg (returncode -9) within ~1s every time.
+            ["ffmpeg", "-y", "-i", str(path), "-t", str(MAX_TWEET_VIDEO_DURATION),
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+             "-threads", "2", "-x264-params", "threads=2",
+             "-c:a", "aac", str(trimmed)],
+            capture_output=True, timeout=90,
+        )
+    except subprocess.TimeoutExpired as e:
+        trimmed.unlink(missing_ok=True)
+        return duration, False, f"ffmpeg timed out after 90s: {(e.stderr or b'').decode(errors='replace')[-800:]}"
+    out_size = trimmed.stat().st_size if trimmed.exists() else -1
+    if r.returncode == 0 and trimmed.exists() and out_size > 10_000:
+        trimmed.replace(path)
+        return duration, True, ""
+    trimmed.unlink(missing_ok=True)
+    # ffmpeg's default -stats progress output is many repeated \r-updated "frame="
+    # lines that drown out the actual error — drop those but keep the final one,
+    # since it shows how much was actually encoded before ffmpeg stopped.
+    stderr_text = r.stderr.decode(errors="replace")
+    lines = stderr_text.replace("\r", "\n").splitlines()
+    frame_lines = [ln for ln in lines if ln.lstrip().startswith("frame=")]
+    non_progress = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("frame=")]
+    tail = (frame_lines[-1:] if frame_lines else []) + non_progress[-20:]
+    summary = f"[returncode={r.returncode} out_size={out_size}] " + " | ".join(tail)
+    return duration, False, summary[:1500]
+
+
+def retrim_pending_clips() -> dict:
+    """Probe every clip currently in the publish queue and re-encode-trim any that
+    exceed X's video length limit, so oversized files get fixed proactively instead
+    of discovering them one 403 at a time as NiFi's publish timer reaches them.
+    Read/fix on the underlying video files only — does not touch queue order,
+    captions, or trigger any publish.
+    """
+    with _pending_lock():
+        pending = _load_pending()
+        results = []
+        for clip in pending:
+            clip_id = clip.get("clip_id", "")
+            path = Path(clip.get("clip_path", ""))
+            if not path.exists():
+                results.append({"clip_id": clip_id, "status": "missing_file"})
+                continue
+            duration, trimmed, err = _trim_if_oversized(path)
+            if duration is None:
+                results.append({"clip_id": clip_id, "status": "probe_failed"})
+            elif not trimmed and err == "":
+                results.append({"clip_id": clip_id, "status": "ok", "duration": duration})
+            elif trimmed:
+                new_duration = _probe_video_duration(path)
+                clip["duration"] = new_duration if new_duration is not None else MAX_TWEET_VIDEO_DURATION
+                results.append({
+                    "clip_id": clip_id, "status": "trimmed",
+                    "before": duration, "after": clip["duration"],
+                })
+            else:
+                results.append({
+                    "clip_id": clip_id, "status": "trim_failed",
+                    "duration": duration, "error": err,
+                })
+        _save_pending(pending)
+    return {"checked": len(pending), "results": results}
+
+
 def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     import tweepy
 
@@ -1828,26 +1910,16 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Clip not found: {clip_path}")
 
-    duration = _probe_video_duration(path)
+    duration, trimmed, err = _trim_if_oversized(path)
     if duration is not None and duration > MAX_TWEET_VIDEO_DURATION:
-        trimmed = path.with_suffix(".trimmed.mp4")
-        # Re-encode rather than -c copy: stream-copy trims can only cut at the
-        # nearest keyframe, which can overshoot the 5s safety margin and land
-        # back over X's 120s hard limit.
-        r = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(path), "-t", str(MAX_TWEET_VIDEO_DURATION),
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac",
-             str(trimmed)],
-            capture_output=True, timeout=90,
-        )
-        if r.returncode == 0 and trimmed.exists() and trimmed.stat().st_size > 10_000:
+        if trimmed:
             print(f"[_publish_sync] trimmed {path.name}: {duration:.1f}s -> "
                   f"{MAX_TWEET_VIDEO_DURATION:.1f}s (exceeded X's 2min limit)")
-            trimmed.replace(path)
         else:
-            print(f"[_publish_sync] trim failed for {path.name} ({duration:.1f}s): "
-                  f"{r.stderr.decode(errors='replace')[-500:]}")
-            trimmed.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"trim failed for {path.name} ({duration:.1f}s, exceeds "
+                f"{MAX_TWEET_VIDEO_DURATION:.0f}s X limit): {err}"
+            )
 
     auth = tweepy.OAuth1UserHandler(
         settings.X_API_KEY,
