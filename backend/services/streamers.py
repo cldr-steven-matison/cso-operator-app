@@ -1862,43 +1862,6 @@ def _trim_if_oversized(path: Path) -> tuple[float | None, bool, str]:
     return duration, False, summary[:1500]
 
 
-def retrim_pending_clips() -> dict:
-    """Probe every clip currently in the publish queue and re-encode-trim any that
-    exceed X's video length limit, so oversized files get fixed proactively instead
-    of discovering them one 403 at a time as NiFi's publish timer reaches them.
-    Read/fix on the underlying video files only — does not touch queue order,
-    captions, or trigger any publish.
-    """
-    with _pending_lock():
-        pending = _load_pending()
-        results = []
-        for clip in pending:
-            clip_id = clip.get("clip_id", "")
-            path = Path(clip.get("clip_path", ""))
-            if not path.exists():
-                results.append({"clip_id": clip_id, "status": "missing_file"})
-                continue
-            duration, trimmed, err = _trim_if_oversized(path)
-            if duration is None:
-                results.append({"clip_id": clip_id, "status": "probe_failed"})
-            elif not trimmed and err == "":
-                results.append({"clip_id": clip_id, "status": "ok", "duration": duration})
-            elif trimmed:
-                new_duration = _probe_video_duration(path)
-                clip["duration"] = new_duration if new_duration is not None else MAX_TWEET_VIDEO_DURATION
-                results.append({
-                    "clip_id": clip_id, "status": "trimmed",
-                    "before": duration, "after": clip["duration"],
-                })
-            else:
-                results.append({
-                    "clip_id": clip_id, "status": "trim_failed",
-                    "duration": duration, "error": err,
-                })
-        _save_pending(pending)
-    return {"checked": len(pending), "results": results}
-
-
 def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     import tweepy
 
