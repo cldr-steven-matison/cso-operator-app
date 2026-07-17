@@ -1388,6 +1388,13 @@ async def _fetch_twitch_clips(
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda d=dest, b=bar_h: _burn_glitch_intro(d, b)
             )
+        # Measure the file we actually produced rather than trusting the platform's
+        # self-reported duration — the API value predates our overlay/intro burn and
+        # can drift arbitrarily far from reality (e.g. the source download itself
+        # coming back bloated), silently sailing through the 45-100s validity filter.
+        real_duration = await asyncio.get_event_loop().run_in_executor(
+            None, _probe_video_duration, dest
+        )
         result.append({
             "clip_id": clip_id,
             "source": "twitch",
@@ -1396,7 +1403,7 @@ async def _fetch_twitch_clips(
             "title": html.unescape(clip.get("title", "")),
             "url": clip.get("url", ""),
             "thumbnail_url": clip.get("thumbnail_url", ""),
-            "duration": clip.get("duration", 0),
+            "duration": real_duration if real_duration is not None else clip.get("duration", 0),
             "created_at": clip.get("created_at", ""),
             "clip_path": str(dest),
             "view_count": clip.get("view_count", 0),
@@ -1445,6 +1452,11 @@ async def _fetch_kick_clips(
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda d=dest, b=bar_h: _burn_glitch_intro(d, b)
             )
+        # Measure the file we actually produced rather than trusting the platform's
+        # self-reported duration — see matching comment in _fetch_twitch_clips.
+        real_duration = await asyncio.get_event_loop().run_in_executor(
+            None, _probe_video_duration, dest
+        )
         result.append({
             "clip_id": clip_id,
             "source": "kick",
@@ -1452,7 +1464,7 @@ async def _fetch_kick_clips(
             "title": html.unescape(clip.get("title", "")),
             "url": clip.get("clip_url", ""),
             "thumbnail_url": clip.get("thumbnail_url", ""),
-            "duration": clip.get("duration", 0),
+            "duration": real_duration if real_duration is not None else clip.get("duration", 0),
             "created_at": clip.get("created_at", ""),
             "clip_path": str(dest),
             "view_count": clip.get("view_count", 0),
@@ -1509,6 +1521,31 @@ _EMOJI_RE = re.compile(
 )
 
 
+_URL_RE = re.compile(
+    r'(?:https?://|www\.)\S+'                                  # http(s)://... or www....
+    r'|\b(?:[\w-]+\.)+(?:com|net|org|co|tv|gg|io|me)\b/?\S*',  # bare domain(/path), e.g. pic.twitter.com/xxxx
+    flags=re.IGNORECASE,
+)
+
+# A run of the same short substring repeated many times in a row — the
+# degenerate "zerszerszerszers..." decoding failure mode small models can fall into.
+_REPETITION_RE = re.compile(r'(.{2,20}?)\1{4,}', flags=re.DOTALL)
+
+
+def _has_degenerate_repetition(text: str) -> bool:
+    """True if text contains a runaway repeated substring (decoding failure).
+
+    Only flags units with real character variety (e.g. 'zers') so normal expressive
+    repetition like 'no no no no no' or 'AAAAAAAH' — same 1-2 letters over and over —
+    doesn't get mistaken for a decoding failure.
+    """
+    for m in _REPETITION_RE.finditer(text):
+        distinct = {c for c in m.group(1).lower() if c.isalnum()}
+        if len(distinct) >= 3:
+            return True
+    return False
+
+
 def _clean_caption(text: str) -> str:
     """Strip model formatting artifacts from vLLM caption output."""
     text = html.unescape(text).strip()
@@ -1516,6 +1553,9 @@ def _clean_caption(text: str) -> str:
     text = text.split("\n\n")[0].strip()
     # Strip leading label: **Word(s):** or "Word(s):"
     text = re.sub(r'^\*{0,2}[\w][\w ]*\*{0,2}:\s*', '', text)
+    # Strip a leading placeholder token the model sometimes emits instead of
+    # real content, e.g. "_reaction_ " or "*Reaction* " with no colon at all
+    text = re.sub(r'^[_*]{1,2}[\w ]{1,20}[_*]{1,2}\s+', '', text)
     # Strip surrounding double-quotes that the model adds around the answer
     if text.startswith('"') and text.endswith('"'):
         text = text[1:-1]
@@ -1526,6 +1566,9 @@ def _clean_caption(text: str) -> str:
     # Strip any @mentions the model invented — the only @handle in a posted
     # tweet must be the real streamer handle _build_tweet appends afterward
     text = re.sub(r'\s*@\w+', '', text)
+    # Strip any URL-like token — X rejects the whole tweet with a 400 if a
+    # hallucinated "link" (e.g. a fake pic.twitter.com/xxxx) isn't a real URL
+    text = _URL_RE.sub('', text)
     text = re.sub(r'\s{2,}', ' ', text)
     # Cap emojis — if model spammed more than 3 total, strip them all
     emoji_matches = _EMOJI_RE.findall(text)
@@ -1640,6 +1683,7 @@ async def process_clip(clip: dict) -> dict:
 
         # vLLM caption generation
         caption = ""
+        error = ""
         if has_transcript:
             try:
                 r = await client.post(
@@ -1649,30 +1693,56 @@ async def process_clip(clip: dict) -> dict:
                         "messages": [
                             {
                                 "role": "system",
-                                "content": "You are a hype gaming content creator writing tweets. Output ONLY the tweet text — no labels, no quotes around it.",
+                                "content": (
+                                    "You are a hype gaming content creator writing a one-line reaction tweet. "
+                                    "Follow every rule exactly:\n"
+                                    "1. Output ONLY the reaction sentence(s) — no labels, no headers, no markdown, "
+                                    "no quotes around the whole thing.\n"
+                                    "2. Never say he, she, him, her, his, or hers about the streamer — you don't "
+                                    "know their gender. Use their name instead.\n"
+                                    "3. Stay 100% grounded in the transcript. Never invent names, people, items, "
+                                    "or events that are not in it.\n"
+                                    "4. Exactly 1 emoji. No hashtags. No @ mentions. No links or URLs.\n"
+                                    "5. Keep it hype and positive. No slurs, hate speech, or sexual content.\n"
+                                    "6. Under 200 characters."
+                                ),
                             },
                             {
                                 "role": "user",
                                 "content": (
-                                    f"React to this clip by {clip.get('streamer', 'unknown')} like you're live in their Twitch chat. "
-                                    f"Talk directly to the streamer, quote the wildest line, or just react like a viewer who can't believe what they just saw. "
-                                    f"Stay grounded in the transcript. Do not invent facts. Under 200 chars. Exactly 1 emoji. No hashtags. "
+                                    f"React to this clip by {clip.get('streamer', 'unknown')} like you're live in "
+                                    f"their Twitch chat. Quote or paraphrase something actually said in the "
+                                    f"transcript, or react like a viewer who can't believe what they just saw. "
                                     f"Clip title: '{title}'. "
                                     f"Transcript: {transcript[:600]}"
                                 ),
                             },
                         ],
                         "max_tokens": 120,
-                        "temperature": 0.85,
+                        "temperature": 0.7,
+                        "frequency_penalty": 0.6,
+                        "presence_penalty": 0.3,
                     },
                 )
                 if r.status_code == 200:
                     raw = r.json()["choices"][0]["message"]["content"]
-                    caption = _clean_caption(raw)
-                    x_handle = get_x_handle(clip.get("streamer", ""))
-                    caption = _build_tweet(caption, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle)
+                    cleaned = _clean_caption(raw)
+                    if not cleaned:
+                        error = "disqualified: empty caption after cleaning"
+                    elif _has_degenerate_repetition(cleaned):
+                        error = "disqualified: degenerate repeated output"
+                    else:
+                        x_handle = get_x_handle(clip.get("streamer", ""))
+                        caption = _build_tweet(cleaned, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle)
+                else:
+                    error = f"caption error: vLLM returned {r.status_code}"
             except Exception as e:
-                caption = f"[caption error: {e}]"
+                error = f"caption error: {e}"
+        else:
+            error = "disqualified: no transcript"
+
+        if error and not caption:
+            return {**clip, "title": title, "transcript": transcript, "caption": "", "error": error}
 
     return {**clip, "title": title, "transcript": transcript, "caption": caption}
 

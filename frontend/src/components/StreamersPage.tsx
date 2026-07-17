@@ -428,7 +428,7 @@ function PendingPanel({
               ) : (
                 <p className="text-xs font-semibold text-text truncate">{p.title || p.clip_id || "unknown clip"}</p>
               )}
-              <p className="text-xs text-text whitespace-pre-wrap line-clamp-2">{p.tweet_text}</p>
+              <p className="text-xs text-text whitespace-pre-wrap">{p.tweet_text}</p>
               {result && (
                 <span className={result.ok ? "text-accent text-xs" : "text-bad text-xs"}>
                   {result.ok ? (
