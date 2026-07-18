@@ -31,6 +31,18 @@ class Settings(BaseSettings):
 
     EFM_URL: str = "http://efm.cld-streaming.svc:10090"
 
+    # EFM's own Postgres — direct read of the agent/device tables for a real
+    # agent registry, replacing the operations/events discovery heuristic
+    # (EFM v2.3.1 has no REST "list agents" endpoint, and its operations table
+    # has no automatic retention — confirmed 2026-07-18 when a single agent's
+    # reconnect-loop piled up ~11.8k rows in under a day and made that endpoint
+    # hang entirely, which in turn made agents vanish from this heuristic).
+    EFM_DB_HOST: str = "ssb-postgresql.cld-streaming.svc.cluster.local"
+    EFM_DB_PORT: int = 5432
+    EFM_DB_NAME: str = "efm"
+    EFM_DB_USER: str = ""
+    EFM_DB_PASSWORD: str = ""
+
     # URL for "Use sample audio" — proxied through the backend to dodge CORS.
     SAMPLE_AUDIO_URL: str = (
         "https://www.voiptroubleshooter.com/open_speech/american/OSR_us_000_0010_8k.wav"

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -32,10 +33,10 @@ def _demos_file() -> Path | None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-async def _efm_get(http: httpx.AsyncClient, path: str, *, raise_on_error: bool = True):
+async def _efm_get(http: httpx.AsyncClient, path: str, *, raise_on_error: bool = True, timeout: float = 10.0):
     """GET {EFM_URL}{path}. Raises HTTPException(502) on network/HTTP errors."""
     try:
-        r = await http.get(f"{settings.EFM_URL}{path}", timeout=10.0)
+        r = await http.get(f"{settings.EFM_URL}{path}", timeout=timeout)
         r.raise_for_status()
         return r.json()
     except httpx.RequestError as e:
@@ -48,48 +49,55 @@ async def _efm_get(http: httpx.AsyncClient, path: str, *, raise_on_error: bool =
         return None
 
 
-async def _discover_agents(http: httpx.AsyncClient) -> list[dict]:
+async def _fetch_agents(http: httpx.AsyncClient, pool) -> list[dict]:
     """
-    EFM v2.3.1 has no /agents list endpoint.
-    Strategy: collect candidate agent IDs from operations (targetAgentId) and
-    agent-sourced events (eventSource.type=="Agent"), then verify each via
-    /efm/api/monitor/agents/{id} concurrently.
+    Real agent registry, read directly from EFM's own Postgres — replaces the old
+    operations/events discovery heuristic entirely.
+
+    EFM v2.3.1 has no REST "list agents" endpoint, so the previous approach
+    reconstructed candidate agent IDs from recent operations + events, then verified
+    each via /efm/api/monitor/agents/{id}. That broke in two ways (found 2026-07-18):
+    the operations table has no automatic retention (a single agent's reconnect-loop
+    piled up ~11.8k rows in under a day and made that endpoint hang), and DESCRIBE
+    operations only fire on agent connect/reconnect, not on routine heartbeats — so
+    even a healthy, fully-online agent could go "undiscoverable" for long stretches.
+    The `agent`/`device` tables are EFM's actual source of truth for identity/class/IP
+    and don't have either problem.
+
+    BUT: the DB's `agent.last_seen` column turns out to have the exact same "only
+    updates on connect/reconnect" behavior as the operations table (confirmed
+    2026-07-18) — it can lag true liveness by hours for a genuinely-online agent,
+    which made the frontend's freshness-based status dot show red/dead for agents
+    that were actually fine. The per-agent REST monitor endpoint tracks real-time
+    state and updates within seconds, so use it to enrich lastSeen — it's cheap now
+    that we already know the IDs from the DB and don't need to discover them.
     """
-    ops_data, events_data = await asyncio.gather(
-        _efm_get(http, "/efm/api/operations?pageSize=500", raise_on_error=False),
-        _efm_get(http, "/efm/api/events?pageSize=200", raise_on_error=False),
+    rows = await pool.fetch(
+        """
+        SELECT a.id, a.agent_class, a.agent_state, a.last_seen, d.ip_address
+        FROM agent a
+        LEFT JOIN device d ON a.device_id = d.id
+        """
     )
+    db_agents = [dict(r) for r in rows]
 
-    candidate_ids: set[str] = set()
-
-    # Operations: each has targetAgentId directly.
-    if ops_data:
-        ops_list = ops_data if isinstance(ops_data, list) else ops_data.get("elements", [])
-        for op in ops_list:
-            aid = op.get("targetAgentId", "")
-            if aid:
-                candidate_ids.add(aid)
-
-    # Events: supplement with agent-sourced event source IDs.
-    if events_data:
-        events_list = events_data if isinstance(events_data, list) else events_data.get("elements", [])
-        for event in events_list:
-            src = event.get("eventSource") or {}
-            if src.get("type") == "Agent":
-                aid = src.get("id", "")
-                if aid:
-                    candidate_ids.add(aid)
-
-    if not candidate_ids:
-        return []
-
-    # Verify each candidate via monitor endpoint; discard invalid/missing ones.
-    async def fetch_one(agent_id: str) -> dict | None:
+    async def fetch_live(agent_id: str) -> dict | None:
         return await _efm_get(http, f"/efm/api/monitor/agents/{agent_id}", raise_on_error=False)
 
-    results = await asyncio.gather(*[fetch_one(aid) for aid in candidate_ids])
+    live_results = await asyncio.gather(*[fetch_live(a["id"]) for a in db_agents])
+    live_by_id = {
+        r["identifier"]: r for r in live_results if r and isinstance(r, dict) and r.get("identifier")
+    }
 
-    return [d for d in results if d and isinstance(d, dict) and "identifier" in d]
+    for a in db_agents:
+        live = live_by_id.get(a["id"])
+        live_last_seen_ms = live.get("lastSeen") if live else None
+        if live_last_seen_ms:
+            a["last_seen"] = datetime.fromtimestamp(live_last_seen_ms / 1000, tz=timezone.utc)
+        elif a["last_seen"]:
+            a["last_seen"] = a["last_seen"].replace(tzinfo=timezone.utc)
+
+    return db_agents
 
 
 # ---------------------------------------------------------------------------
@@ -98,21 +106,20 @@ async def _discover_agents(http: httpx.AsyncClient) -> list[dict]:
 
 @router.get("/agent-classes")
 async def get_agent_classes(request: Request):
-    """Return agent classes with live agent counts."""
+    """Return agent classes with live (ONLINE) agent counts."""
     http: httpx.AsyncClient = request.app.state.http
 
-    classes_data, agents = await asyncio.gather(
-        _efm_get(http, "/efm/api/agent-classes"),
-        _discover_agents(http),
-    )
+    classes_data = await _efm_get(http, "/efm/api/agent-classes")
+    agents = await _fetch_agents(http, request.app.state.efm_db)
 
     classes_list = classes_data if isinstance(classes_data, list) else []
 
     counts: dict[str, int] = {}
     for agent in agents:
-        cls = agent.get("agentClass", "")
-        if cls:
-            counts[cls] = counts.get(cls, 0) + 1
+        if agent["agent_state"] == "ONLINE":
+            cls = agent["agent_class"] or ""
+            if cls:
+                counts[cls] = counts.get(cls, 0) + 1
 
     return [
         {"name": cls.get("name", ""), "agentCount": counts.get(cls.get("name", ""), 0)}
@@ -123,33 +130,25 @@ async def get_agent_classes(request: Request):
 
 @router.get("/agents")
 async def get_agents(request: Request):
-    """Return active agents with resolved ListenHTTP endpoint URL."""
-    from datetime import datetime, timezone
-
+    """Return all known agents (any state) with resolved ListenHTTP endpoint URL."""
     http: httpx.AsyncClient = request.app.state.http
-    agents = await _discover_agents(http)
+    agents = await _fetch_agents(http, request.app.state.efm_db)
 
     result = []
     for a in agents:
-        class_name = a.get("agentClass", "")
+        last_seen = a["last_seen"].isoformat() if a["last_seen"] else None
 
-        last_seen_ms = a.get("lastSeen")
-        last_seen = (
-            datetime.fromtimestamp(last_seen_ms / 1000, tz=timezone.utc).isoformat()
-            if last_seen_ms else None
-        )
-
-        # EFM's monitor data includes the agent's reported IP from its heartbeat.
-        # Use it for all classes — for KubernetesPod this is the pod IP,
-        # for LAN devices it's the LAN IP (or 127.0.0.1 if the agent reports loopback).
-        ip = (a.get("deviceInfo") or {}).get("networkInfo", {}).get("ipAddress", "")
+        # Stored as the agent's reported IP from its heartbeat. Use it for all
+        # classes — for KubernetesPod this is the pod IP, for LAN devices it's
+        # the LAN IP (or 127.0.0.1 if the agent reports loopback).
+        ip = a["ip_address"] or ""
         endpoint_url = f"http://{ip}:8080/contentListener" if ip and ip != "127.0.0.1" else ""
 
         result.append({
-            "identifier": a.get("identifier", ""),
-            "className": class_name,
+            "identifier": a["id"],
+            "className": a["agent_class"] or "",
             "lastSeen": last_seen,
-            "status": {"state": a.get("state", "")},
+            "status": {"state": a["agent_state"] or ""},
             "endpointUrl": endpoint_url,
         })
 

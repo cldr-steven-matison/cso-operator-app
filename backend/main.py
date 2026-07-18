@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import asyncpg
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +16,19 @@ _enabled_modules = [m.strip() for m in settings.MODULES.split(",") if m.strip()]
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.http = httpx.AsyncClient(verify=settings.NIFI_VERIFY_TLS, timeout=30.0)
+    # Small pool — this is a read-only, low-frequency admin query (agent-classes/agents
+    # polled every 15s by one page), not app traffic.
+    app.state.efm_db = await asyncpg.create_pool(
+        host=settings.EFM_DB_HOST,
+        port=settings.EFM_DB_PORT,
+        database=settings.EFM_DB_NAME,
+        user=settings.EFM_DB_USER,
+        password=settings.EFM_DB_PASSWORD,
+        min_size=0,
+        max_size=2,
+    )
     yield
+    await app.state.efm_db.close()
     await app.state.http.aclose()
 
 
