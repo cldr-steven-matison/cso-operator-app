@@ -10,5 +10,65 @@
       "withinSec": 15,
       "match": "from cso-operator-app"
     }
+  },
+  {
+    "name": "ListenHTTP → Lemonade chat completion",
+    "agentClass": "StarlinkAI",
+    "contentType": "application/json",
+    "payload": "{\"request_id\":\"test-001\",\"model\":\"Qwen3-4B-GGUF\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in exactly one word.\"}],\"max_tokens\":20}",
+    "kafkaTopic": "StarlinkAI-response",
+    "expect": {
+      "topic": "StarlinkAI-response",
+      "withinSec": 30,
+      "match": "test-001"
+    }
+  },
+  {
+    "name": "ListenHTTP → TensorRT enrichment (GPU)",
+    "agentClass": "NvidiaNano",
+    "contentType": "application/json",
+    "payload": "{\n  \"pipeline\": \"NvidiaNano\",\n  \"config\": {\n    \"confidence_threshold\": 0.45,\n    \"nms_threshold\": 0.5,\n    \"precision\": \"FP16\"\n  }\n}",
+    "kafkaTopic": "agent-nvidia-tensorRT",
+    "expect": {
+      "topic": "agent-nvidia-tensorRT",
+      "withinSec": 15,
+      "match": "tensorrt"
+    }
+  },
+  {
+    "name": "ListenHTTP → TensorRT enrichment (GPU)",
+    "agentClass": "KubernetesPod",
+    "contentType": "application/json",
+    "payload": "{\n  \"pipeline\": \"KubernetesPod\",\n  \"config\": {\n    \"confidence_threshold\": 0.45,\n    \"nms_threshold\": 0.5,\n    \"precision\": \"FP16\"\n  }\n}",
+    "kafkaTopic": "agent-k8s-tensorRT",
+    "expect": {
+      "topic": "agent-k8s-tensorRT",
+      "withinSec": 15,
+      "match": "tensorrt"
+    }
+  },
+  {
+    "name": "ListenHTTP → TensorRT enrichment (CPU, Mac)",
+    "agentClass": "KubernetesPod",
+    "contentType": "application/json",
+    "payload": "{\n  \"pipeline\": \"KubernetesPod\",\n  \"config\": {\n    \"confidence_threshold\": 0.45,\n    \"nms_threshold\": 0.5,\n    \"precision\": \"FP16\"\n  }\n}",
+    "kafkaTopic": "agent-k8s-mac",
+    "expect": {
+      "topic": "agent-k8s-mac",
+      "withinSec": 15,
+      "match": "tensorrt"
+    }
+  },
+  {
+    "name": "ListenHTTP → TensorRT enrichment (GPU)",
+    "agentClass": "WindowsDesktop",
+    "contentType": "application/json",
+    "payload": "{\n  \"pipeline\": \"WindowsDesktop\",\n  \"config\": {\n    \"confidence_threshold\": 0.45,\n    \"nms_threshold\": 0.5,\n    \"precision\": \"FP16\"\n  }\n}",
+    "kafkaTopic": "agent-windows-tensorRT",
+    "expect": {
+      "topic": "agent-windows-tensorRT",
+      "withinSec": 15,
+      "match": "tensorrt"
+    }
   }
 ]

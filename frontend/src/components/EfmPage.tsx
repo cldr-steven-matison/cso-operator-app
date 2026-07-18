@@ -444,11 +444,12 @@ export function EfmPage() {
                 key={m.offset}
                 className="text-xs font-mono text-muted border-t border-border pt-1"
               >
-                <span>offset {m.offset}</span>
-                {" | "}
-                <span>{m.ts ? new Date(m.ts).toLocaleTimeString() : "—"}</span>
-                {" | "}
-                <span className="text-text">{m.payload.slice(0, 120)}</span>
+                <div>
+                  <span>offset {m.offset}</span>
+                  {" | "}
+                  <span>{m.ts ? new Date(m.ts).toLocaleTimeString() : "—"}</span>
+                </div>
+                <pre className="text-text whitespace-pre-wrap break-all">{m.payload}</pre>
               </div>
             ))}
             {peekedMsgs.length === 0 && (
