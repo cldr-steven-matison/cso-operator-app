@@ -1836,9 +1836,11 @@ def _trim_if_oversized(path: Path) -> tuple[float | None, bool, str]:
             # this pod's 1-CPU/1Gi limit (k8s/deployment.yaml) — at 24 threads on a
             # 1920x1240 frame, per-thread encode buffers blow the memory limit and
             # the kernel OOM-kills ffmpeg (returncode -9) within ~1s every time.
+            # Matches the same thread cap already used by _burn_platform_overlay and
+            # _burn_glitch_intro's encode_still for the identical reason.
             ["ffmpeg", "-y", "-i", str(path), "-t", str(MAX_TWEET_VIDEO_DURATION),
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-             "-threads", "2", "-x264-params", "threads=2",
+             "-threads", "1", "-x264opts", "threads=1:sliced-threads=0",
              "-c:a", "aac", str(trimmed)],
             capture_output=True, timeout=90,
         )
