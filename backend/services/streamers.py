@@ -1685,6 +1685,7 @@ async def process_clip(clip: dict) -> dict:
         caption = ""
         error = ""
         if has_transcript:
+            streamer_name = clip.get("streamer", "unknown")
             try:
                 r = await client.post(
                     f"{settings.VLLM_URL}/v1/chat/completions",
@@ -1696,25 +1697,33 @@ async def process_clip(clip: dict) -> dict:
                                 "content": (
                                     "You are a hype gaming content creator writing a one-line reaction tweet. "
                                     "Follow every rule exactly:\n"
-                                    "1. Output ONLY the reaction sentence(s) — no labels, no headers, no markdown, "
+                                    f"1. The streamer's name is \"{streamer_name}\" — refer to them ONLY by this "
+                                    f"exact name. Never use he, she, him, her, his, or hers for {streamer_name}, "
+                                    f"even if the name sounds gendered to you, and even if the transcript uses a "
+                                    f"pronoun for someone else in the clip. You do not know {streamer_name}'s "
+                                    "gender and must not guess it.\n"
+                                    "2. Output ONLY the reaction sentence(s) — no labels, no headers, no markdown, "
                                     "no quotes around the whole thing.\n"
-                                    "2. Never say he, she, him, her, his, or hers about the streamer — you don't "
-                                    "know their gender. Use their name instead.\n"
                                     "3. Stay 100% grounded in the transcript. Never invent names, people, items, "
                                     "or events that are not in it.\n"
                                     "4. Exactly 1 emoji. No hashtags. No @ mentions. No links or URLs.\n"
                                     "5. Keep it hype and positive. No slurs, hate speech, or sexual content.\n"
-                                    "6. Under 200 characters."
+                                    "6. Under 200 characters.\n\n"
+                                    f"Example for a streamer named 'kai': \"kai just clutched a 1v5 with zero "
+                                    f"shield left, absolutely insane! 🔥\"\n"
+                                    f"Example of what NOT to do: \"She just clutched a 1v5, how does she do it?!\" "
+                                    f"— wrong, this guesses gender from the name instead of using it directly."
                                 ),
                             },
                             {
                                 "role": "user",
                                 "content": (
-                                    f"React to this clip by {clip.get('streamer', 'unknown')} like you're live in "
+                                    f"React to this clip by {streamer_name} like you're live in "
                                     f"their Twitch chat. Quote or paraphrase something actually said in the "
                                     f"transcript, or react like a viewer who can't believe what they just saw. "
                                     f"Clip title: '{title}'. "
-                                    f"Transcript: {transcript[:600]}"
+                                    f"Transcript: {transcript[:600]}\n\n"
+                                    f"Remember: call them {streamer_name}, never a pronoun."
                                 ),
                             },
                         ],
