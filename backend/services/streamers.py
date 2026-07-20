@@ -43,15 +43,15 @@ MAX_TWEET_VIDEO_DURATION = 115.0
 _TWITCH_LOGINS: list[str] = [
     "xqc", "ishowspeed", "stableronaldo", "jynxzi", "agent00",
     "extraemily", "eliasn97", "hello_kiko", "theburntpeanut",
-    "jasontheween", "zackrawrr", "lacy", "kaicenat", "2xrakai",
+    "jasontheween", "lacy", "kaicenat", "2xrakai",
     "joe_bartolozzi",
 ]
 
 _KICK_LOGINS: list[str] = [
     "roshtein", "deenthegreat", "hstikkytokky", "odablock",
     "iceposeidon", "adinross", "n3on",
-    "chickenandy", "asmongold", "mrbeast", "clavicular", "ac7ionman",
-    "adrienbroner", "bbjess", "whiz",
+    "mrbeast", "clavicular", "ac7ionman",
+    "bbjess", "whiz", "trainwreckstv",
 ]
 
 _watchlist: list[str] = []
@@ -955,7 +955,6 @@ _STREAMER_CATALOG: dict[str, str] = {
     "hello_kiko":     "hello_kiko",
     "theburntpeanut": "theburntpeanut",
     "jasontheween":   "jasontheween",
-    "zackrawrr":      "zackrawrr",
     "lacy":           "LacyHimself",
     "kaicenat":       "KaiCenat",
     "2xrakai":        "2xrakai",
@@ -968,14 +967,12 @@ _STREAMER_CATALOG: dict[str, str] = {
     "iceposeidon":    "REALIcePoseidon",
     "adinross":       "adinross",
     "n3on":           "n3ononyt",
-    "chickenandy":    "ChickenAndy_",
-    "asmongold":      "asmongold",
     "mrbeast":        "mrbeast",
     "clavicular":     "Clavicular0",
     "ac7ionman":      "Ac7ionMann",
-    "adrienbroner":   "AdrienBroner",
     "bbjess":         "bbjess",
     "whiz":           "crashoverride",
+    "trainwreckstv":  "trainwreckstv",
 }
 
 def get_x_handle(login: str) -> str:
