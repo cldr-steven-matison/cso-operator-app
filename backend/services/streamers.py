@@ -1524,6 +1524,19 @@ _URL_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# A single hard-coded few-shot example anchors small models onto its exact sentence
+# shape across independent calls (frequency/presence penalty only affect variety
+# *within* one completion). Picking one style per request server-side, instead of
+# hoping the model varies on its own, is what actually breaks the "{name} just..."
+# default — see cso-operator-app-streamers.md for before/after examples.
+_CAPTION_OPENER_STYLES = [
+    "a mock-shocked aside (e.g. start with 'the way {name}...' or 'not {name}...')",
+    "a direct jab/roast at the streamer over what just happened",
+    "a cocky bragging comparison putting {name} above everyone else",
+    "a quote lead-in — open by quoting or paraphrasing the funniest/most confident line from the transcript, then react",
+    "a callout to chat/viewers about what {name} just pulled, framed as disbelief or hype",
+]
+
 # A run of the same short substring repeated many times in a row — the
 # degenerate "zerszerszerszers..." decoding failure mode small models can fall into.
 _REPETITION_RE = re.compile(r'(.{2,20}?)\1{4,}', flags=re.DOTALL)
@@ -1683,6 +1696,7 @@ async def process_clip(clip: dict) -> dict:
         error = ""
         if has_transcript:
             streamer_name = clip.get("streamer", "unknown")
+            opener_style = random.choice(_CAPTION_OPENER_STYLES).format(name=streamer_name)
             try:
                 r = await client.post(
                     f"{settings.VLLM_URL}/v1/chat/completions",
@@ -1692,32 +1706,49 @@ async def process_clip(clip: dict) -> dict:
                             {
                                 "role": "system",
                                 "content": (
-                                    "You are a hype gaming content creator writing a one-line reaction tweet. "
-                                    "Follow every rule exactly:\n"
+                                    "You are a cocky, trash-talking gaming chat regular live-reacting to clips — "
+                                    "funny, arrogant, a little trollish, but never boring. Sometimes you hype the "
+                                    "streamer up like they're the main character and everyone else should log off; "
+                                    "sometimes you roast them for what just happened in the clip. Pick whichever "
+                                    "fits the clip. Follow every rule exactly:\n"
                                     f"1. The streamer's name is \"{streamer_name}\" — refer to them ONLY by this "
                                     f"exact name. Never use he, she, him, her, his, or hers for {streamer_name}, "
                                     f"even if the name sounds gendered to you, and even if the transcript uses a "
                                     f"pronoun for someone else in the clip. You do not know {streamer_name}'s "
                                     "gender and must not guess it.\n"
                                     "2. Output ONLY the reaction sentence(s) — no labels, no headers, no markdown, "
-                                    "no quotes around the whole thing.\n"
+                                    "no quotes around the whole thing. Before you answer, check your first few "
+                                    f"words: if they are \"{streamer_name} just\" or \"{streamer_name}'s\" or any "
+                                    "other name-first-verb-second pattern, throw that draft out and rewrite with a "
+                                    "different opener. Required: open with a callout, a mock-shocked aside, a "
+                                    "direct jab, a bragging comparison, or a quote lead-in — never with the "
+                                    "streamer's name as the very first word.\n"
                                     "3. Stay 100% grounded in the transcript. Never invent names, people, items, "
                                     "or events that are not in it.\n"
                                     "4. Exactly 1 emoji. No hashtags. No @ mentions. No links or URLs.\n"
-                                    "5. Keep it hype and positive. No slurs, hate speech, or sexual content.\n"
+                                    "5. Keep it funny and a little cocky/trollish — teasing the streamer or "
+                                    "trash-talking on their behalf is encouraged. No slurs or hate speech.\n"
                                     "6. Under 200 characters.\n\n"
-                                    f"Example for a streamer named 'kai': \"kai just clutched a 1v5 with zero "
-                                    f"shield left, absolutely insane! 🔥\"\n"
-                                    f"Example of what NOT to do: \"She just clutched a 1v5, how does she do it?!\" "
-                                    f"— wrong, this guesses gender from the name instead of using it directly."
+                                    "Examples of the range of openers/tone to draw from (do not reuse these "
+                                    "verbatim, and don't let any one of them become your default template):\n"
+                                    "- \"nobody does it like riven, the rest of this lobby should just log off 💀\"\n"
+                                    "- \"kai really said 'trust me' right before eating that grenade 😭\"\n"
+                                    "- \"'i got this' — kai, three seconds before absolutely not getting this 🤡\"\n"
+                                    "- \"the way sable just no-scoped that and immediately started crying, we are "
+                                    "not the same 🔥\"\n"
+                                    "Example of what NOT to do: \"She just clutched a 1v5, how does she do it?!\" "
+                                    "— wrong, this guesses gender from the name instead of using it directly."
                                 ),
                             },
                             {
                                 "role": "user",
                                 "content": (
-                                    f"React to this clip by {streamer_name} like you're live in "
+                                    f"React to this clip by {streamer_name} like you're a cocky regular in "
                                     f"their Twitch chat. Quote or paraphrase something actually said in the "
-                                    f"transcript, or react like a viewer who can't believe what they just saw. "
+                                    f"transcript, or roast/hype them over what just happened. "
+                                    f"For this one, your opener MUST be: {opener_style}. Do not start with "
+                                    f"\"{streamer_name} just\" or \"{streamer_name}'s\" — use the required opener "
+                                    f"style instead. "
                                     f"Clip title: '{title}'. "
                                     f"Transcript: {transcript[:600]}\n\n"
                                     f"Remember: call them {streamer_name}, never a pronoun."
