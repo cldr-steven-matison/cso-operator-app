@@ -261,6 +261,15 @@ async def add_to_watchlist(body: WatchlistAdd):
     return {"logins": streamers.add_to_watchlist(entry)}
 
 
+@router.post("/watchlist/remove")
+async def remove_from_watchlist(body: WatchlistAdd):
+    """Unpin one streamer from the watch list without disturbing the rest — the
+    offline-side counterpart to /watchlist/add, for per-streamer flows that pin
+    on live and unpin on offline (e.g. tunastarlink's dedicated live-check)."""
+    entry = f"kick:{body.login}" if body.platform == "kick" else body.login
+    return {"logins": streamers.remove_from_watchlist(entry)}
+
+
 @router.get("/x-handle/{login}")
 async def get_x_handle(login: str):
     """Passive catalog lookup for LiveStreamerAlert (NiFi) — X handle has no @, empty string if unknown."""

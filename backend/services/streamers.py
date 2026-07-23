@@ -28,9 +28,16 @@ from config import settings
 
 STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClip", "PublishClipPeakTimeCron")
 
-# LiveStreamerAlert's PollTimer (GenerateFlowFile) rests STOPPED by design — a manual
-# per-poll trigger, not a recurring schedule. Not in STREAMER_PG_NAMES: this is a
-# processor-level pulse (start, one tick, stop), not a whole-PG start/stop toggle.
+# LiveStreamerAlert's PollTimer (GenerateFlowFile) is CRON_DRIVEN and RUNNING as
+# its normal resting state (0 0/30 20-23,0-3 * * ? as of 2026-07-23 — Steven's
+# own live tuning, real EDT evening hours). A dedicated ManualPollTrigger was
+# tried alongside it (2026-07-23) so Telegram could pulse a run without ever
+# touching PollTimer's schedule, but starting the whole PG with it in place blew
+# the flow up — Steven removed it same day. Telegram's run-once is back to
+# pulsing PollTimer directly; the state-preserving restore in
+# run_live_streamer_alert_once() (remembers RUNNING/STOPPED on entry, restores
+# it after) is what keeps that from disturbing the cron schedule. Not in
+# STREAMER_PG_NAMES: this is a processor-level pulse, not a whole-PG toggle.
 LIVE_STREAMER_ALERT_PG_NAME = "LiveStreamerAlert"
 LIVE_STREAMER_ALERT_POLL_PROCESSOR = "PollTimer"
 
@@ -129,6 +136,20 @@ def add_to_watchlist(login: str) -> list[str]:
     login = login.strip()
     if login and login not in _watchlist:
         _watchlist.append(login)
+        _save_watchlist()
+    return list(_watchlist)
+
+
+def remove_from_watchlist(login: str) -> list[str]:
+    """Drop one login (already-normalized, e.g. 'kick:n3on') if present, leaving
+    the rest of the list untouched — the offline-side counterpart to
+    add_to_watchlist(), for per-streamer flows (e.g. tunastarlink's dedicated
+    live-check) that pin on live and unpin on offline.
+    """
+    global _watchlist
+    login = login.strip()
+    if login in _watchlist:
+        _watchlist.remove(login)
         _save_watchlist()
     return list(_watchlist)
 
@@ -298,11 +319,19 @@ async def _set_processor_state(client: httpx.AsyncClient, processor: dict, runni
 
 
 async def run_live_streamer_alert_once(client: httpx.AsyncClient) -> dict:
-    """Pulse PollTimer (GenerateFlowFile) on the LiveStreamerAlert PG for exactly one
-    poll cycle, then stop it again. PollTimer's normal resting state is STOPPED —
-    Steven triggers it manually per test run rather than running it on a recurring
-    schedule (still an open design question, see cso-operator-app-streamers.md).
-    This gives a Telegram-triggered manual run without changing that.
+    """Pulse PollTimer (GenerateFlowFile) on the LiveStreamerAlert PG for one poll
+    cycle, then restore whatever state it was actually in before this ran.
+
+    PollTimer is CRON_DRIVEN and RUNNING as its normal resting state (Steven's own
+    live tuning, 2026-07-23) — not the STOPPED-by-default manual-pulse design this
+    function originally assumed. Unconditionally forcing STOPPED at the end of
+    every Telegram run was silently killing that recurring schedule. A separate
+    ManualPollTrigger processor was tried to sidestep sharing a processor with the
+    cron entirely, but starting the whole PG with it wired in broke the flow —
+    reverted same day. Back to pulsing PollTimer directly; this function's actual
+    fix is remembering RUNNING/STOPPED on entry and restoring that same state at
+    the end instead of always stopping, so a Telegram run-once never leaves the
+    cron schedule disabled.
     """
     pg = await _find_pg_by_name(client, LIVE_STREAMER_ALERT_PG_NAME)
     if not pg:
@@ -313,14 +342,16 @@ async def run_live_streamer_alert_once(client: httpx.AsyncClient) -> dict:
             f"Processor '{LIVE_STREAMER_ALERT_POLL_PROCESSOR}' not found in '{LIVE_STREAMER_ALERT_PG_NAME}'"
         )
 
-    await _set_processor_state(client, proc, running=True)
+    was_running = proc["component"]["state"] == "RUNNING"
+    if not was_running:
+        await _set_processor_state(client, proc, running=True)
     await asyncio.sleep(5)
     # Re-fetch: starting mutates the processor's revision — reusing the stale one
-    # from before the start would 409 the stop.
+    # from before the start would 409 the restore.
     proc = await _find_processor(client, pg["id"], LIVE_STREAMER_ALERT_POLL_PROCESSOR)
     if proc:
-        await _set_processor_state(client, proc, running=False)
-    return {"ok": True, "processor": LIVE_STREAMER_ALERT_POLL_PROCESSOR, "triggered": True}
+        await _set_processor_state(client, proc, running=was_running)
+    return {"ok": True, "processor": LIVE_STREAMER_ALERT_POLL_PROCESSOR, "triggered": True, "restored_state": "RUNNING" if was_running else "STOPPED"}
 
 
 # ── Watch list helpers ────────────────────────────────────────────────────────
@@ -1544,18 +1575,21 @@ def _has_degenerate_repetition(text: str) -> bool:
     return False
 
 
-# Lacy (lacyhimself) is a man; the prompt-only rule (2026-07-16, tightened
-# 2026-07-20) still leaves a measured ~20-30% residual she/her violation rate
-# on ambiguous/thin-transcript clips. This is the code-level safety net for
-# that residual — Lacy-specific only, per Steven's "all others ok" scope
-# (queued 2026-07-22). Word-boundary match so it doesn't false-positive on
-# substrings like "hershey" or "there".
-_SHE_HER_RE = re.compile(r'\b(?:she|her|hers|herself)\b', flags=re.IGNORECASE)
+# Prompt-only gender rule (2026-07-16, tightened 2026-07-20) still leaves a
+# measured residual violation rate on ambiguous/thin-transcript clips. This is
+# the code-level safety net for that residual — every streamer, not just
+# lacyhimself (widened 2026-07-23, supersedes the Lacy-only scope from
+# 2026-07-22: we don't know any streamer's gender, so the guard applies
+# uniformly). Word-boundary match so it doesn't false-positive on substrings
+# like "hershey" or "there".
+_GENDERED_PRONOUN_RE = re.compile(
+    r'\b(?:she|her|hers|herself|he|him|his|himself)\b', flags=re.IGNORECASE
+)
 
 
-def _has_she_her_pronoun(text: str) -> bool:
-    """True if text contains a whole-word she/her/hers/herself pronoun."""
-    return bool(_SHE_HER_RE.search(text))
+def _has_gendered_pronoun(text: str) -> bool:
+    """True if text contains a whole-word he/him/his/she/her/hers pronoun."""
+    return bool(_GENDERED_PRONOUN_RE.search(text))
 
 
 def _clean_caption(text: str) -> str:
@@ -1699,86 +1733,113 @@ async def process_clip(clip: dict) -> dict:
         if has_transcript:
             streamer_name = clip.get("streamer", "unknown")
             opener_style = random.choice(_CAPTION_OPENER_STYLES).format(name=streamer_name)
-            try:
-                r = await client.post(
-                    f"{settings.VLLM_URL}/v1/chat/completions",
-                    json={
-                        "model": settings.VLLM_MODEL,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You are a cocky, trash-talking gaming chat regular live-reacting to clips — "
-                                    "funny, arrogant, a little trollish, but never boring. Sometimes you hype the "
-                                    "streamer up like they're the main character and everyone else should log off; "
-                                    "sometimes you roast them for what just happened in the clip. Pick whichever "
-                                    "fits the clip. Follow every rule exactly:\n"
-                                    f"1. The streamer's name is \"{streamer_name}\" — refer to them ONLY by this "
-                                    f"exact name. Never use he, she, him, her, his, or hers for {streamer_name}, "
-                                    f"even if the name sounds gendered to you, and even if the transcript uses a "
-                                    f"pronoun for someone else in the clip. You do not know {streamer_name}'s "
-                                    "gender and must not guess it.\n"
-                                    "2. Output ONLY the reaction sentence(s) — no labels, no headers, no markdown, "
-                                    "no quotes around the whole thing. Before you answer, check your first few "
-                                    f"words: if they are \"{streamer_name} just\" or \"{streamer_name}'s\" or any "
-                                    "other name-first-verb-second pattern, throw that draft out and rewrite with a "
-                                    "different opener. Required: open with a callout, a mock-shocked aside, a "
-                                    "direct jab, a bragging comparison, or a quote lead-in — never with the "
-                                    "streamer's name as the very first word.\n"
-                                    "3. Stay 100% grounded in the transcript. Never invent names, people, items, "
-                                    "or events that are not in it.\n"
-                                    "4. Exactly 1 emoji. No hashtags. No @ mentions. No links or URLs.\n"
-                                    "5. Keep it funny and a little cocky/trollish — teasing the streamer or "
-                                    "trash-talking on their behalf is encouraged. No slurs or hate speech.\n"
-                                    "6. Under 200 characters.\n\n"
-                                    "Examples of the range of openers/tone to draw from (do not reuse these "
-                                    "verbatim, and don't let any one of them become your default template):\n"
-                                    "- \"nobody does it like riven, the rest of this lobby should just log off 💀\"\n"
-                                    "- \"kai really said 'trust me' right before eating that grenade 😭\"\n"
-                                    "- \"'i got this' — kai, three seconds before absolutely not getting this 🤡\"\n"
-                                    "- \"the way sable just no-scoped that and immediately started crying, we are "
-                                    "not the same 🔥\"\n"
-                                    "Example of what NOT to do: \"She just clutched a 1v5, how does she do it?!\" "
-                                    "— wrong, this guesses gender from the name instead of using it directly."
-                                ),
-                            },
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"React to this clip by {streamer_name} like you're a cocky regular in "
-                                    f"their Twitch chat. Quote or paraphrase something actually said in the "
-                                    f"transcript, or roast/hype them over what just happened. "
-                                    f"For this one, your opener MUST be: {opener_style}. Do not start with "
-                                    f"\"{streamer_name} just\" or \"{streamer_name}'s\" — use the required opener "
-                                    f"style instead. "
-                                    f"Clip title: '{title}'. "
-                                    f"Transcript: {transcript[:600]}\n\n"
-                                    f"Remember: call them {streamer_name}, never a pronoun."
-                                ),
-                            },
-                        ],
-                        "max_tokens": 120,
-                        "temperature": 0.7,
-                        "frequency_penalty": 0.6,
-                        "presence_penalty": 0.3,
-                    },
-                )
-                if r.status_code == 200:
-                    raw = r.json()["choices"][0]["message"]["content"]
-                    cleaned = _clean_caption(raw)
-                    if not cleaned:
-                        error = "disqualified: empty caption after cleaning"
-                    elif _has_degenerate_repetition(cleaned):
-                        error = "disqualified: degenerate repeated output"
-                    elif clip.get("streamer", "").strip().lower() == "lacyhimself" and _has_she_her_pronoun(cleaned):
-                        error = "disqualified: she/her pronoun used for lacyhimself"
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a cocky, trash-talking gaming chat regular live-reacting to clips — "
+                        "funny, arrogant, a little trollish, but never boring. Sometimes you hype the "
+                        "streamer up like they're the main character and everyone else should log off; "
+                        "sometimes you roast them for what just happened in the clip. Pick whichever "
+                        "fits the clip. Follow every rule exactly:\n"
+                        f"1. The streamer's name is \"{streamer_name}\" — refer to them ONLY by this "
+                        f"exact name. Never use he, she, him, her, his, or hers for {streamer_name}, "
+                        f"even if the name sounds gendered to you, and even if the transcript uses a "
+                        f"pronoun for someone else in the clip. You do not know {streamer_name}'s "
+                        "gender and must not guess it.\n"
+                        "2. Output ONLY the reaction sentence(s) — no labels, no headers, no markdown, "
+                        "no quotes around the whole thing. Before you answer, check your first few "
+                        f"words: if they are \"{streamer_name} just\" or \"{streamer_name}'s\" or any "
+                        "other name-first-verb-second pattern, throw that draft out and rewrite with a "
+                        "different opener. Required: open with a callout, a mock-shocked aside, a "
+                        "direct jab, a bragging comparison, or a quote lead-in — never with the "
+                        "streamer's name as the very first word.\n"
+                        "3. Stay 100% grounded in the transcript. Never invent names, people, items, "
+                        "or events that are not in it.\n"
+                        "4. Exactly 1 emoji. No hashtags. No @ mentions. No links or URLs.\n"
+                        "5. Keep it funny and a little cocky/trollish — teasing the streamer or "
+                        "trash-talking on their behalf is encouraged. No slurs or hate speech.\n"
+                        "6. Under 200 characters.\n\n"
+                        "Examples of the range of openers/tone to draw from (do not reuse these "
+                        "verbatim, and don't let any one of them become your default template):\n"
+                        "- \"nobody does it like riven, the rest of this lobby should just log off 💀\"\n"
+                        "- \"kai really said 'trust me' right before eating that grenade 😭\"\n"
+                        "- \"'i got this' — kai, three seconds before absolutely not getting this 🤡\"\n"
+                        "- \"the way sable just no-scoped that and immediately started crying, we are "
+                        "not the same 🔥\"\n"
+                        "Example of what NOT to do: \"She just clutched a 1v5, how does she do it?!\" "
+                        "— wrong, this guesses gender from the name instead of using it directly."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"React to this clip by {streamer_name} like you're a cocky regular in "
+                        f"their Twitch chat. Quote or paraphrase something actually said in the "
+                        f"transcript, or roast/hype them over what just happened. "
+                        f"For this one, your opener MUST be: {opener_style}. Do not start with "
+                        f"\"{streamer_name} just\" or \"{streamer_name}'s\" — use the required opener "
+                        f"style instead. "
+                        f"Clip title: '{title}'. "
+                        f"Transcript: {transcript[:600]}\n\n"
+                        f"Remember: call them {streamer_name}, never a pronoun."
+                    ),
+                },
+            ]
+
+            # Gendered-pronoun violations get corrective retries before disqualifying —
+            # the LLM is told exactly what it did wrong and asked to redo it, rather than
+            # the clip just being thrown away on the first slip (2026-07-23, all streamers;
+            # bumped to 3 retries same day per Steven's ask).
+            max_attempts = 4
+            for attempt in range(max_attempts):
+                try:
+                    r = await client.post(
+                        f"{settings.VLLM_URL}/v1/chat/completions",
+                        json={
+                            "model": settings.VLLM_MODEL,
+                            "messages": messages,
+                            "max_tokens": 120,
+                            "temperature": 0.7,
+                            "frequency_penalty": 0.6,
+                            "presence_penalty": 0.3,
+                        },
+                    )
+                    if r.status_code == 200:
+                        raw = r.json()["choices"][0]["message"]["content"]
+                        cleaned = _clean_caption(raw)
+                        if not cleaned:
+                            error = "disqualified: empty caption after cleaning"
+                            break
+                        elif _has_degenerate_repetition(cleaned):
+                            error = "disqualified: degenerate repeated output"
+                            break
+                        elif _has_gendered_pronoun(cleaned):
+                            error = f"disqualified: gendered pronoun used for {streamer_name}"
+                            if attempt < max_attempts - 1:
+                                messages.append({"role": "assistant", "content": raw})
+                                messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        f"That used a gendered pronoun (he/him/his/she/her/hers) for "
+                                        f"{streamer_name}. You do not know {streamer_name}'s gender. Rewrite "
+                                        f"it — same rules as before, but refer to them ONLY as "
+                                        f"\"{streamer_name}\", zero pronouns anywhere in the sentence."
+                                    ),
+                                })
+                                continue
+                            break
+                        else:
+                            x_handle = get_x_handle(clip.get("streamer", ""))
+                            caption = _build_tweet(cleaned, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle)
+                            error = ""
+                            break
                     else:
-                        x_handle = get_x_handle(clip.get("streamer", ""))
-                        caption = _build_tweet(cleaned, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle)
-                else:
-                    error = f"caption error: vLLM returned {r.status_code}"
-            except Exception as e:
-                error = f"caption error: {e}"
+                        error = f"caption error: vLLM returned {r.status_code}"
+                        break
+                except Exception as e:
+                    error = f"caption error: {e}"
+                    break
         else:
             error = "disqualified: no transcript"
 
