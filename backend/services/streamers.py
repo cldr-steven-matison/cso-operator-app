@@ -26,7 +26,7 @@ from aiokafka.admin import AIOKafkaAdminClient
 
 from config import settings
 
-STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClip")
+STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClip", "PublishClipPeakTimeCron")
 
 # LiveStreamerAlert's PollTimer (GenerateFlowFile) rests STOPPED by design — a manual
 # per-poll trigger, not a recurring schedule. Not in STREAMER_PG_NAMES: this is a
@@ -41,16 +41,15 @@ LIVE_STREAMER_ALERT_POLL_PROCESSOR = "PollTimer"
 MAX_TWEET_VIDEO_DURATION = 115.0
 
 _TWITCH_LOGINS: list[str] = [
-    "xqc", "ishowspeed", "stableronaldo", "jynxzi", "agent00",
-    "extraemily", "eliasn97", "hello_kiko", "theburntpeanut",
-    "jasontheween", "lacy", "kaicenat", "2xrakai",
-    "joe_bartolozzi",
+    "xqc", "stableronaldo", "jynxzi",
+    "extraemily", "theburntpeanut",
+    "jasontheween", "lacy", "kaicenat",
 ]
 
 _KICK_LOGINS: list[str] = [
-    "roshtein", "deenthegreat", "hstikkytokky", "odablock",
-    "iceposeidon", "adinross", "n3on",
-    "mrbeast", "clavicular", "ac7ionman",
+    "roshtein", "ac7ionman",
+    "adinross", "n3on",
+    "clavicular",
     "bbjess", "whiz", "trainwreckstv",
 ]
 
@@ -946,30 +945,19 @@ def set_fetch_mode(mode: str, period: str) -> dict:
 _STREAMER_CATALOG: dict[str, str] = {
     # Twitch
     "xqc":            "xQc",
-    "ishowspeed":     "ishowspeedsui",
     "stableronaldo":  "StableRonaldo",
     "jynxzi":         "jynxzi",
-    "agent00":        "CallMeAgent00",
     "extraemily":     "ExtraEmilyy",
-    "eliasn97":       "EliasN97",
-    "hello_kiko":     "hello_kiko",
     "theburntpeanut": "theburntpeanut",
     "jasontheween":   "jasontheween",
     "lacy":           "LacyHimself",
     "kaicenat":       "KaiCenat",
-    "2xrakai":        "2xrakai",
-    "joe_bartolozzi": "JoeBartolozzi_",
     # Kick
     "roshtein":       "roshtein",
-    "deenthegreat":   "DeenTheGreat",
-    "hstikkytokky":   "HSTikkyTokky",
-    "odablock":       "Odablock",
-    "iceposeidon":    "REALIcePoseidon",
+    "ac7ionman":      "Ac7ionMann",
     "adinross":       "adinross",
     "n3on":           "n3ononyt",
-    "mrbeast":        "mrbeast",
     "clavicular":     "Clavicular0",
-    "ac7ionman":      "Ac7ionMann",
     "bbjess":         "bbjess",
     "whiz":           "crashoverride",
     "trainwreckstv":  "trainwreckstv",
@@ -1556,6 +1544,20 @@ def _has_degenerate_repetition(text: str) -> bool:
     return False
 
 
+# Lacy (lacyhimself) is a man; the prompt-only rule (2026-07-16, tightened
+# 2026-07-20) still leaves a measured ~20-30% residual she/her violation rate
+# on ambiguous/thin-transcript clips. This is the code-level safety net for
+# that residual — Lacy-specific only, per Steven's "all others ok" scope
+# (queued 2026-07-22). Word-boundary match so it doesn't false-positive on
+# substrings like "hershey" or "there".
+_SHE_HER_RE = re.compile(r'\b(?:she|her|hers|herself)\b', flags=re.IGNORECASE)
+
+
+def _has_she_her_pronoun(text: str) -> bool:
+    """True if text contains a whole-word she/her/hers/herself pronoun."""
+    return bool(_SHE_HER_RE.search(text))
+
+
 def _clean_caption(text: str) -> str:
     """Strip model formatting artifacts from vLLM caption output."""
     text = html.unescape(text).strip()
@@ -1768,6 +1770,8 @@ async def process_clip(clip: dict) -> dict:
                         error = "disqualified: empty caption after cleaning"
                     elif _has_degenerate_repetition(cleaned):
                         error = "disqualified: degenerate repeated output"
+                    elif clip.get("streamer", "").strip().lower() == "lacyhimself" and _has_she_her_pronoun(cleaned):
+                        error = "disqualified: she/her pronoun used for lacyhimself"
                     else:
                         x_handle = get_x_handle(clip.get("streamer", ""))
                         caption = _build_tweet(cleaned, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle)
