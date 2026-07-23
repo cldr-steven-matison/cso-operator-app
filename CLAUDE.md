@@ -1,6 +1,6 @@
 # Read this first. Every session.
 
-This is Steven's live production app — real X posts go out from here. Read `/home/tunas/DesktopShare/CLAUDE.md` first (project-wide rules); this file is app-specific detail on top of it.
+This is Steven's live production app — real X posts go out from here. Read `DesktopShare/CLAUDE.md` first (project-wide rules — the repo is wherever DesktopShare is checked out on this device, see `DesktopShare/CLAUDE-CHECKIN.md`); this file is app-specific detail on top of it.
 
 ## Before touching backend/services/streamers.py
 
@@ -20,6 +20,6 @@ X/Twitch/Kick/NiFi credentials are injected live via `kubectl set env deploy/cso
 
 ## Live traffic caution
 
-Fetch/publish can be running at any time. No manual `kubectl exec` patches to `/clips` while that's possible — ship fixes through the normal rebuild+redeploy pipeline. No cancelling/mutating already-queued pending-publish items without an explicit per-instance ask from Steven, even when a fix you just shipped clearly flags them as bad.
+Fetch/publish can be running at any time. The full live-queue rules — no `kubectl exec` patches on `/clips`, no unilateral queue mutations, no injecting test data into live triggers, post-redeploy pod sanity — live in `DesktopShare/agent/live-queues.md`. Read that before touching anything queue-adjacent here.
 
-Full history and incident writeups: `DesktopShare/cso-operator-app-streamers.md` (golden source doc) and the memory files under `/home/tunas/.claude/projects/-home-tunas-DesktopShare/memory/` (all `project_streamers_*` and `feedback_*` files).
+Full history and incident writeups: `DesktopShare/cso-operator-app-streamers.md` (golden source doc) and this session's Claude memory index on the local device.
