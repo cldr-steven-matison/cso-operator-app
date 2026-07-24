@@ -6,8 +6,7 @@ A control panel for the **Cloudera Streaming Operators** stack on Minikube — s
 
 One screen drives, depending on which [modules](#modules) are enabled:
 
-- **Documents** ingested via NiFi `IngestToStream` → Kafka `new_documents` → chunked + embedded + upserted into Qdrant by `StreamTovLLM`.
-- **Audio** ingested via NiFi `IngestDataToStream` → Kafka `new_audio` → transcribed by `StreamToWhisper` (insanely-fast-whisper, GPU) → republished to `new_documents` → indexed by the same RAG flow.
+- **Documents and audio** both ingested through the same NiFi `IngestDataToStream` PG — a single `ListenHTTP` at the head, `RouteOnAttribute` branches on the upload's Content-Type: docs → Kafka `new_documents` → chunked + embedded + upserted into Qdrant by `StreamTovLLM`; audio → Kafka `new_audio` → transcribed by `StreamToWhisper` (insanely-fast-whisper, GPU) → republished to `new_documents` → indexed by the same RAG flow. (There is no separate `IngestDocsToStream` PG — confirmed against the live flow — despite what older docs/READMEs may say.)
 - **Streaming RAG queries** against vLLM (Qwen2.5-3B-Instruct), with sources from Qdrant.
 - **NiFi flow controls** (start/stop, live state).
 - **Kafka topic activity** (depth, lag, live tail).
@@ -63,12 +62,19 @@ backend/    FastAPI proxy + RAG orchestrator + Streamers pipeline (routers/strea
             services/streamers.py — gated behind MODULES=streamers, see above)
 frontend/   Vite + React + TS + Tailwind + shadcn/ui
 whisper/    Dockerfile + Service for the Whisper inference server
-flows/      CSOOperatorApp.json — single import containing all four
-            RAG/ingest process groups (IngestDocsToStream, IngestDataToStream,
-            StreamToWhisper, StreamTovLLM)
-streamers/  StreamersApp.json (NiFi flow export), config.yaml, kafka-topics.yaml,
-            pvc.yaml — the Streamers module's own NiFi flow + backing resources,
-            separate from flows/ above
+flows/      CSOOperatorApp.json — RAG/ingest flow export, three process groups
+            (IngestDataToStream, StreamToWhisper, StreamTovLLM). Live PG is
+            actually named CSOOperatorAppWindows in this NiFi instance, not
+            CSOOperatorApp — file kept at its established name, just flagging
+            the mismatch. Also TwitchChatBot.json — the Twitch chat-command
+            stream-loader bot (see DesktopShare/streamers-twitch-bot.md);
+            doesn't call this app's backend at all, lives here rather than
+            streamers/ since it's not really a Streamers-module flow
+streamers/  StreamersApp.json (NiFi flow export), WatchlistChatJoiner.json
+            (separate PG, joins watchlisted streamers' Twitch chat — does
+            call this app's /api/streamers/watchlist endpoints, hence living
+            here despite being its own isolated PG, not nested under
+            StreamersApp), config.yaml, kafka-topics.yaml, pvc.yaml
 k8s/        Deployment, Service, ConfigMap; backing/ copies of stack YAMLs
 samples/    Reference doc + audio for Demo Mode; efm-demos.json
             (catalog read at request time by /api/efm/demos)
