@@ -48,6 +48,18 @@ async def live_streamer_alert_run_once(request: Request):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.post("/flows/trigger/{name}")
+async def flow_trigger(name: str, request: Request):
+    """One-shot on-demand run via StreamersApp's shared Trigger (ListenHTTP)
+    entry point -- name must be one of streamers.TRIGGER_REQUESTS."""
+    try:
+        return await streamers.trigger_flow(request.app.state.http, name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 # ── Clip queue ────────────────────────────────────────────────────────────────
 
 @router.get("/queue")

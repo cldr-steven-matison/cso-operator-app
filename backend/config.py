@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     # The flow's RouteOnAttribute branches docs vs audio by Content-Type / mime.
     NIFI_INGEST_URL: str = "http://mynifi.cfm-streaming.svc.cluster.local:9000/contentListener"
 
+    # StreamersApp's shared on-demand entry point: a single ListenHTTP ("Trigger")
+    # feeds RouteOnAttribute, which branches on the X-Trigger-Request header to
+    # LiveStreamerAlert / FetchClips / PublishClipPeakTimeCron's TriggerInput port.
+    # One flowfile through, bypassing each flow's own top-level scheduler.
+    NIFI_TRIGGER_URL: str = "http://mynifi.cfm-streaming.svc.cluster.local:9080/contentListener"
+
     EFM_URL: str = "http://efm.cld-streaming.svc:10090"
 
     # EFM's own Postgres — direct read of the agent/device tables for a real

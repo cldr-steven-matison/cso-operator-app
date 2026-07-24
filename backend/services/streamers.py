@@ -354,6 +354,36 @@ async def run_live_streamer_alert_once(client: httpx.AsyncClient) -> dict:
     return {"ok": True, "processor": LIVE_STREAMER_ALERT_POLL_PROCESSOR, "triggered": True, "restored_state": "RUNNING" if was_running else "STOPPED"}
 
 
+# ── Trigger (ListenHTTP -> RouteOnAttribute) ────────────────────────────────
+#
+# StreamersApp has a single shared on-demand entry point: a ListenHTTP
+# ("Trigger") feeds a RouteOnAttribute that branches on the X-Trigger-Request
+# header to one of three TriggerInput ports (LiveStreamerAlert, FetchClips,
+# PublishClipPeakTimeCron -- PublishClip's own PG has no TriggerInput, it's
+# retired in favor of the peak-time cron one). One flowfile in, routed
+# straight past each flow's own top-level scheduler (PollTimer's cron,
+# FetchClips'/PublishClipPeakTimeCron's start/stop toggle) -- no PollTimer
+# start/stop juggling like run_live_streamer_alert_once() above needs.
+#
+# request_name must match a RouteOnAttribute property name exactly; anything
+# else silently lands in its auto-terminated 'unmatched' relationship with no
+# error surfaced back here, so the allow-list below is load-bearing, not just
+# validation.
+TRIGGER_REQUESTS = ("LiveStreamerAlert", "FetchClips", "PublishClip")
+
+
+async def trigger_flow(client: httpx.AsyncClient, request_name: str) -> dict:
+    if request_name not in TRIGGER_REQUESTS:
+        raise ValueError(f"Unknown trigger request '{request_name}', expected one of {TRIGGER_REQUESTS}")
+    r = await client.post(
+        settings.NIFI_TRIGGER_URL,
+        headers={"X-Trigger-Request": request_name},
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    return {"ok": True, "request": request_name, "status": r.status_code}
+
+
 # ── Watch list helpers ────────────────────────────────────────────────────────
 
 def _parse_watch_entry(entry: str) -> tuple[str, str]:
@@ -1854,9 +1884,20 @@ async def process_clip(clip: dict) -> dict:
 async def clip_queue(limit: int = 20) -> list[dict]:
     """Peek the last `limit` records from processed_clips.
 
-    Uses getmany() (single direct fetch) instead of the async iterator so
-    that manual seek() works reliably — the async for iterator hangs after
-    seek() in aiokafka when there are no in-flight fetch requests queued.
+    Uses getmany() (direct fetch) instead of the async iterator so that
+    manual seek() works reliably — the async for iterator hangs after seek()
+    in aiokafka when there are no in-flight fetch requests queued.
+
+    getmany() is a one-shot poll, not a guaranteed drain of the requested
+    range — after seek() it can return with only a few of the messages up to
+    the broker's current position, well short of `limit`, even though the
+    rest are readily available on the next poll. Confirmed live 2026-07-24:
+    a single getmany() call after seeking to the last 20 offsets returned
+    only 2 messages (both already `pending`), silently hiding 13 real,
+    unpublished, ready-to-review clips that a second poll picked up
+    immediately. Loop until the consumer's position catches up to the known
+    end offset (or a bounded number of polls, in case something's actually
+    stalled) instead of trusting one call to have delivered everything.
     """
     from aiokafka import AIOKafkaConsumer, TopicPartition
 
@@ -1877,17 +1918,27 @@ async def clip_queue(limit: int = 20) -> list[dict]:
         if end == 0:
             return []
 
-        consumer.seek(tp, max(0, end - limit))
+        start = max(0, end - limit)
+        consumer.seek(tp, start)
 
-        # getmany() is a one-shot fetch that respects the seek offset
-        batch = await asyncio.wait_for(
-            consumer.getmany(tp, timeout_ms=5000, max_records=limit),
-            timeout=10.0,
-        )
+        # Poll until caught up to `end` — a single getmany() isn't a
+        # guaranteed drain of the sought range, see docstring above.
+        messages: dict[int, object] = {}
+        for _ in range(8):
+            batch = await asyncio.wait_for(
+                consumer.getmany(tp, timeout_ms=3000, max_records=limit),
+                timeout=10.0,
+            )
+            for msg in batch.get(tp, []):
+                messages[msg.offset] = msg
+            if await consumer.position(tp) >= end:
+                break
+
         skipped = get_skipped()
         published = get_published()
         pending = {p["clip_id"] for p in _load_pending()}
-        for msg in batch.get(tp, []):
+        for offset in sorted(messages):
+            msg = messages[offset]
             try:
                 record = json.loads(msg.value.decode("utf-8"))
                 clip_id = record.get("clip_id", "")
@@ -2045,12 +2096,23 @@ async def _fetch_one_topic_stats(topic: str) -> dict:
 
         records = []
         if count > 0:
-            consumer.seek(tp, max(begin, end - 5))
-            batch = await asyncio.wait_for(
-                consumer.getmany(tp, timeout_ms=3000, max_records=5),
-                timeout=8.0,
-            )
-            for msg in batch.get(tp, []):
+            seek_start = max(begin, end - 5)
+            consumer.seek(tp, seek_start)
+            # getmany() is a one-shot poll, not a guaranteed drain -- loop until
+            # caught up to `end` instead of trusting one call for all 5 records.
+            # Same underlying issue as clip_queue()'s fix, 2026-07-24.
+            messages: dict[int, object] = {}
+            for _ in range(8):
+                batch = await asyncio.wait_for(
+                    consumer.getmany(tp, timeout_ms=2000, max_records=5),
+                    timeout=8.0,
+                )
+                for msg in batch.get(tp, []):
+                    messages[msg.offset] = msg
+                if await consumer.position(tp) >= end:
+                    break
+            for offset in sorted(messages):
+                msg = messages[offset]
                 try:
                     rec = json.loads(msg.value.decode("utf-8"))
                     records.append({
