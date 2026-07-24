@@ -18,6 +18,19 @@ This file (2000+ lines) is where every real incident in this project has origina
 
 X/Twitch/Kick/NiFi credentials are injected live via `kubectl set env deploy/cso-operator-app KEY=value` — never in `deployment.yaml`/`configmap.yaml`. A `kubectl apply` reporting `deployment.apps/cso-operator-app unchanged` means these survived untouched; that's the thing to check after any redeploy, not just rollout status.
 
+## NiFi flow definitions go stale — re-export them, don't just leave them
+
+`flows/CSOOperatorApp.json`, `flows/TwitchChatBot.json`, `streamers/StreamersApp.json`, `streamers/WatchlistChatJoiner.json` are exports of this app's four live NiFi process groups. They drift fast — these flows get hand-edited live in the NiFi UI/API (new processors, rewired connections, new sub-PGs), never by editing these JSON files directly. As of 2026-07-24 they'd gone weeks stale, missing entire PGs (`LiveStreamerAlert`, `TunaStarLinkFlows`, the `Trigger`/`RouteOnAttribute` on-demand entry point) before being refreshed.
+
+Re-export periodically, and definitely after any session that builds/rewires a flow with a checked-in export here:
+
+1. Find the target PG's real runtime ID — dump the live flow (`kubectl exec mynifi-0 -n cfm-streaming -- gunzip -c /opt/nifi/nifi-current/data/flow.json.gz`) and read its `instanceIdentifier`, or walk `GET /nifi-api/flow/process-groups/root`.
+2. `GET /nifi-api/process-groups/{id}/download` — returns the same VersionedFlowSnapshot JSON the NiFi UI's "Download flow definition" produces.
+3. **Pretty-print before committing** (`json.dumps(d, indent=2)`) — the raw response is minified, and committing it that way makes every future diff unreviewable (whole-file rewrite instead of the real additive change).
+4. Confirmed safe to commit: Parameter Context sensitive values export as `null`, never real secret values, and processor properties aren't masked-then-leaked either. No credential risk in these files.
+
+Worked example with the exact commands: `DesktopShare/cso-operator-app-streamers.md` Session 21 (2026-07-24).
+
 ## Live traffic caution
 
 Fetch/publish can be running at any time. The full live-queue rules — no `kubectl exec` patches on `/clips`, no unilateral queue mutations, no injecting test data into live triggers, post-redeploy pod sanity — live in `DesktopShare/agent/live-queues.md`. Read that before touching anything queue-adjacent here.
