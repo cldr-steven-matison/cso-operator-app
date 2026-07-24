@@ -2,9 +2,9 @@
 
 ![CSO Operator App Control Plane](/CSO_Operator_Control_Plane.png)
 
-A demo control panel for the **Cloudera Streaming Operators** RAG + Audio Transcription stack on Minikube.
+A control panel for the **Cloudera Streaming Operators** stack on Minikube — started as a RAG + Audio Transcription demo, has since grown a live streamer-clip-to-X pipeline module. See [Modules](#modules) below; the two are quite different in nature (one's a demo, the other posts real content to a real X account).
 
-One screen drives:
+One screen drives, depending on which [modules](#modules) are enabled:
 
 - **Documents** ingested via NiFi `IngestToStream` → Kafka `new_documents` → chunked + embedded + upserted into Qdrant by `StreamTovLLM`.
 - **Audio** ingested via NiFi `IngestDataToStream` → Kafka `new_audio` → transcribed by `StreamToWhisper` (insanely-fast-whisper, GPU) → republished to `new_documents` → indexed by the same RAG flow.
@@ -18,12 +18,39 @@ One screen drives:
   (`samples/efm-demos.json`). The catalog is per-`agentClass`; each entry
   declares a Kafka topic + `expect` block, so the panel verifies
   end-to-end and shows a `PASS / FAIL` badge.
+- **Streamers** — fetches Twitch/Kick clips on a watch list, transcribes (Whisper) and captions (vLLM) them, queues them for review, and publishes approved ones to X with commentary. Also runs `LiveStreamerAlert` (NiFi-native, posts "streamer is live" to X/Twitch chat) and a watchlist chat-join bot. Real X/Twitch/Kick credentials, real posts — not a demo. Full detail: [DesktopShare/cso-operator-app-streamers.md](https://github.com/cldr-steven-matison/DesktopShare/blob/main/cso-operator-app-streamers.md).
 
-Local demo only — no auth, no production hardening.
+The Operator/RAG/EFM pieces are a local demo only — no auth, no production hardening. The Streamers module is real: real accounts, real posts, real credentials injected via `kubectl set env` (never in YAML/ConfigMaps).
+
+## Modules
+
+`MODULES` is a build-time + deploy-time flag controlling which optional tabs/routes are active. **Always state it explicitly on every `make deploy`/`make build`/`scripts/deploy.sh` call — there is no "correct" default, and a bare `make deploy` silently builds Operator-only, which has caused a real overnight outage before.**
+
+| Value | Adds |
+|---|---|
+| *(empty)* | Operator tab only (pod/operator health) — this is what you get if you forget to pass `MODULES` |
+| `rag` | RAG tab (document/audio ingest demo, NiFi controls, Kafka activity, Qdrant, RAG query) |
+| `efm` | EFM tab (agent-class/agent list, Test Agent panel) |
+| `streamers` | Streamers tab (see above) |
+
+Combine with commas, e.g. `MODULES=rag,streamers,efm` for everything. Operator is always present regardless of `MODULES`.
+
+```bash
+make deploy MODULES=rag,streamers,efm     # full install
+make deploy MODULES=streamers             # Streamers only, smallest live-posting install
+make deploy MODULES=                      # Operator only, explicit bare minimum
+```
+
+**Two gotchas, both real:**
+- **`rag` and `efm` only gate the frontend tab** — `backend/main.py` always registers the `nifi`/`qdrant`/`kafka`/`ingest`/`efm` routers no matter what `MODULES` says. `streamers` is the only value that actually changes backend behavior (`backend/routers/streamers.py` is registered only when `"streamers"` is in `MODULES`). So hiding the RAG/EFM tabs doesn't reduce the backend's surface area — only dropping `streamers` does.
+- **`VITE_MODULES=all` is a real frontend shorthand for "show every tab" (`frontend/src/App.tsx`) — the backend has no equivalent.** Deploying with `MODULES=all` shows the Streamers tab in the UI but the backend never registers `/api/streamers/*` (it checks for the literal string `"streamers"`, not `"all"`) — every Streamers API call would 404. Don't use `all` for anything beyond local frontend-only experiments; spell out the real module list for a real deploy.
+
+**First-time Streamers setup is a separate step, not part of `make bootstrap`.** `MODULES=streamers` gets you the tab and the backend routes, but the NiFi `StreamersApp` process group itself has to exist already — `scripts/setup-streamers-flows.py` creates it via the NiFi REST API (see the script's own docstring for exact invocation). On this deployment it already exists and has grown well past what that script creates (it only describes `FetchClips`/`ProcessClips`/`PublishClip` — the live flow also has `LiveStreamerAlert`, `TunaStarLinkFlows`, `WatchlistChatJoiner`, and a shared `Trigger`/`RouteOnAttribute` on-demand entry point; see the streamers doc linked above for the current real shape). On a genuinely fresh cluster, treat that script as a starting point, not the finished flow.
 
 ## Sources
 
 - Plan: [DesktopShare/cso-operator-app-plan.md](https://github.com/cldr-steven-matison/DesktopShare/blob/main/cso-operator-app-plan.md)
+- Streamers module — full spec, API endpoints, NiFi flow configs, session history: [DesktopShare/cso-operator-app-streamers.md](https://github.com/cldr-steven-matison/DesktopShare/blob/main/cso-operator-app-streamers.md)
 - Blog — [RAG with Cloudera Streaming Operators](https://cldr-steven-matison.github.io/blog/RAG-with-Cloudera-Streaming-Operators/)
 - Blog — [Insanely Fast Audio Transcription with Cloudera Streaming Operators](https://cldr-steven-matison.github.io/blog/Audio-Transcription-with-Cloudera-Streaming-Operators/)
 - Backing YAMLs — [ClouderaStreamingOperators](https://github.com/cldr-steven-matison/ClouderaStreamingOperators)
@@ -32,16 +59,21 @@ Local demo only — no auth, no production hardening.
 ## Layout
 
 ```
-backend/    FastAPI proxy + RAG orchestrator
+backend/    FastAPI proxy + RAG orchestrator + Streamers pipeline (routers/streamers.py,
+            services/streamers.py — gated behind MODULES=streamers, see above)
 frontend/   Vite + React + TS + Tailwind + shadcn/ui
 whisper/    Dockerfile + Service for the Whisper inference server
 flows/      CSOOperatorApp.json — single import containing all four
-            process groups (IngestDocsToStream, IngestDataToStream,
+            RAG/ingest process groups (IngestDocsToStream, IngestDataToStream,
             StreamToWhisper, StreamTovLLM)
+streamers/  StreamersApp.json (NiFi flow export), config.yaml, kafka-topics.yaml,
+            pvc.yaml — the Streamers module's own NiFi flow + backing resources,
+            separate from flows/ above
 k8s/        Deployment, Service, ConfigMap; backing/ copies of stack YAMLs
 samples/    Reference doc + audio for Demo Mode; efm-demos.json
             (catalog read at request time by /api/efm/demos)
-scripts/    mac-dev.sh, deploy.sh, bootstrap-stack.sh
+scripts/    mac-dev.sh, deploy.sh, bootstrap-stack.sh, build-modules.py,
+            setup-streamers-flows.py, kafka-external-listener.sh, diagnose-query.py
 ```
 
 ## Quick start (Mac dev)
@@ -100,6 +132,8 @@ once the backing operators are installed.
 
 ## Deploy (Mac or Windows Minikube)
 
+**Always pass `MODULES` explicitly — see [Modules](#modules) above for why a bare `make deploy` is a trap, not a convenience default.**
+
 ```bash
-make deploy
+make deploy MODULES=rag,streamers,efm
 ```
