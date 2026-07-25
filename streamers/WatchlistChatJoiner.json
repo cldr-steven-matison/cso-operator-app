@@ -1393,7 +1393,7 @@
         "comments": "",
         "position": {
           "x": 304.0,
-          "y": 1016.0
+          "y": 1208.0
         },
         "type": "org.apache.nifi.processors.standard.AttributesToJSON",
         "bundle": {
@@ -1576,7 +1576,7 @@
         "comments": "",
         "position": {
           "x": 304.0,
-          "y": 1208.0
+          "y": 1400.0
         },
         "type": "org.apache.nifi.processors.kafka.pubsub.PublishKafka_2_6",
         "bundle": {
@@ -1963,6 +1963,61 @@
           "twitch": {
             "name": "twitch",
             "displayName": "twitch",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": true
+          }
+        },
+        "style": {},
+        "schedulingPeriod": "0 sec",
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 25,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": [
+          "unmatched"
+        ],
+        "scheduledState": "ENABLED",
+        "retryCount": 10,
+        "retriedRelationships": [],
+        "backoffMechanism": "PENALIZE_FLOWFILE",
+        "maxBackoffPeriod": "10 mins",
+        "componentType": "PROCESSOR",
+        "groupIdentifier": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637"
+      },
+      {
+        "identifier": "65fb8f60-8d35-3bc0-987e-455f0f102c97",
+        "instanceIdentifier": "99f9364a-019f-1000-0000-00005f683d98",
+        "name": "FilterNewJoinsOnly",
+        "comments": "",
+        "position": {
+          "x": 304.0,
+          "y": 1016.0
+        },
+        "type": "org.apache.nifi.processors.standard.RouteOnAttribute",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.6.0.4.3.4.0-234"
+        },
+        "properties": {
+          "Routing Strategy": "Route to Property name",
+          "is_new_join": "${join_result:equals('joined')}"
+        },
+        "propertyDescriptors": {
+          "Routing Strategy": {
+            "name": "Routing Strategy",
+            "displayName": "Routing Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "is_new_join": {
+            "name": "is_new_join",
+            "displayName": "is_new_join",
             "identifiesControllerService": false,
             "sensitive": false,
             "dynamic": true
@@ -2426,6 +2481,40 @@
         "groupIdentifier": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637"
       },
       {
+        "identifier": "f1d110fd-d709-3def-bc79-6cb221e3a2f2",
+        "instanceIdentifier": "99fa2f5a-019f-1000-ffff-fffff41b3129",
+        "source": {
+          "id": "65fb8f60-8d35-3bc0-987e-455f0f102c97",
+          "type": "PROCESSOR",
+          "groupId": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637",
+          "name": "FilterNewJoinsOnly",
+          "comments": "",
+          "instanceIdentifier": "99f9364a-019f-1000-0000-00005f683d98"
+        },
+        "destination": {
+          "id": "03b81118-42ce-3ac3-a754-a3569587fc8f",
+          "type": "PROCESSOR",
+          "groupId": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637",
+          "name": "BuildJoinedEvent",
+          "comments": "",
+          "instanceIdentifier": "95c246d9-019f-1000-ffff-ffffe1b16f9a"
+        },
+        "labelIndex": 1,
+        "zIndex": 0,
+        "selectedRelationships": [
+          "is_new_join"
+        ],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "1 GB",
+        "flowFileExpiration": "0 sec",
+        "prioritizers": [],
+        "bends": [],
+        "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+        "loadBalanceCompression": "DO_NOT_COMPRESS",
+        "componentType": "CONNECTION",
+        "groupIdentifier": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637"
+      },
+      {
         "identifier": "ef3671be-0095-3c37-886f-503f46eab384",
         "instanceIdentifier": "91d2ff94-019f-1000-0000-000055f8fb21",
         "source": {
@@ -2545,6 +2634,40 @@
           "name": "PublishKafka_2_6",
           "comments": "",
           "instanceIdentifier": "d60cfc9d-5938-37dc-b00c-2b803bead1e9"
+        },
+        "labelIndex": 1,
+        "zIndex": 0,
+        "selectedRelationships": [
+          "success"
+        ],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "1 GB",
+        "flowFileExpiration": "0 sec",
+        "prioritizers": [],
+        "bends": [],
+        "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+        "loadBalanceCompression": "DO_NOT_COMPRESS",
+        "componentType": "CONNECTION",
+        "groupIdentifier": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637"
+      },
+      {
+        "identifier": "21464356-6d13-3532-a448-d3a3f4549950",
+        "instanceIdentifier": "99fa2f45-019f-1000-0000-000022f2e984",
+        "source": {
+          "id": "6fad48d0-a30e-3005-9f08-0dbcc927b811",
+          "type": "PROCESSOR",
+          "groupId": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637",
+          "name": "JoinAndGreet",
+          "comments": "",
+          "instanceIdentifier": "91b962ca-019f-1000-0000-000068819931"
+        },
+        "destination": {
+          "id": "65fb8f60-8d35-3bc0-987e-455f0f102c97",
+          "type": "PROCESSOR",
+          "groupId": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637",
+          "name": "FilterNewJoinsOnly",
+          "comments": "",
+          "instanceIdentifier": "99f9364a-019f-1000-0000-00005f683d98"
         },
         "labelIndex": 1,
         "zIndex": 0,
@@ -2720,40 +2843,6 @@
         "zIndex": 0,
         "selectedRelationships": [
           "Response"
-        ],
-        "backPressureObjectThreshold": 10000,
-        "backPressureDataSizeThreshold": "1 GB",
-        "flowFileExpiration": "0 sec",
-        "prioritizers": [],
-        "bends": [],
-        "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
-        "loadBalanceCompression": "DO_NOT_COMPRESS",
-        "componentType": "CONNECTION",
-        "groupIdentifier": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637"
-      },
-      {
-        "identifier": "69751620-aedf-3238-b0be-a6ece421cfcd",
-        "instanceIdentifier": "95c24722-019f-1000-ffff-fffffc18ce44",
-        "source": {
-          "id": "6fad48d0-a30e-3005-9f08-0dbcc927b811",
-          "type": "PROCESSOR",
-          "groupId": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637",
-          "name": "JoinAndGreet",
-          "comments": "",
-          "instanceIdentifier": "91b962ca-019f-1000-0000-000068819931"
-        },
-        "destination": {
-          "id": "03b81118-42ce-3ac3-a754-a3569587fc8f",
-          "type": "PROCESSOR",
-          "groupId": "0ec5ddba-e728-3ad1-84fe-1760ca4f3637",
-          "name": "BuildJoinedEvent",
-          "comments": "",
-          "instanceIdentifier": "95c246d9-019f-1000-ffff-ffffe1b16f9a"
-        },
-        "labelIndex": 1,
-        "zIndex": 0,
-        "selectedRelationships": [
-          "success"
         ],
         "backPressureObjectThreshold": 10000,
         "backPressureDataSizeThreshold": "1 GB",

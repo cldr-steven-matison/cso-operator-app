@@ -33,7 +33,7 @@
           "screen1": "${screen:equals('screen1')}",
           "matrix-screen4": "${screen:equals('matrix-screen4')}",
           "screen4": "${screen:equals('screen4')}",
-          "matrix": "${screen:equals('matrix')}",
+          "matrix-screen1": "${screen:equals('matrix-screen1')}",
           "matrix-screen3": "${screen:equals('matrix-screen3')}",
           "matrix-screen2": "${screen:equals('matrix-screen2')}"
         },
@@ -80,9 +80,9 @@
             "sensitive": false,
             "dynamic": true
           },
-          "matrix": {
-            "name": "matrix",
-            "displayName": "matrix",
+          "matrix-screen1": {
+            "name": "matrix-screen1",
+            "displayName": "matrix-screen1",
             "identifiesControllerService": false,
             "sensitive": false,
             "dynamic": true
@@ -1241,7 +1241,7 @@
         "bundle": {
           "group": "org.apache.nifi",
           "artifact": "python-extensions",
-          "version": "0.0.17-SNAPSHOT"
+          "version": "0.0.18-SNAPSHOT"
         },
         "properties": {
           "Bot Username": "tunastreettest",
@@ -1250,10 +1250,8 @@
           "Command Prefix": "!load",
           "Watchlist Command": "!watchlist",
           "Channel": "tunastarlink",
-          "Refresh Token": "#{twitch-bot-refresh-token}",
           "Watchlist API URL": "http://cso-operator-app.default.svc.cluster.local:8090/api/streamers/watchlist",
-          "Cooldown Seconds": "10",
-          "Client Secret": "#{twitch-chat-client-secret}"
+          "Cooldown Seconds": "10"
         },
         "propertyDescriptors": {
           "Bot Username": {
@@ -3700,7 +3698,7 @@
         "labelIndex": 1,
         "zIndex": 0,
         "selectedRelationships": [
-          "matrix"
+          "matrix-screen1"
         ],
         "backPressureObjectThreshold": 10000,
         "backPressureDataSizeThreshold": "1 GB",
