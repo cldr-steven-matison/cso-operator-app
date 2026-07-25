@@ -29,7 +29,9 @@
         "properties": {
           "Routing Strategy": "Route to Property name",
           "screen2": "${screen:equals('screen2')}",
+          "screen3": "${screen:equals('screen3')}",
           "screen1": "${screen:equals('screen1')}",
+          "screen4": "${screen:equals('screen4')}",
           "matrix": "${screen:equals('matrix')}"
         },
         "propertyDescriptors": {
@@ -47,9 +49,23 @@
             "sensitive": false,
             "dynamic": true
           },
+          "screen3": {
+            "name": "screen3",
+            "displayName": "screen3",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": true
+          },
           "screen1": {
             "name": "screen1",
             "displayName": "screen1",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": true
+          },
+          "screen4": {
+            "name": "screen4",
+            "displayName": "screen4",
             "identifiesControllerService": false,
             "sensitive": false,
             "dynamic": true
@@ -230,6 +246,335 @@
           "Request Body Enabled": "true",
           "OAuth2 Access Token Refresh Strategy": "ON_TOKEN_EXPIRATION",
           "HTTP URL": "http://10.244.2.115:8082/streamChatListener",
+          "Request OAuth2 Access Token Provider": null,
+          "Socket Idle Timeout": "5 mins",
+          "Response Redirects Enabled": "True",
+          "Socket Write Timeout": "15 secs",
+          "Request Header Attributes Pattern": null,
+          "Response FlowFile Naming Strategy": "RANDOM",
+          "Response Cache Enabled": "false",
+          "Request Date Header Enabled": "True",
+          "Request Failure Penalization Enabled": "false",
+          "Response Body Attribute Size": "256",
+          "SSL Context Service": null,
+          "Response Generation Required": "false",
+          "Request User-Agent": null,
+          "Response Header Request Attributes Enabled": "false",
+          "HTTP Method": "POST",
+          "Request Username": null,
+          "Request Content-Type": "${mime.type}",
+          "Response Body Attribute Name": null,
+          "Request Digest Authentication Enabled": "false",
+          "Request Multipart Form-Data Name": null,
+          "Response Cache Size": "10MB",
+          "Response Body Ignored": "false"
+        },
+        "propertyDescriptors": {
+          "Request Content-Encoding": {
+            "name": "Request Content-Encoding",
+            "displayName": "Request Content-Encoding",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "proxy-configuration-service": {
+            "name": "proxy-configuration-service",
+            "displayName": "Proxy Configuration Service",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Multipart Form-Data Filename Enabled": {
+            "name": "Request Multipart Form-Data Filename Enabled",
+            "displayName": "Request Multipart Form-Data Filename Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Chunked Transfer-Encoding Enabled": {
+            "name": "Request Chunked Transfer-Encoding Enabled",
+            "displayName": "Request Chunked Transfer-Encoding Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Header Request Attributes Prefix": {
+            "name": "Response Header Request Attributes Prefix",
+            "displayName": "Response Header Request Attributes Prefix",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "HTTP/2 Disabled": {
+            "name": "HTTP/2 Disabled",
+            "displayName": "HTTP/2 Disabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Connection Timeout": {
+            "name": "Connection Timeout",
+            "displayName": "Connection Timeout",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Cookie Strategy": {
+            "name": "Response Cookie Strategy",
+            "displayName": "Response Cookie Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Password": {
+            "name": "Request Password",
+            "displayName": "Request Password",
+            "identifiesControllerService": false,
+            "sensitive": true,
+            "dynamic": false
+          },
+          "Socket Read Timeout": {
+            "name": "Socket Read Timeout",
+            "displayName": "Socket Read Timeout",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Socket Idle Connections": {
+            "name": "Socket Idle Connections",
+            "displayName": "Socket Idle Connections",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Body Enabled": {
+            "name": "Request Body Enabled",
+            "displayName": "Request Body Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "OAuth2 Access Token Refresh Strategy": {
+            "name": "OAuth2 Access Token Refresh Strategy",
+            "displayName": "OAuth2 Access Token Refresh Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "HTTP URL": {
+            "name": "HTTP URL",
+            "displayName": "HTTP URL",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request OAuth2 Access Token Provider": {
+            "name": "Request OAuth2 Access Token Provider",
+            "displayName": "Request OAuth2 Access Token Provider",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Socket Idle Timeout": {
+            "name": "Socket Idle Timeout",
+            "displayName": "Socket Idle Timeout",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Redirects Enabled": {
+            "name": "Response Redirects Enabled",
+            "displayName": "Response Redirects Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Socket Write Timeout": {
+            "name": "Socket Write Timeout",
+            "displayName": "Socket Write Timeout",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Header Attributes Pattern": {
+            "name": "Request Header Attributes Pattern",
+            "displayName": "Request Header Attributes Pattern",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response FlowFile Naming Strategy": {
+            "name": "Response FlowFile Naming Strategy",
+            "displayName": "Response FlowFile Naming Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Cache Enabled": {
+            "name": "Response Cache Enabled",
+            "displayName": "Response Cache Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Date Header Enabled": {
+            "name": "Request Date Header Enabled",
+            "displayName": "Request Date Header Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Failure Penalization Enabled": {
+            "name": "Request Failure Penalization Enabled",
+            "displayName": "Request Failure Penalization Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Body Attribute Size": {
+            "name": "Response Body Attribute Size",
+            "displayName": "Response Body Attribute Size",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "SSL Context Service": {
+            "name": "SSL Context Service",
+            "displayName": "SSL Context Service",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Generation Required": {
+            "name": "Response Generation Required",
+            "displayName": "Response Generation Required",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request User-Agent": {
+            "name": "Request User-Agent",
+            "displayName": "Request User-Agent",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Header Request Attributes Enabled": {
+            "name": "Response Header Request Attributes Enabled",
+            "displayName": "Response Header Request Attributes Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "HTTP Method": {
+            "name": "HTTP Method",
+            "displayName": "HTTP Method",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Username": {
+            "name": "Request Username",
+            "displayName": "Request Username",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Content-Type": {
+            "name": "Request Content-Type",
+            "displayName": "Request Content-Type",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Body Attribute Name": {
+            "name": "Response Body Attribute Name",
+            "displayName": "Response Body Attribute Name",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Digest Authentication Enabled": {
+            "name": "Request Digest Authentication Enabled",
+            "displayName": "Request Digest Authentication Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Multipart Form-Data Name": {
+            "name": "Request Multipart Form-Data Name",
+            "displayName": "Request Multipart Form-Data Name",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Cache Size": {
+            "name": "Response Cache Size",
+            "displayName": "Response Cache Size",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Body Ignored": {
+            "name": "Response Body Ignored",
+            "displayName": "Response Body Ignored",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          }
+        },
+        "style": {},
+        "schedulingPeriod": "0 sec",
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": [
+          "Response",
+          "No Retry",
+          "Retry",
+          "Failure"
+        ],
+        "scheduledState": "ENABLED",
+        "retryCount": 10,
+        "retriedRelationships": [],
+        "backoffMechanism": "PENALIZE_FLOWFILE",
+        "maxBackoffPeriod": "10 mins",
+        "componentType": "PROCESSOR",
+        "groupIdentifier": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f"
+      },
+      {
+        "identifier": "208ed997-2ca0-3334-84a9-1eae806a50a9",
+        "instanceIdentifier": "96b79d60-019f-1000-ffff-ffff8ef2a828",
+        "name": "InvokeStarlinkScreen3",
+        "comments": "",
+        "position": {
+          "x": 1024.0,
+          "y": 400.0
+        },
+        "type": "org.apache.nifi.processors.standard.InvokeHTTP",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.6.0.4.3.4.0-234"
+        },
+        "properties": {
+          "Request Content-Encoding": "DISABLED",
+          "proxy-configuration-service": null,
+          "Request Multipart Form-Data Filename Enabled": "true",
+          "Request Chunked Transfer-Encoding Enabled": "false",
+          "Response Header Request Attributes Prefix": null,
+          "HTTP/2 Disabled": "False",
+          "Connection Timeout": "5 secs",
+          "Response Cookie Strategy": "DISABLED",
+          "Socket Read Timeout": "15 secs",
+          "Socket Idle Connections": "5",
+          "Request Body Enabled": "true",
+          "OAuth2 Access Token Refresh Strategy": "ON_TOKEN_EXPIRATION",
+          "HTTP URL": "http://100.110.253.66:8085/streamChatListener",
           "Request OAuth2 Access Token Provider": null,
           "Socket Idle Timeout": "5 mins",
           "Response Redirects Enabled": "True",
@@ -872,7 +1217,7 @@
         "bundle": {
           "group": "org.apache.nifi",
           "artifact": "python-extensions",
-          "version": "0.0.13-SNAPSHOT"
+          "version": "0.0.14-SNAPSHOT"
         },
         "properties": {
           "Bot Username": "tunastreettest",
@@ -960,6 +1305,335 @@
         "runDurationMillis": 0,
         "concurrentlySchedulableTaskCount": 1,
         "autoTerminatedRelationships": [],
+        "scheduledState": "ENABLED",
+        "retryCount": 10,
+        "retriedRelationships": [],
+        "backoffMechanism": "PENALIZE_FLOWFILE",
+        "maxBackoffPeriod": "10 mins",
+        "componentType": "PROCESSOR",
+        "groupIdentifier": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f"
+      },
+      {
+        "identifier": "0d1ca6e7-3782-30a4-9f65-064099686b8c",
+        "instanceIdentifier": "96b79d7f-019f-1000-0000-00007bcace40",
+        "name": "InvokeStarlinkScreen4",
+        "comments": "",
+        "position": {
+          "x": 1536.0,
+          "y": 400.0
+        },
+        "type": "org.apache.nifi.processors.standard.InvokeHTTP",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.6.0.4.3.4.0-234"
+        },
+        "properties": {
+          "Request Content-Encoding": "DISABLED",
+          "proxy-configuration-service": null,
+          "Request Multipart Form-Data Filename Enabled": "true",
+          "Request Chunked Transfer-Encoding Enabled": "false",
+          "Response Header Request Attributes Prefix": null,
+          "HTTP/2 Disabled": "False",
+          "Connection Timeout": "5 secs",
+          "Response Cookie Strategy": "DISABLED",
+          "Socket Read Timeout": "15 secs",
+          "Socket Idle Connections": "5",
+          "Request Body Enabled": "true",
+          "OAuth2 Access Token Refresh Strategy": "ON_TOKEN_EXPIRATION",
+          "HTTP URL": "http://100.110.253.66:8086/streamChatListener",
+          "Request OAuth2 Access Token Provider": null,
+          "Socket Idle Timeout": "5 mins",
+          "Response Redirects Enabled": "True",
+          "Socket Write Timeout": "15 secs",
+          "Request Header Attributes Pattern": null,
+          "Response FlowFile Naming Strategy": "RANDOM",
+          "Response Cache Enabled": "false",
+          "Request Date Header Enabled": "True",
+          "Request Failure Penalization Enabled": "false",
+          "Response Body Attribute Size": "256",
+          "SSL Context Service": null,
+          "Response Generation Required": "false",
+          "Request User-Agent": null,
+          "Response Header Request Attributes Enabled": "false",
+          "HTTP Method": "POST",
+          "Request Username": null,
+          "Request Content-Type": "${mime.type}",
+          "Response Body Attribute Name": null,
+          "Request Digest Authentication Enabled": "false",
+          "Request Multipart Form-Data Name": null,
+          "Response Cache Size": "10MB",
+          "Response Body Ignored": "false"
+        },
+        "propertyDescriptors": {
+          "Request Content-Encoding": {
+            "name": "Request Content-Encoding",
+            "displayName": "Request Content-Encoding",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "proxy-configuration-service": {
+            "name": "proxy-configuration-service",
+            "displayName": "Proxy Configuration Service",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Multipart Form-Data Filename Enabled": {
+            "name": "Request Multipart Form-Data Filename Enabled",
+            "displayName": "Request Multipart Form-Data Filename Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Chunked Transfer-Encoding Enabled": {
+            "name": "Request Chunked Transfer-Encoding Enabled",
+            "displayName": "Request Chunked Transfer-Encoding Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Header Request Attributes Prefix": {
+            "name": "Response Header Request Attributes Prefix",
+            "displayName": "Response Header Request Attributes Prefix",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "HTTP/2 Disabled": {
+            "name": "HTTP/2 Disabled",
+            "displayName": "HTTP/2 Disabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Connection Timeout": {
+            "name": "Connection Timeout",
+            "displayName": "Connection Timeout",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Cookie Strategy": {
+            "name": "Response Cookie Strategy",
+            "displayName": "Response Cookie Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Password": {
+            "name": "Request Password",
+            "displayName": "Request Password",
+            "identifiesControllerService": false,
+            "sensitive": true,
+            "dynamic": false
+          },
+          "Socket Read Timeout": {
+            "name": "Socket Read Timeout",
+            "displayName": "Socket Read Timeout",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Socket Idle Connections": {
+            "name": "Socket Idle Connections",
+            "displayName": "Socket Idle Connections",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Body Enabled": {
+            "name": "Request Body Enabled",
+            "displayName": "Request Body Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "OAuth2 Access Token Refresh Strategy": {
+            "name": "OAuth2 Access Token Refresh Strategy",
+            "displayName": "OAuth2 Access Token Refresh Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "HTTP URL": {
+            "name": "HTTP URL",
+            "displayName": "HTTP URL",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request OAuth2 Access Token Provider": {
+            "name": "Request OAuth2 Access Token Provider",
+            "displayName": "Request OAuth2 Access Token Provider",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Socket Idle Timeout": {
+            "name": "Socket Idle Timeout",
+            "displayName": "Socket Idle Timeout",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Redirects Enabled": {
+            "name": "Response Redirects Enabled",
+            "displayName": "Response Redirects Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Socket Write Timeout": {
+            "name": "Socket Write Timeout",
+            "displayName": "Socket Write Timeout",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Header Attributes Pattern": {
+            "name": "Request Header Attributes Pattern",
+            "displayName": "Request Header Attributes Pattern",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response FlowFile Naming Strategy": {
+            "name": "Response FlowFile Naming Strategy",
+            "displayName": "Response FlowFile Naming Strategy",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Cache Enabled": {
+            "name": "Response Cache Enabled",
+            "displayName": "Response Cache Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Date Header Enabled": {
+            "name": "Request Date Header Enabled",
+            "displayName": "Request Date Header Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Failure Penalization Enabled": {
+            "name": "Request Failure Penalization Enabled",
+            "displayName": "Request Failure Penalization Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Body Attribute Size": {
+            "name": "Response Body Attribute Size",
+            "displayName": "Response Body Attribute Size",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "SSL Context Service": {
+            "name": "SSL Context Service",
+            "displayName": "SSL Context Service",
+            "identifiesControllerService": true,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Generation Required": {
+            "name": "Response Generation Required",
+            "displayName": "Response Generation Required",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request User-Agent": {
+            "name": "Request User-Agent",
+            "displayName": "Request User-Agent",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Header Request Attributes Enabled": {
+            "name": "Response Header Request Attributes Enabled",
+            "displayName": "Response Header Request Attributes Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "HTTP Method": {
+            "name": "HTTP Method",
+            "displayName": "HTTP Method",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Username": {
+            "name": "Request Username",
+            "displayName": "Request Username",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Content-Type": {
+            "name": "Request Content-Type",
+            "displayName": "Request Content-Type",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Body Attribute Name": {
+            "name": "Response Body Attribute Name",
+            "displayName": "Response Body Attribute Name",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Digest Authentication Enabled": {
+            "name": "Request Digest Authentication Enabled",
+            "displayName": "Request Digest Authentication Enabled",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Request Multipart Form-Data Name": {
+            "name": "Request Multipart Form-Data Name",
+            "displayName": "Request Multipart Form-Data Name",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Cache Size": {
+            "name": "Response Cache Size",
+            "displayName": "Response Cache Size",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Response Body Ignored": {
+            "name": "Response Body Ignored",
+            "displayName": "Response Body Ignored",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          }
+        },
+        "style": {},
+        "schedulingPeriod": "0 sec",
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": [
+          "Response",
+          "No Retry",
+          "Retry",
+          "Failure"
+        ],
         "scheduledState": "ENABLED",
         "retryCount": 10,
         "retriedRelationships": [],
@@ -1624,6 +2298,146 @@
         "zIndex": 0,
         "selectedRelationships": [
           "Original"
+        ],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "1 GB",
+        "flowFileExpiration": "0 sec",
+        "prioritizers": [],
+        "bends": [],
+        "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+        "loadBalanceCompression": "DO_NOT_COMPRESS",
+        "componentType": "CONNECTION",
+        "groupIdentifier": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f"
+      },
+      {
+        "identifier": "69a25bcf-e017-3d64-8eb1-bc9351a1d560",
+        "instanceIdentifier": "96b79dec-019f-1000-0000-00006bcdd2e9",
+        "name": "InvokeStarlinkScreen4/Original/TwitchChatReplyProcessor",
+        "source": {
+          "id": "0d1ca6e7-3782-30a4-9f65-064099686b8c",
+          "type": "PROCESSOR",
+          "groupId": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f",
+          "name": "InvokeStarlinkScreen4",
+          "comments": "",
+          "instanceIdentifier": "96b79d7f-019f-1000-0000-00007bcace40"
+        },
+        "destination": {
+          "id": "92172ef2-9790-36d3-b482-e018cc091b6d",
+          "type": "PROCESSOR",
+          "groupId": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f",
+          "name": "TwitchChatReplyProcessor",
+          "comments": "",
+          "instanceIdentifier": "8b94f733-019f-1000-ffff-ffffbe4bef37"
+        },
+        "labelIndex": 1,
+        "zIndex": 0,
+        "selectedRelationships": [
+          "Original"
+        ],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "1 GB",
+        "flowFileExpiration": "0 sec",
+        "prioritizers": [],
+        "bends": [],
+        "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+        "loadBalanceCompression": "DO_NOT_COMPRESS",
+        "componentType": "CONNECTION",
+        "groupIdentifier": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f"
+      },
+      {
+        "identifier": "5c1c6499-7b82-3932-912c-a268197d52d4",
+        "instanceIdentifier": "96b79dd7-019f-1000-0000-00002e506ff3",
+        "name": "InvokeStarlinkScreen3/Original/TwitchChatReplyProcessor",
+        "source": {
+          "id": "208ed997-2ca0-3334-84a9-1eae806a50a9",
+          "type": "PROCESSOR",
+          "groupId": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f",
+          "name": "InvokeStarlinkScreen3",
+          "comments": "",
+          "instanceIdentifier": "96b79d60-019f-1000-ffff-ffff8ef2a828"
+        },
+        "destination": {
+          "id": "92172ef2-9790-36d3-b482-e018cc091b6d",
+          "type": "PROCESSOR",
+          "groupId": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f",
+          "name": "TwitchChatReplyProcessor",
+          "comments": "",
+          "instanceIdentifier": "8b94f733-019f-1000-ffff-ffffbe4bef37"
+        },
+        "labelIndex": 1,
+        "zIndex": 0,
+        "selectedRelationships": [
+          "Original"
+        ],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "1 GB",
+        "flowFileExpiration": "0 sec",
+        "prioritizers": [],
+        "bends": [],
+        "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+        "loadBalanceCompression": "DO_NOT_COMPRESS",
+        "componentType": "CONNECTION",
+        "groupIdentifier": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f"
+      },
+      {
+        "identifier": "662f9efc-26e5-385c-ba34-a13a22b200bd",
+        "instanceIdentifier": "96b79dc4-019f-1000-ffff-ffffcca21f4a",
+        "name": "RouteOnAttribute/screen4/InvokeStarlinkScreen4",
+        "source": {
+          "id": "367d2657-29c4-3bee-882b-4e6081265ac9",
+          "type": "PROCESSOR",
+          "groupId": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f",
+          "name": "RouteOnAttribute",
+          "comments": "",
+          "instanceIdentifier": "769aa5f6-019f-1000-ffff-ffff86f25859"
+        },
+        "destination": {
+          "id": "0d1ca6e7-3782-30a4-9f65-064099686b8c",
+          "type": "PROCESSOR",
+          "groupId": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f",
+          "name": "InvokeStarlinkScreen4",
+          "comments": "",
+          "instanceIdentifier": "96b79d7f-019f-1000-0000-00007bcace40"
+        },
+        "labelIndex": 1,
+        "zIndex": 0,
+        "selectedRelationships": [
+          "screen4"
+        ],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "1 GB",
+        "flowFileExpiration": "0 sec",
+        "prioritizers": [],
+        "bends": [],
+        "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+        "loadBalanceCompression": "DO_NOT_COMPRESS",
+        "componentType": "CONNECTION",
+        "groupIdentifier": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f"
+      },
+      {
+        "identifier": "c7a2f4e8-f545-38ff-9335-46f8d53ddcdc",
+        "instanceIdentifier": "96b79dab-019f-1000-ffff-ffffffab89b8",
+        "name": "RouteOnAttribute/screen3/InvokeStarlinkScreen3",
+        "source": {
+          "id": "367d2657-29c4-3bee-882b-4e6081265ac9",
+          "type": "PROCESSOR",
+          "groupId": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f",
+          "name": "RouteOnAttribute",
+          "comments": "",
+          "instanceIdentifier": "769aa5f6-019f-1000-ffff-ffff86f25859"
+        },
+        "destination": {
+          "id": "208ed997-2ca0-3334-84a9-1eae806a50a9",
+          "type": "PROCESSOR",
+          "groupId": "85f9dd77-6096-39cc-b4dc-ed4d3af4ac4f",
+          "name": "InvokeStarlinkScreen3",
+          "comments": "",
+          "instanceIdentifier": "96b79d60-019f-1000-ffff-ffff8ef2a828"
+        },
+        "labelIndex": 1,
+        "zIndex": 0,
+        "selectedRelationships": [
+          "screen3"
         ],
         "backPressureObjectThreshold": 10000,
         "backPressureDataSizeThreshold": "1 GB",
