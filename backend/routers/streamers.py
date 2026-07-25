@@ -17,7 +17,7 @@ router = APIRouter(prefix="/streamers")
 
 @router.get("/flows")
 async def flows(request: Request):
-    """NiFi status for FetchClips, ProcessClips, PublishClip."""
+    """NiFi status for FetchClips, ProcessClips, PublishClipOffPeakDay, PublishClipPeakTimeCron."""
     return await streamers.flows_state(request.app.state.http)
 
 

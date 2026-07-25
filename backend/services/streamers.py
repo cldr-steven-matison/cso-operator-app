@@ -26,7 +26,7 @@ from aiokafka.admin import AIOKafkaAdminClient
 
 from config import settings
 
-STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClip", "PublishClipPeakTimeCron")
+STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClipOffPeakDay", "PublishClipPeakTimeCron")
 
 # LiveStreamerAlert's PollTimer (GenerateFlowFile) is CRON_DRIVEN and RUNNING as
 # its normal resting state (0 0/30 20-23,0-3 * * ? as of 2026-07-23 — Steven's
