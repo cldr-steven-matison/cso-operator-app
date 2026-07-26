@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -8,7 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from config import settings
-from services import streamers
+from services import inspector, streamers
 
 router = APIRouter(prefix="/streamers")
 
@@ -286,6 +287,82 @@ async def remove_from_watchlist(body: WatchlistAdd):
 async def get_x_handle(login: str):
     """Passive catalog lookup for LiveStreamerAlert (NiFi) — X handle has no @, empty string if unknown."""
     return {"login": login, "x_handle": streamers.get_x_handle(login)}
+
+
+@router.get("/live")
+async def get_live_status(login: str, request: Request):
+    """Whether 'login' (bare Twitch login or 'kick:slug') is live right now —
+    for TwitchChatListenerProcessor's !load live-check. Side effect: if found
+    offline, also unpins it from the watch list (best-effort, no-op if it
+    wasn't on there) — !load discovering someone's offline is exactly the
+    signal the existing Twitch-only WatchlistChatJoiner prune never gets for
+    Kick entries, since it can't join Kick chat to notice on its own."""
+    live = await streamers.is_streamer_live(request.app.state.http, login)
+    removed = False
+    if not live:
+        before = streamers.get_watchlist()
+        streamers.remove_from_watchlist(login)
+        removed = login not in streamers.get_watchlist() and login in before
+    return {"login": login, "live": live, "removed_from_watchlist": removed}
+
+
+@router.get("/live-bulk")
+async def get_live_status_bulk(logins: str, request: Request):
+    """Live status for several 'login'/'kick:slug' entries at once, comma-separated —
+    pure read, no watchlist side effect (unlike /live). For the watchlist UI's
+    online/offline pills, which shouldn't unpin anyone just from being viewed."""
+    entries = [e for e in logins.split(",") if e.strip()]
+    results = await asyncio.gather(
+        *(streamers.is_streamer_live(request.app.state.http, e) for e in entries)
+    )
+    return {"statuses": dict(zip(entries, results))}
+
+
+@router.get("/live-now")
+async def live_now(request: Request):
+    """Every roster entry (Twitch + Kick) that's live right now — for the
+    Inspector's 'Live Now' picker."""
+    return {"live": await inspector.list_live_now(request.app.state.http)}
+
+
+@router.get("/inspect")
+async def inspect_streamer(login: str, request: Request, clip_limit: int = 12):
+    """Live status + recent clips (metadata only) + alt-platform check — for
+    the Inspector sub-page. Historical/fast, no chat capture (see
+    /inspect/chat on the Users/Bots page for that). Read-only, never touches
+    the watchlist or fetch pipeline."""
+    clip_limit = max(1, min(clip_limit, 30))
+    return await inspector.inspect_streamer(request.app.state.http, login, clip_limit)
+
+
+@router.get("/inspect/chat")
+async def inspect_chat(login: str, request: Request, chat_seconds: int = 25):
+    """Who's actually in a streamer's chat right now, bots flagged separately —
+    for the Users/Bots page. Read-only, offline streamers skip capture."""
+    chat_seconds = max(10, min(chat_seconds, 60))
+    return await inspector.inspect_chat(request.app.state.http, login, chat_seconds)
+
+
+class QueueClipRequest(BaseModel):
+    platform: str  # "twitch" or "kick"
+    streamer: str
+    clip_id: str
+    url: str
+    thumbnail_url: str = ""
+    title: str = ""
+    view_count: int = 0
+    created_at: str = ""
+
+
+@router.post("/inspect/queue-clip")
+async def queue_specific_clip(body: QueueClipRequest, request: Request):
+    """Download + process one manually-picked clip from the Inspector straight
+    into the normal new_clips pipeline, bypassing the automated 45-90s duration
+    filter — for clips (e.g. a viral one) the batch fetch would never pick up."""
+    return await inspector.queue_specific_clip(
+        request.app.state.http, body.platform, body.streamer, body.clip_id,
+        body.url, body.thumbnail_url, body.title, body.view_count, body.created_at,
+    )
 
 
 # ── Fetch mode ────────────────────────────────────────────────────────────────

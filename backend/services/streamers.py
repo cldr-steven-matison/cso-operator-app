@@ -616,6 +616,40 @@ async def _get_kick_clips(
     return sorted(valid, key=lambda c: c.get("view_count", 0), reverse=True)
 
 
+async def is_streamer_live(client: httpx.AsyncClient, entry: str) -> bool:
+    """True if 'entry' (bare Twitch login or 'kick:slug') is live right now.
+
+    Used by TwitchChatListenerProcessor's !load live-check so the bot can reply
+    instead of silently no-op-ing when the target isn't actually streaming.
+    Any lookup failure (API error, unresolvable channel) returns False rather
+    than raising, since the caller's fallback is just "not live"."""
+    platform, name = _parse_watch_entry(entry)
+    try:
+        if platform == "kick":
+            token = await _kick_token_refresh(client)
+            broadcaster_id = await _get_kick_broadcaster_id(client, token, name)
+            if broadcaster_id is None:
+                return False
+            r = await client.get(
+                f"{_KICK_API_BASE}/users/livestreams",
+                params={"user_id": broadcaster_id},
+                headers=_kick_headers(token),
+                timeout=10.0,
+            )
+        else:
+            token = await _twitch_token_refresh(client)
+            r = await client.get(
+                "https://api.twitch.tv/helix/streams",
+                params={"user_login": name},
+                headers=_twitch_headers(token),
+                timeout=10.0,
+            )
+        if r.status_code != 200:
+            return False
+        return bool(r.json().get("data"))
+    except Exception:
+        return False
+
 
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 _OVERLAY_FONT = _ASSETS_DIR / "fonts" / "DejaVuSans-Bold.ttf"

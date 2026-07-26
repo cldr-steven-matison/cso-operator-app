@@ -126,6 +126,64 @@ export type PendingClip = {
   created_at?: string;
 };
 
+export type InspectorClip = {
+  clip_id?: string;
+  title?: string;
+  duration?: number;
+  view_count?: number;
+  created_at?: string;
+  thumbnail_url?: string;
+  url?: string;
+};
+
+export type InspectorChatter = {
+  username: string;
+  message_count: number;
+  badges: string[];
+  investment_score: number;
+  samples: string[];
+  is_bot: boolean;
+};
+
+export type MessageCluster = {
+  sample_text: string;
+  distinct_senders: number;
+  total_messages: number;
+  senders: string[];
+};
+
+export type InspectorAltPlatform = {
+  platform: "twitch" | "kick";
+  exists: boolean | null;
+  live?: boolean;
+  sample_clips?: InspectorClip[];
+  error?: string;
+};
+
+export type InspectorResult = {
+  login: string;
+  platform: "twitch" | "kick";
+  live: boolean;
+  clips: InspectorClip[];
+  alt_platform: InspectorAltPlatform;
+};
+
+export type ChatInspectResult = {
+  login: string;
+  platform: "twitch" | "kick";
+  live: boolean;
+  viewer_count: number | null;
+  duration_sec: number;
+  unique_chatters: number;
+  messages_seen: number;
+  message_cap_hit: boolean;
+  bots: InspectorChatter[];
+  chatters: InspectorChatter[];
+  clusters: MessageCluster[];
+  error?: string | null;
+  note?: string | null;
+};
+
 export type PostedClip = {
   clip_id: string;
   title?: string;
@@ -268,6 +326,33 @@ export const api = {
       `/api/streamers/pending/${encodeURIComponent(clip_id)}/publish-now`,
     ),
   streamersPublished: () => jget<{ published: PostedClip[] }>("/api/streamers/published"),
+  streamersInspect: (login: string, clipLimit = 12) =>
+    jget<InspectorResult>(
+      `/api/streamers/inspect?login=${encodeURIComponent(login)}&clip_limit=${clipLimit}`,
+    ),
+  streamersInspectChat: (login: string, chatSeconds = 25) =>
+    jget<ChatInspectResult>(
+      `/api/streamers/inspect/chat?login=${encodeURIComponent(login)}&chat_seconds=${chatSeconds}`,
+    ),
+  streamersLiveBulk: (logins: string[]) =>
+    jget<{ statuses: Record<string, boolean> }>(
+      `/api/streamers/live-bulk?logins=${encodeURIComponent(logins.join(","))}`,
+    ),
+  streamersLiveNow: () => jget<{ live: string[] }>("/api/streamers/live-now"),
+  streamersQueueClip: (
+    platform: "twitch" | "kick",
+    streamer: string,
+    clip_id: string,
+    url: string,
+    thumbnail_url: string,
+    title: string,
+    view_count: number,
+    created_at: string,
+  ) =>
+    jpost<{ ok: boolean; clip_id?: string; duration?: number; error?: string }>(
+      "/api/streamers/inspect/queue-clip",
+      { platform, streamer, clip_id, url, thumbnail_url, title, view_count, created_at },
+    ),
 };
 
 async function uploadFile(url: string, file: File) {

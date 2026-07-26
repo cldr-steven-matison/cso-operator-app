@@ -9,3 +9,4 @@ sse-starlette>=2.1
 kubernetes_asyncio>=32
 tweepy>=4.14
 asyncpg>=0.29
+websockets>=13

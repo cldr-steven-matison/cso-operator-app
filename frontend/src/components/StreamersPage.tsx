@@ -3,7 +3,18 @@ import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
-import { api, type PendingClip, type PostedClip, type StreamerClip, type StreamerFlows, type StreamerTopics } from "@/lib/api";
+import {
+  api,
+  type ChatInspectResult,
+  type InspectorChatter,
+  type InspectorClip,
+  type InspectorResult,
+  type PendingClip,
+  type PostedClip,
+  type StreamerClip,
+  type StreamerFlows,
+  type StreamerTopics,
+} from "@/lib/api";
 import { TopicPeek } from "./TopicPeek";
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -523,9 +534,22 @@ function WatchList() {
   const [saving, setSaving] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [fetchMode, setFetchMode] = useState<{ mode: string; period: string }>({ mode: "recent", period: "month" });
+  const [liveStatus, setLiveStatus] = useState<Record<string, boolean>>({});
+  const [liveLoading, setLiveLoading] = useState(false);
+
+  const refreshLiveStatus = async (forLogins: string[]) => {
+    if (forLogins.length === 0) { setLiveStatus({}); return; }
+    setLiveLoading(true);
+    try {
+      const r = await api.streamersLiveBulk(forLogins);
+      setLiveStatus(r.statuses);
+    } catch {} finally {
+      setLiveLoading(false);
+    }
+  };
 
   useEffect(() => {
-    api.streamersWatchlist().then((r) => setLogins(r.logins)).catch(() => {});
+    api.streamersWatchlist().then((r) => { setLogins(r.logins); refreshLiveStatus(r.logins); }).catch(() => {});
     api.streamersFetchMode().then(setFetchMode).catch(() => {});
   }, []);
 
@@ -545,6 +569,7 @@ function WatchList() {
     try {
       const r = await api.streamersSetWatchlist(next);
       setLogins(r.logins);
+      refreshLiveStatus(r.logins);
     } finally {
       setSaving(false);
     }
@@ -556,6 +581,7 @@ function WatchList() {
     try {
       const r = await api.streamersSetWatchlist(next);
       setLogins(r.logins);
+      refreshLiveStatus(r.logins);
     } finally {
       setSaving(false);
     }
@@ -566,6 +592,7 @@ function WatchList() {
     try {
       const r = await api.streamersRotateWatchlist();
       setLogins(r.logins);
+      refreshLiveStatus(r.logins);
     } finally {
       setRotating(false);
     }
@@ -575,9 +602,14 @@ function WatchList() {
     <Card>
       <div className="flex items-center justify-between mb-3">
         <CardTitle className="mb-0">Watch List</CardTitle>
-        <Button onClick={rotate} disabled={rotating}>
-          {rotating ? "Rotating…" : "Rotate"}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button className="text-xs" onClick={() => refreshLiveStatus(logins)} disabled={liveLoading}>
+            {liveLoading ? "Checking…" : "Refresh Status"}
+          </Button>
+          <Button onClick={rotate} disabled={rotating}>
+            {rotating ? "Rotating…" : "Rotate"}
+          </Button>
+        </div>
       </div>
       <div className="space-y-3">
         <div className="flex gap-2">
@@ -629,6 +661,11 @@ function WatchList() {
                 >
                   <PlatformBadge platform={isKick ? "kick" : "twitch"} />
                   <span className="text-text">{displayName}</span>
+                  {login in liveStatus && (
+                    <Badge tone={liveStatus[login] ? "ok" : "neutral"}>
+                      {liveStatus[login] ? "LIVE" : "offline"}
+                    </Badge>
+                  )}
                   <button
                     onClick={() => remove(login)}
                     className="text-muted hover:text-bad ml-1"
@@ -679,6 +716,507 @@ function WatchList() {
   );
 }
 
+// ── Inspector ──────────────────────────────────────────────────────────────
+
+function ChatterRow({ c, rank }: { c: InspectorChatter; rank?: number }) {
+  const noBadges = !c.is_bot && c.badges.length === 0;
+  return (
+    <div className="flex items-start justify-between gap-2 border-b border-border/60 py-1.5 last:border-0">
+      <div className="min-w-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {rank !== undefined && <span className="text-[10px] text-muted font-mono w-5 shrink-0">#{rank}</span>}
+          <span className="font-mono text-sm text-text">{c.username}</span>
+          {c.badges.map((b, i) => (
+            <span key={i} className="text-[10px] px-1 py-0.5 rounded border border-border text-muted">
+              {b}
+            </span>
+          ))}
+          {noBadges && (
+            <span className="text-[10px] px-1 py-0.5 rounded border border-warn/40 text-warn" title="No badges seen — newer or low-investment account, not necessarily fake">
+              no badges
+            </span>
+          )}
+        </div>
+        {c.samples.length > 0 && (
+          <p className="text-xs text-muted truncate mt-0.5">{c.samples[0]}</p>
+        )}
+      </div>
+      <span className="text-xs text-muted shrink-0">{c.message_count} msg{c.message_count === 1 ? "" : "s"}</span>
+    </div>
+  );
+}
+
+function InspectorClipCard({
+  clip,
+  platform,
+  streamer,
+}: {
+  clip: InspectorClip;
+  platform?: "twitch" | "kick";
+  streamer?: string;
+}) {
+  const [queueState, setQueueState] = useState<"idle" | "queuing" | "queued" | "error">("idle");
+  const [queueError, setQueueError] = useState<string | null>(null);
+
+  const doQueue = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!platform || !streamer || !clip.clip_id) return;
+    setQueueState("queuing");
+    setQueueError(null);
+    try {
+      const r = await api.streamersQueueClip(
+        platform, streamer, clip.clip_id, clip.url ?? "", clip.thumbnail_url ?? "",
+        clip.title ?? "", clip.view_count ?? 0, clip.created_at ?? "",
+      );
+      if (r.ok) {
+        setQueueState("queued");
+      } else {
+        setQueueState("error");
+        setQueueError(r.error ?? "unknown error");
+      }
+    } catch (err) {
+      setQueueState("error");
+      setQueueError(String(err));
+    }
+  };
+
+  return (
+    <a
+      href={clip.url}
+      target="_blank"
+      rel="noreferrer"
+      className="border border-border rounded overflow-hidden bg-bg hover:border-accent/60 transition-colors block"
+    >
+      {clip.thumbnail_url && (
+        <img src={clip.thumbnail_url} alt={clip.title ?? ""} className="w-full aspect-video object-cover" />
+      )}
+      <div className="p-2">
+        <p className="text-xs text-text truncate">{clip.title || "(untitled)"}</p>
+        <div className="flex items-center justify-between text-[10px] text-muted mt-1">
+          <span>{clip.duration ? `${Math.round(clip.duration)}s` : "?"}</span>
+          <span>{clip.view_count ?? 0} views</span>
+        </div>
+        {platform && streamer && (
+          <Button
+            onClick={doQueue}
+            disabled={queueState === "queuing" || queueState === "queued"}
+            className="w-full mt-1.5 text-[10px] py-1"
+          >
+            {queueState === "idle" && "Queue this clip"}
+            {queueState === "queuing" && "Processing…"}
+            {queueState === "queued" && "Queued ✓"}
+            {queueState === "error" && "Failed — retry"}
+          </Button>
+        )}
+        {queueError && <p className="text-[10px] text-bad mt-1">{queueError}</p>}
+      </div>
+    </a>
+  );
+}
+
+type UsersBotsTarget = { platform: "twitch" | "kick"; login: string; nonce: number };
+
+function LiveNowPicker({ onPick }: { onPick: (platform: "twitch" | "kick", login: string) => void }) {
+  const [liveNow, setLiveNow] = useState<string[]>([]);
+  const [liveNowLoading, setLiveNowLoading] = useState(true);
+
+  const refreshLiveNow = async () => {
+    setLiveNowLoading(true);
+    try {
+      const r = await api.streamersLiveNow();
+      setLiveNow(r.live);
+    } catch {} finally {
+      setLiveNowLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshLiveNow();
+  }, []);
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between mb-3">
+        <CardTitle className="mb-0">Live Now</CardTitle>
+        <Button className="text-xs" onClick={refreshLiveNow} disabled={liveNowLoading}>
+          {liveNowLoading ? "Checking…" : "Refresh"}
+        </Button>
+      </div>
+      {liveNow.length === 0 ? (
+        <p className="text-xs text-muted">{liveNowLoading ? "Checking roster…" : "Nobody in the roster is live right now."}</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {liveNow.map((entry) => {
+            const isKick = entry.startsWith("kick:");
+            const name = isKick ? entry.slice(5) : entry;
+            return (
+              <button
+                key={entry}
+                onClick={() => onPick(isKick ? "kick" : "twitch", name)}
+                className="flex items-center gap-1.5 border border-accent/40 bg-accent/5 hover:bg-accent/15 rounded px-2 py-1 text-xs font-mono transition-colors"
+              >
+                <PlatformBadge platform={isKick ? "kick" : "twitch"} />
+                <span className="text-text">{name}</span>
+                <Badge tone="ok">LIVE</Badge>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function PlatformToggle({
+  platform,
+  onChange,
+}: {
+  platform: "twitch" | "kick";
+  onChange: (p: "twitch" | "kick") => void;
+}) {
+  return (
+    <div className="flex rounded border border-border overflow-hidden shrink-0 text-xs font-semibold">
+      <button
+        onClick={() => onChange("twitch")}
+        className={`px-2 py-1 uppercase tracking-wide transition-colors ${
+          platform === "twitch" ? "bg-purple-900 text-purple-200" : "bg-bg text-muted hover:text-text"
+        }`}
+      >
+        Twitch
+      </button>
+      <button
+        onClick={() => onChange("kick")}
+        className={`px-2 py-1 uppercase tracking-wide transition-colors border-l border-border ${
+          platform === "kick" ? "bg-green-800 text-green-200" : "bg-bg text-muted hover:text-text"
+        }`}
+      >
+        Kick
+      </button>
+    </div>
+  );
+}
+
+function LiveChannelEmbed({ platform, login }: { platform: "twitch" | "kick"; login: string }) {
+  const src =
+    platform === "twitch"
+      ? `https://player.twitch.tv/?channel=${encodeURIComponent(login)}&parent=${window.location.hostname}&muted=true`
+      : `https://player.kick.com/${encodeURIComponent(login)}`;
+  const watchUrl = platform === "twitch" ? `https://www.twitch.tv/${login}` : `https://kick.com/${login}`;
+
+  return (
+    <div className="space-y-2">
+      <div className="aspect-video w-full border border-border rounded overflow-hidden bg-black">
+        <iframe
+          src={src}
+          allow="autoplay; fullscreen"
+          className="w-full h-full"
+          title={`${login} live`}
+        />
+      </div>
+      <a href={watchUrl} target="_blank" rel="noreferrer" className="text-xs text-accent hover:underline">
+        Watch on {platform === "twitch" ? "Twitch" : "Kick"} ↗
+      </a>
+    </div>
+  );
+}
+
+function Inspector({ onOpenUsersBots }: { onOpenUsersBots: (platform: "twitch" | "kick", login: string) => void }) {
+  const [login, setLogin] = useState("");
+  const [platform, setPlatform] = useState<"twitch" | "kick">("twitch");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<InspectorResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const doInspect = async (overrideBare?: string, overridePlatform?: "twitch" | "kick") => {
+    const plat = overridePlatform ?? platform;
+    const bare = (overrideBare ?? login).trim().toLowerCase();
+    if (!bare) return;
+    setLogin(bare);
+    setPlatform(plat);
+    const target = plat === "kick" ? `kick:${bare}` : bare;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const r = await api.streamersInspect(target);
+      setResult(r);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <LiveNowPicker onPick={(p, name) => doInspect(name, p)} />
+
+      <Card>
+        <CardTitle>Inspect a Streamer</CardTitle>
+        <div className="flex flex-wrap items-center gap-2">
+          <PlatformToggle platform={platform} onChange={setPlatform} />
+          <input
+            value={login}
+            onChange={(e) => setLogin(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && doInspect()}
+            placeholder={platform === "kick" ? "Kick slug (e.g. bbjess)" : "Twitch login (e.g. xqc)"}
+            className="flex-1 min-w-[160px] bg-bg border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
+          />
+          <Button onClick={() => doInspect()} disabled={loading || !login.trim()}>
+            {loading ? "Inspecting…" : "Inspect"}
+          </Button>
+        </div>
+        {error && <p className="text-xs text-bad mt-2">{error}</p>}
+      </Card>
+
+      {result && (
+        <>
+          <Card>
+            <div className="flex items-center gap-2 flex-wrap">
+              <PlatformBadge platform={result.platform} />
+              <span className="font-mono text-sm text-text">{result.login}</span>
+              <Badge tone={result.live ? "ok" : "neutral"}>{result.live ? "LIVE" : "OFFLINE"}</Badge>
+              {result.live && (
+                <Button className="text-xs ml-auto" onClick={() => onOpenUsersBots(result.platform, login)}>
+                  Open Users/Bots for this channel →
+                </Button>
+              )}
+            </div>
+          </Card>
+
+          {result.live && (
+            <Card>
+              <CardTitle>Live Channel View</CardTitle>
+              <LiveChannelEmbed platform={result.platform} login={login} />
+            </Card>
+          )}
+
+          <Card>
+            <CardTitle>Recent Clips ({result.clips.length})</CardTitle>
+            {result.clips.length === 0 ? (
+              <p className="text-xs text-muted">No clips found.</p>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                {result.clips.map((clip) => (
+                  <InspectorClipCard
+                    key={clip.clip_id}
+                    clip={clip}
+                    platform={result.platform}
+                    streamer={result.login.startsWith("kick:") ? result.login.slice(5) : result.login}
+                  />
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card>
+            <CardTitle>What's Being Said</CardTitle>
+            <p className="text-xs text-muted">
+              Not built yet — cross-referencing X/web for what other people are saying about this streamer
+              or their clips is scoped in <code>streamers-viral.md</code>, but needs real hands-on iteration
+              (no usable free search API, public-web scraping is untested). Placeholder until that lands.
+            </p>
+          </Card>
+
+          <Card>
+            <CardTitle>
+              Alt Platform Check — <span className="uppercase">{result.alt_platform.platform}</span>
+            </CardTitle>
+            {result.alt_platform.error ? (
+              <p className="text-xs text-bad">Couldn't check: {result.alt_platform.error}</p>
+            ) : result.alt_platform.exists === false ? (
+              <p className="text-xs text-muted">
+                No {result.alt_platform.platform} account found under "{login}".
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 mb-2">
+                  <PlatformBadge platform={result.alt_platform.platform} />
+                  <span className="font-mono text-sm text-text">{login}</span>
+                  <Badge tone={result.alt_platform.live ? "ok" : "neutral"}>
+                    {result.alt_platform.live ? "LIVE" : "OFFLINE"}
+                  </Badge>
+                  <span className="text-xs text-muted">also exists here</span>
+                </div>
+                {result.alt_platform.sample_clips && result.alt_platform.sample_clips.length > 0 && (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {result.alt_platform.sample_clips.map((clip) => (
+                      <InspectorClipCard
+                        key={clip.clip_id}
+                        clip={clip}
+                        platform={result.alt_platform.platform}
+                        streamer={login}
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </Card>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Users/Bots ───────────────────────────────────────────────────────────────
+
+function UsersBots({ target }: { target: UsersBotsTarget | null }) {
+  const [login, setLogin] = useState("");
+  const [platform, setPlatform] = useState<"twitch" | "kick">("twitch");
+  const [chatSeconds, setChatSeconds] = useState(25);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<ChatInspectResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const doInspectChat = async (overrideBare?: string, overridePlatform?: "twitch" | "kick") => {
+    const plat = overridePlatform ?? platform;
+    const bare = (overrideBare ?? login).trim().toLowerCase();
+    if (!bare) return;
+    setLogin(bare);
+    setPlatform(plat);
+    const t = plat === "kick" ? `kick:${bare}` : bare;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const r = await api.streamersInspectChat(t, chatSeconds);
+      setResult(r);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (target) doInspectChat(target.login, target.platform);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target?.nonce]);
+
+  return (
+    <div className="space-y-4">
+      <LiveNowPicker onPick={(p, name) => doInspectChat(name, p)} />
+
+      <Card>
+        <CardTitle>Inspect a Channel</CardTitle>
+        <div className="flex flex-wrap items-center gap-2">
+          <PlatformToggle platform={platform} onChange={setPlatform} />
+          <input
+            value={login}
+            onChange={(e) => setLogin(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && doInspectChat()}
+            placeholder={platform === "kick" ? "Kick slug (e.g. bbjess)" : "Twitch login (e.g. xqc)"}
+            className="flex-1 min-w-[160px] bg-bg border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
+          />
+          <label className="text-xs text-muted flex items-center gap-1.5">
+            Chat capture
+            <input
+              type="number"
+              min={10}
+              max={60}
+              value={chatSeconds}
+              onChange={(e) => setChatSeconds(Number(e.target.value))}
+              className="w-16 bg-bg border border-border rounded px-1.5 py-1 text-sm text-text"
+            />
+            s
+          </label>
+          <Button onClick={() => doInspectChat()} disabled={loading || !login.trim()}>
+            {loading ? `Capturing… (~${chatSeconds}s)` : "Inspect Channel"}
+          </Button>
+        </div>
+        {error && <p className="text-xs text-bad mt-2">{error}</p>}
+      </Card>
+
+      {result && (
+        <>
+          <Card>
+            <div className="flex items-center gap-2 flex-wrap mb-2">
+              <PlatformBadge platform={result.platform} />
+              <span className="font-mono text-sm text-text">{result.login}</span>
+              <Badge tone={result.live ? "ok" : "neutral"}>{result.live ? "LIVE" : "OFFLINE"}</Badge>
+            </div>
+            {result.live && (
+              <p className="text-xs text-muted">
+                {result.viewer_count !== null ? (
+                  <>
+                    <span className="text-text font-semibold">{result.viewer_count.toLocaleString()}</span> viewers
+                    reported by the platform, only <span className="text-text font-semibold">{result.unique_chatters}</span> unique
+                    account{result.unique_chatters === 1 ? "" : "s"} actually spoke in a {result.duration_sec}s window
+                    ({result.messages_seen} message{result.messages_seen === 1 ? "" : "s"} seen{result.message_cap_hit ? ", hit the capture cap" : ""}).
+                    Most viewers lurking is completely normal — this ratio alone isn't evidence of anything fake.
+                  </>
+                ) : (
+                  <>Viewer count unavailable — {result.messages_seen} message{result.messages_seen === 1 ? "" : "s"} seen from {result.unique_chatters} account{result.unique_chatters === 1 ? "" : "s"}.</>
+                )}
+              </p>
+            )}
+          </Card>
+
+          {result.clusters.length > 0 && (
+            <Card className="border-bad/40">
+              <CardTitle>
+                Possible Spam/Raid Clusters ({result.clusters.length})
+              </CardTitle>
+              <p className="text-xs text-muted mb-2">
+                Same message text sent by several different accounts — a real signature of copypasta/raid
+                spam or a bot farm, but a genuine hype wave from real fans can look identical. Treat as a
+                lead to look closer at, not a verdict.
+              </p>
+              <div className="space-y-2">
+                {result.clusters.map((cl, i) => (
+                  <div key={i} className="border border-bad/30 bg-bad/5 rounded p-2">
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="text-text">"{cl.sample_text}"</span>
+                      <span className="text-muted shrink-0 ml-2">{cl.distinct_senders} accounts, {cl.total_messages} msgs</span>
+                    </div>
+                    <p className="text-[10px] text-muted font-mono truncate">{cl.senders.join(", ")}</p>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          <Card>
+            <CardTitle>
+              Top Chatters — {result.unique_chatters} unique chatter{result.unique_chatters === 1 ? "" : "s"}
+              {result.bots.length > 0 ? `, ${result.bots.length} bot${result.bots.length === 1 ? "" : "s"}` : ""}
+            </CardTitle>
+            {result.note && <p className="text-xs text-muted mb-2">{result.note}</p>}
+            {result.error && <p className="text-xs text-bad mb-2">{result.error}</p>}
+            {result.bots.length > 0 && (
+              <div className="mb-3">
+                <p className="text-xs uppercase tracking-wide text-muted mb-1">Bots</p>
+                <div className="border border-warn/40 bg-warn/5 rounded p-2">
+                  {result.bots.map((c) => (
+                    <ChatterRow key={c.username} c={c} />
+                  ))}
+                </div>
+              </div>
+            )}
+            {result.chatters.length > 0 && (
+              <div>
+                <p className="text-xs uppercase tracking-wide text-muted mb-1">
+                  Ranked by message count (top {result.chatters.length})
+                </p>
+                <div className="max-h-96 overflow-y-auto border border-border rounded p-2">
+                  {result.chatters.map((c, i) => (
+                    <ChatterRow key={c.username} c={c} rank={i + 1} />
+                  ))}
+                </div>
+              </div>
+            )}
+            {!result.note && !result.error && result.unique_chatters === 0 && (
+              <p className="text-xs text-muted">Nobody chatted during the capture window.</p>
+            )}
+          </Card>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── StreamersPage ──────────────────────────────────────────────────────────
 
 export function StreamersPage() {
@@ -695,7 +1233,8 @@ export function StreamersPage() {
   const [pendingLoading, setPendingLoading] = useState(true);
   const [posted, setPosted] = useState<PostedClip[]>([]);
   const [postedLoading, setPostedLoading] = useState(true);
-  const [view, setView] = useState<"main" | "posted">("main");
+  const [view, setView] = useState<"main" | "posted" | "inspector" | "usersbots">("main");
+  const [usersBotsTarget, setUsersBotsTarget] = useState<UsersBotsTarget | null>(null);
   const [approvingAll, setApprovingAll] = useState(false);
   const [approveAllResult, setApproveAllResult] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -868,6 +1407,18 @@ export function StreamersPage() {
         >
           Posted Clips{posted.length > 0 ? ` (${posted.length})` : ""}
         </button>
+        <button
+          onClick={() => setView("inspector")}
+          className={`px-3 py-1 border-l border-border transition-colors ${view === "inspector" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+        >
+          Inspector
+        </button>
+        <button
+          onClick={() => setView("usersbots")}
+          className={`px-3 py-1 border-l border-border transition-colors ${view === "usersbots" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+        >
+          Users/Bots
+        </button>
       </div>
 
       {view === "main" && (
@@ -1026,6 +1577,17 @@ export function StreamersPage() {
         <PostedClipsPanel posted={posted} loading={postedLoading} />
       </Card>
       )}
+
+      {view === "inspector" && (
+        <Inspector
+          onOpenUsersBots={(platform, login) => {
+            setUsersBotsTarget({ platform, login, nonce: Date.now() });
+            setView("usersbots");
+          }}
+        />
+      )}
+
+      {view === "usersbots" && <UsersBots target={usersBotsTarget} />}
 
     </div>
   );
