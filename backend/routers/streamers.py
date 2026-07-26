@@ -33,6 +33,10 @@ async def flow_start(name: str, request: Request):
 @router.post("/flows/{name}/stop")
 async def flow_stop(name: str, request: Request):
     try:
+        if name == "FetchClips":
+            # Asymmetric with start: only pause the GenerateFlowFile timer so an
+            # in-flight fetch isn't cut off mid-run, not the whole PG.
+            return await streamers.stop_fetch_clips_generator(request.app.state.http)
         return await streamers.flow_set_state(request.app.state.http, name, running=False)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

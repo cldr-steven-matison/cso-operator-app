@@ -237,6 +237,24 @@ async def _pg_state(client: httpx.AsyncClient, pg_id: str) -> str:
         return "UNKNOWN"
 
 
+async def _fetch_clips_state(client: httpx.AsyncClient, pg_id: str) -> str:
+    """FetchClips' Stop only stops its GenerateFlowFile timer (see
+    stop_fetch_clips_generator), not the whole PG -- so "state" here has to
+    mean that processor's state specifically, not the generic any-processor-
+    running heuristic _pg_state() uses (which would still say RUNNING with
+    InvokeHTTP up and the timer stopped, making a successful Stop look like
+    it did nothing)."""
+    from services.nifi import _get
+    try:
+        data = await _get(client, f"/process-groups/{pg_id}/processors")
+        for p in data.get("processors", []):
+            if p.get("component", {}).get("name") == "GenerateFlowFile":
+                return p["component"].get("state", "UNKNOWN")
+        return "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
+
 async def flows_state(client: httpx.AsyncClient) -> dict:
     try:
         groups = await _resolve_streamer_groups(client)
@@ -246,7 +264,11 @@ async def flows_state(client: httpx.AsyncClient) -> dict:
     states: dict[str, dict] = {}
     if groups:
         results = await asyncio.gather(
-            *(_pg_state(client, pg["id"]) for pg in groups.values()),
+            *(
+                _fetch_clips_state(client, pg["id"]) if name == "FetchClips"
+                else _pg_state(client, pg["id"])
+                for name, pg in groups.items()
+            ),
             return_exceptions=True,
         )
         for (name, pg), st in zip(groups.items(), results):
@@ -273,6 +295,20 @@ async def flow_set_state(client: httpx.AsyncClient, name: str, running: bool) ->
         "disconnectedNodeAcknowledged": False,
     }
     return await _put(client, f"/flow/process-groups/{pg['id']}", body)
+
+
+async def stop_fetch_clips_generator(client: httpx.AsyncClient) -> dict:
+    """Stop only FetchClips' GenerateFlowFile head processor, leaving the rest of
+    the PG (InvokeHTTP etc.) running so an in-flight fetch isn't cut off mid-run.
+    Telegram's 'stop' asymmetric with 'start', which still starts the whole PG."""
+    groups = await _resolve_streamer_groups(client)
+    if "FetchClips" not in groups:
+        raise ValueError("Flow 'FetchClips' not yet installed — run scripts/setup-streamers-flows.py first")
+    pg_id = groups["FetchClips"]["id"]
+    processor = await _find_processor(client, pg_id, "GenerateFlowFile")
+    if processor is None:
+        raise ValueError("GenerateFlowFile processor not found in FetchClips")
+    return await _set_processor_state(client, processor, running=False)
 
 
 async def _find_pg_by_name(client: httpx.AsyncClient, target_name: str) -> dict | None:
@@ -369,7 +405,7 @@ async def run_live_streamer_alert_once(client: httpx.AsyncClient) -> dict:
 # else silently lands in its auto-terminated 'unmatched' relationship with no
 # error surfaced back here, so the allow-list below is load-bearing, not just
 # validation.
-TRIGGER_REQUESTS = ("LiveStreamerAlert", "FetchClips", "PublishClip")
+TRIGGER_REQUESTS = ("LiveStreamerAlert", "FetchClips", "PublishClip", "PostWatchList")
 
 
 async def trigger_flow(client: httpx.AsyncClient, request_name: str) -> dict:
@@ -1620,6 +1656,19 @@ _CAPTION_OPENER_STYLES = [
     "a callout to chat/viewers about what {name} just pulled, framed as disbelief or hype",
 ]
 
+# First-person "Tuna is watching" framing line prepended ahead of the reaction
+# body (see _CAPTION_OPENER_STYLES above for that part) — always emoji-led per
+# Steven's explicit ask, one random pick per post so it doesn't read as a
+# templated bot. Modeled directly on his own real posted examples.
+_WATCHING_INTROS = [
+    "🎞️ Hot off the press, clipped:",
+    "📺 I just joined {name}'s live stream, watching now, here's a clip you should watch:",
+    "🔴 Watching {name} live right now, come join us! If you can't, you just missed this:",
+    "🎬 Caught this live from {name}, had to share:",
+    "👀 Currently watching {name} — check this out:",
+    "⚡ Live with {name} right now, here's what just happened:",
+]
+
 # A run of the same short substring repeated many times in a row — the
 # degenerate "zerszerszerszers..." decoding failure mode small models can fall into.
 _REPETITION_RE = re.compile(r'(.{2,20}?)\1{4,}', flags=re.DOTALL)
@@ -1895,7 +1944,10 @@ async def process_clip(clip: dict) -> dict:
                             break
                         else:
                             x_handle = get_x_handle(clip.get("streamer", ""))
-                            caption = _build_tweet(cleaned, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle)
+                            intro = random.choice(_WATCHING_INTROS).format(name=streamer_name)
+                            caption = _build_tweet(
+                                f"{intro}\n\n{cleaned}", clip.get("source", "twitch"), clip.get("streamer", ""), x_handle
+                            )
                             error = ""
                             break
                     else:

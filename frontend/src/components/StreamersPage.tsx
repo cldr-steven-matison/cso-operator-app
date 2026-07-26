@@ -1388,7 +1388,7 @@ export function StreamersPage() {
     };
   }, []);
 
-  const flowNames = ["FetchClips", "ProcessClips", "PublishClip"] as const;
+  const flowNames = ["FetchClips", "ProcessClips", "PublishClipOffPeakDay", "PublishClipPeakTimeCron"] as const;
   const visibleClips = clips.filter((c) => !dismissed.has(c._offset ?? -1));
 
   return (
@@ -1426,7 +1426,7 @@ export function StreamersPage() {
       {/* ── Section 1: Pipeline Status ─────────────────────────────── */}
       <Card>
         <CardTitle>Pipeline Status</CardTitle>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {flowNames.map((name) => {
             const flow = flows[name] ?? { state: "UNKNOWN" };
             return (
