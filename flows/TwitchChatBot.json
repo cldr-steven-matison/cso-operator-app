@@ -927,7 +927,7 @@
           "Socket Idle Connections": "5",
           "Request Body Enabled": "true",
           "OAuth2 Access Token Refresh Strategy": "ON_TOKEN_EXPIRATION",
-          "HTTP URL": "http://192.168.1.195:8081/streamChatListener",
+          "HTTP URL": "http://192.168.1.197:8081/streamChatListener",
           "Request OAuth2 Access Token Provider": null,
           "Socket Idle Timeout": "5 mins",
           "Response Redirects Enabled": "True",
@@ -1241,7 +1241,7 @@
         "bundle": {
           "group": "org.apache.nifi",
           "artifact": "python-extensions",
-          "version": "0.0.18-SNAPSHOT"
+          "version": "0.0.19-SNAPSHOT"
         },
         "properties": {
           "Bot Username": "tunastreettest",
@@ -1250,8 +1250,11 @@
           "Command Prefix": "!load",
           "Watchlist Command": "!watchlist",
           "Channel": "tunastarlink",
+          "Refresh Token": "#{twitch-bot-refresh-token}",
           "Watchlist API URL": "http://cso-operator-app.default.svc.cluster.local:8090/api/streamers/watchlist",
-          "Cooldown Seconds": "10"
+          "Live Check API URL": "http://cso-operator-app.default.svc.cluster.local:8090/api/streamers/live",
+          "Cooldown Seconds": "10",
+          "Client Secret": "#{twitch-chat-client-secret}"
         },
         "propertyDescriptors": {
           "Bot Username": {
@@ -1306,6 +1309,13 @@
           "Watchlist API URL": {
             "name": "Watchlist API URL",
             "displayName": "Watchlist API URL",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Live Check API URL": {
+            "name": "Live Check API URL",
+            "displayName": "Live Check API URL",
             "identifiesControllerService": false,
             "sensitive": false,
             "dynamic": false
@@ -3008,7 +3018,7 @@
           "Sender Login": "tunastreettest",
           "Broadcaster Login": "tunastarlink",
           "Matrix Message": "Matrix screensaver is loading ${display_screen}.",
-          "Message Template": "${streamer} is now showing on ${screen}.",
+          "Message Template": "${streamer} is loading on ${screen}.",
           "Client Secret": "#{twitch-chat-client-secret}",
           "Dry Run": "false"
         },
