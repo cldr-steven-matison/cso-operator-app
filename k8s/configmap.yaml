@@ -25,6 +25,9 @@ data:
   CLIP_STORAGE_PATH: "/clips"
   NEW_CLIPS_TOPIC: "new_clips"
   PROCESSED_CLIPS_TOPIC: "processed_clips"
+  # Pause the glitch-intro burn on ingested clips without touching code. Flip
+  # back to "true" to resume.
+  GLITCH_INTRO_ENABLED: "false"
   # Kick API (values injected via kubectl set env / Secret)
   KICK_CLIENT_ID: ""
   KICK_CLIENT_SECRET: ""

@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     NEW_CLIPS_TOPIC: str = "new_clips"
     PROCESSED_CLIPS_TOPIC: str = "processed_clips"
 
+    # Toggle for the glitch-intro burn in _fetch_twitch_clips/_fetch_kick_clips.
+    # Set false to pause it without touching the ffmpeg pipeline itself.
+    GLITCH_INTRO_ENABLED: bool = True
+
     # Kick API — OAuth2 client credentials
     KICK_CLIENT_ID: str = ""
     KICK_CLIENT_SECRET: str = ""

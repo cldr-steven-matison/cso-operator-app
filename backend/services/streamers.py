@@ -834,6 +834,8 @@ def _burn_glitch_intro(dest: Path, bar_h: int) -> bool:
     encoded B-frame segments produces DTS discontinuities at each splice that ffmpeg's
     own decoder tolerates (just a warning) but VLC's demuxer does not.
     """
+    if not settings.GLITCH_INTRO_ENABLED:
+        return False
     dims = _probe_video_dims(dest)
     if not dims:
         return False
