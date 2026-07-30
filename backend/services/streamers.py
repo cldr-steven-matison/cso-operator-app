@@ -47,6 +47,24 @@ LIVE_STREAMER_ALERT_POLL_PROCESSOR = "PollTimer"
 # glitch intro is burned on.
 MAX_TWEET_VIDEO_DURATION = 115.0
 
+# Fetch-time inclusion window (seconds) — a platform-reported clip outside this
+# range for its streamer is skipped before download. Defaults match each
+# platform's existing house style; per-streamer overrides exist for streamers
+# whose real clip mix doesn't fit it (confirmed live 2026-07-29: bbjess's Kick
+# clips run 15-180s+, so the 45-90s default was silently dropping most of her
+# catalog, including some that had already made it all the way through
+# transcription/captioning on an earlier attempt).
+_DEFAULT_KICK_CLIP_RANGE = (45.0, 90.0)
+_DEFAULT_TWITCH_CLIP_RANGE = (45.0, 100.0)
+_CLIP_DURATION_OVERRIDES: dict[str, tuple[float, float]] = {
+    "bbjess": (20.0, 180.0),
+}
+
+
+def _clip_duration_range(login: str, default: tuple[float, float]) -> tuple[float, float]:
+    return _CLIP_DURATION_OVERRIDES.get(login.lower(), default)
+
+
 _TWITCH_LOGINS: list[str] = [
     "xqc", "stableronaldo", "jynxzi",
     "extraemily", "theburntpeanut",
@@ -478,6 +496,7 @@ async def _get_clips(
     token: str,
     broadcaster_id: str,
     since: datetime | None,
+    login: str = "",
     top_mode: bool = False,
 ) -> list[dict]:
     """Twitch's Helix /clips returns clips in recency order, not by views, and a single
@@ -509,7 +528,8 @@ async def _get_clips(
         if not cursor:
             break
 
-    valid = [c for c in all_clips if 45 <= c.get("duration", 0) <= 100]
+    lo, hi = _clip_duration_range(login, _DEFAULT_TWITCH_CLIP_RANGE)
+    valid = [c for c in all_clips if lo <= c.get("duration", 0) <= hi]
     if top_mode:
         return sorted(valid, key=lambda c: c.get("view_count", 0), reverse=True)
     return sorted(valid, key=lambda c: c.get("duration", 0), reverse=True)
@@ -648,7 +668,8 @@ async def _get_kick_clips(
         return []
     data = r.json()
     clips = data.get("clips", data.get("data", []))
-    valid = [c for c in clips if 45 <= c.get("duration", 0) <= 90]
+    lo, hi = _clip_duration_range(slug, _DEFAULT_KICK_CLIP_RANGE)
+    valid = [c for c in clips if lo <= c.get("duration", 0) <= hi]
     return sorted(valid, key=lambda c: c.get("view_count", 0), reverse=True)
 
 
@@ -1521,7 +1542,7 @@ async def _fetch_twitch_clips(
     if not broadcaster_id:
         errors.append(f"Twitch: could not resolve broadcaster_id for {login}")
         return []
-    clips = await _get_clips(client, token, broadcaster_id, since, top_mode=top_mode)
+    clips = await _get_clips(client, token, broadcaster_id, since, login=login, top_mode=top_mode)
     result: list[dict] = []
     for clip in clips:
         if len(result) >= clip_cap:
@@ -1540,6 +1561,13 @@ async def _fetch_twitch_clips(
             if not ok:
                 errors.append(f"Twitch: download failed for {clip_id}")
                 continue
+            # Trim before burning the overlay/intro — see matching comment in
+            # _fetch_kick_clips.
+            _, _, trim_err = await asyncio.get_event_loop().run_in_executor(
+                None, _trim_if_oversized, dest
+            )
+            if trim_err:
+                errors.append(f"Twitch: trim failed for {clip_id}: {trim_err}")
             bar_h = await asyncio.get_event_loop().run_in_executor(
                 None, lambda d=dest, l=login: _burn_platform_overlay(d, "twitch", l)
             )
@@ -1549,7 +1577,7 @@ async def _fetch_twitch_clips(
         # Measure the file we actually produced rather than trusting the platform's
         # self-reported duration — the API value predates our overlay/intro burn and
         # can drift arbitrarily far from reality (e.g. the source download itself
-        # coming back bloated), silently sailing through the 45-100s validity filter.
+        # coming back bloated), silently sailing through the validity filter above.
         real_duration = await asyncio.get_event_loop().run_in_executor(
             None, _probe_video_duration, dest
         )
@@ -1604,6 +1632,16 @@ async def _fetch_kick_clips(
             if not ok:
                 errors.append(f"Kick: download failed for {clip_id}")
                 continue
+            # Trim before burning the overlay/intro, not just at publish time —
+            # a per-streamer window (see _CLIP_DURATION_OVERRIDES) can admit
+            # clips well past MAX_TWEET_VIDEO_DURATION, and trimming here means
+            # the reviewer previews the same cut that will actually post instead
+            # of getting silently re-cut later.
+            _, _, trim_err = await asyncio.get_event_loop().run_in_executor(
+                None, _trim_if_oversized, dest
+            )
+            if trim_err:
+                errors.append(f"Kick: trim failed for {clip_id}: {trim_err}")
             bar_h = await asyncio.get_event_loop().run_in_executor(
                 None, lambda d=dest, l=login: _burn_platform_overlay(d, "kick", l)
             )
@@ -2184,9 +2222,11 @@ async def clip_queue(limit: int = 20) -> list[dict]:
 
 # ── X publish ─────────────────────────────────────────────────────────────────
 
-def _trim_if_oversized(path: Path) -> tuple[float | None, bool, str]:
-    """Probe path's real duration; if it exceeds MAX_TWEET_VIDEO_DURATION, re-encode
-    trim it in place. Returns (duration_before, trimmed, error) — error is empty
+def _trim_if_oversized(
+    path: Path, max_duration: float = MAX_TWEET_VIDEO_DURATION
+) -> tuple[float | None, bool, str]:
+    """Probe path's real duration; if it exceeds max_duration, re-encode trim it
+    in place. Returns (duration_before, trimmed, error) — error is empty
     whenever trimmed is True or no trim was needed.
 
     Re-encodes rather than -c copy: stream-copy trims can only cut at the nearest
@@ -2194,26 +2234,34 @@ def _trim_if_oversized(path: Path) -> tuple[float | None, bool, str]:
     hard limit.
     """
     duration = _probe_video_duration(path)
-    if duration is None or duration <= MAX_TWEET_VIDEO_DURATION:
+    if duration is None or duration <= max_duration:
         return duration, False, ""
     trimmed = path.with_suffix(".trimmed.mp4")
     try:
-        r = subprocess.run(
-            # x264 auto-detects thread count from the host's visible CPU count, not
-            # this pod's 1-CPU/1Gi limit (k8s/deployment.yaml) — at 24 threads on a
-            # 1920x1240 frame, per-thread encode buffers blow the memory limit and
-            # the kernel OOM-kills ffmpeg (returncode -9) within ~1s every time.
-            # Matches the same thread cap already used by _burn_platform_overlay and
-            # _burn_glitch_intro's encode_still for the identical reason.
-            ["ffmpeg", "-y", "-i", str(path), "-t", str(MAX_TWEET_VIDEO_DURATION),
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-             "-threads", "1", "-x264opts", "threads=1:sliced-threads=0",
-             "-c:a", "aac", str(trimmed)],
-            capture_output=True, timeout=90,
-        )
+        # Serialized via _overlay_lock like _burn_platform_overlay/_burn_glitch_intro —
+        # without it this can run concurrently with one of those (or another trim) on
+        # this pod's 1-CPU/1Gi limit and get OOM-killed (returncode -9). Confirmed live
+        # 2026-07-29: an unlocked trim of a 1920x1240 clip got SIGKILLed at ~77s while
+        # FetchClips was mid-burst. Timeout raised from 90s to 240s to match — at this
+        # pod's measured single-threaded veryfast encode speed (~0.6x realtime),
+        # encoding a full MAX_TWEET_VIDEO_DURATION-length output alone takes ~190s.
+        with _overlay_lock():
+            r = subprocess.run(
+                # x264 auto-detects thread count from the host's visible CPU count, not
+                # this pod's 1-CPU/1Gi limit (k8s/deployment.yaml) — at 24 threads on a
+                # 1920x1240 frame, per-thread encode buffers blow the memory limit and
+                # the kernel OOM-kills ffmpeg (returncode -9) within ~1s every time.
+                # Matches the same thread cap already used by _burn_platform_overlay and
+                # _burn_glitch_intro's encode_still for the identical reason.
+                ["ffmpeg", "-y", "-i", str(path), "-t", str(max_duration),
+                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                 "-threads", "1", "-x264opts", "threads=1:sliced-threads=0",
+                 "-c:a", "aac", str(trimmed)],
+                capture_output=True, timeout=240,
+            )
     except subprocess.TimeoutExpired as e:
         trimmed.unlink(missing_ok=True)
-        return duration, False, f"ffmpeg timed out after 90s: {(e.stderr or b'').decode(errors='replace')[-800:]}"
+        return duration, False, f"ffmpeg timed out after 240s: {(e.stderr or b'').decode(errors='replace')[-800:]}"
     out_size = trimmed.stat().st_size if trimmed.exists() else -1
     if r.returncode == 0 and trimmed.exists() and out_size > 10_000:
         trimmed.replace(path)
