@@ -1314,7 +1314,7 @@ async def publish_pending(clip_id: str) -> dict:
         result = await publish_clip(
             clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""),
             clip.get("source", ""), clip.get("streamer", ""), clip.get("url", ""),
-            clip.get("thumbnail_url", ""), clip.get("x_handle", ""),
+            clip.get("thumbnail_url", ""), clip.get("x_handle", ""), clip.get("created_at", ""),
         )
     except Exception:
         with _pending_lock():
@@ -1346,7 +1346,7 @@ async def publish_next() -> dict:
         result = await publish_clip(
             clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""),
             clip.get("source", ""), clip.get("streamer", ""), clip.get("url", ""),
-            clip.get("thumbnail_url", ""), clip.get("x_handle", ""),
+            clip.get("thumbnail_url", ""), clip.get("x_handle", ""), clip.get("created_at", ""),
         )
     except Exception:
         with _pending_lock():
@@ -1382,16 +1382,56 @@ def _clips_per_streamer_cap(num_streamers: int) -> int:
     return 1
 
 
-async def fetch_clips() -> dict:
-    """Poll Twitch and Kick for clips from the watch list, download to PVC, publish to new_clips.
+# Streamers processed per FetchClips run, rotating through the watch list one
+# (or a few) at a time instead of all of them every run. Each run's per-clip
+# ffmpeg overlay burn is serialized (see _overlay_lock), and on the pod's 1-CPU
+# limit that was pushing whole-watch-list runs well past the 15 min NiFi cron
+# interval, backing up the FetchClips->InvokeHTTP queue. Keeping batches small
+# bounds each run's wall time; the cron interval was shortened to compensate
+# so each streamer is still visited about as often overall.
+_FETCH_BATCH_SIZE = 1
 
-    Watch list entries are 'login' (Twitch) or 'kick:login' (Kick).
+
+def _fetch_rotation_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".fetch_rotation.json"
+
+
+def _next_fetch_batch(logins: list[str], batch_size: int) -> list[str]:
+    """Return the next `batch_size` logins to fetch this run and advance the
+    persisted rotation index, wrapping around the watch list.
+
+    Index is taken mod the *current* watch list length so a watch list resize
+    (add/remove/rotate) between runs can't put it out of range.
+    """
+    p = _fetch_rotation_path()
+    index = 0
+    if p.exists():
+        try:
+            index = json.loads(p.read_text()).get("index", 0)
+        except Exception:
+            index = 0
+    index %= len(logins)
+    batch = [logins[(index + i) % len(logins)] for i in range(min(batch_size, len(logins)))]
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"index": (index + batch_size) % len(logins)}))
+    return batch
+
+
+async def fetch_clips() -> dict:
+    """Poll Twitch and Kick for clips from a rotating slice of the watch list,
+    download to PVC, publish to new_clips.
+
+    Watch list entries are 'login' (Twitch) or 'kick:login' (Kick). Only
+    _FETCH_BATCH_SIZE streamers are fetched per run (see _next_fetch_batch) —
+    the clip cap below still scales off the *full* watch list so per-streamer
+    volume stays the same as before, just spread across more, smaller runs.
     """
     logins = get_watchlist()
     if not logins:
         return {"fetched": 0, "clips": [], "error": "Watch list is empty"}
 
     clip_cap = _clips_per_streamer_cap(len(logins))
+    logins = _next_fetch_batch(logins, _FETCH_BATCH_SIZE)
 
     clip_dir = Path(settings.CLIP_STORAGE_PATH)
     seen_file = clip_dir / ".seen_clips.json"
@@ -1645,11 +1685,41 @@ _URL_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-# A single hard-coded few-shot example anchors small models onto its exact sentence
-# shape across independent calls (frequency/presence penalty only affect variety
-# *within* one completion). Picking one style per request server-side, instead of
-# hoping the model varies on its own, is what actually breaks the "{name} just..."
-# default — see cso-operator-app-streamers.md for before/after examples.
+# A large pool of few-shot examples, only a random subset of which is shown per
+# call (see process_clip) — showing the SAME few-shot examples on every call
+# anchors the model onto their exact sentence shapes across independent requests,
+# which reads as repetitive/templated even with frequency/presence penalty (those
+# only affect variety *within* one completion). Placeholder names throughout —
+# never reused verbatim, purely illustrative of tone/shape.
+_CAPTION_EXAMPLES = [
+    "nobody does it like riven, the rest of this lobby should just log off 💀",
+    "kai really said 'trust me' right before eating that grenade 😭",
+    "'i got this' — kai, three seconds before absolutely not getting this 🤡",
+    "the way sable just no-scoped that and immediately started crying, we are not the same 🔥",
+    "not jay tripping over their own feet and still calling it a strat 💀",
+    "ace out here cooking everyone and acting like it's normal, humble yourself 😤",
+    "remy said 'watch this' and then immediately did not watch this 🤡",
+    "the confidence on nova walking into that ambush like nothing could go wrong, incredible 😭",
+    "blaze just hit a shot the pros can't hit and is somehow still complaining about ping 🔥",
+    "'trust the process' — jay, right before the process fell off a cliff 💀",
+    "chat, remy just talked their way out of a 1v1 they were clearly losing, absolute menace 😤",
+    "not ace calling that a clean rotation, my grandma rotates better than that 💀",
+    "the way nova celebrated before the round even ended, some people never learn 😭",
+    "blaze woke up and chose violence today, everyone else can just take the L 🔥",
+    "'i never miss' — sable, immediately missing 🤡",
+    "jay out here making decisions like it's their first day, chat is not okay 😤",
+    "the disrespect from ace not even looking at the kill feed, that's how confident they are 🔥",
+    "not remy blaming the controller for that one, we all saw it live 💀",
+    "nova said 'easy' and then it was extremely not easy, love that for us 😭",
+    "chat, blaze just did something the algorithm is going to be showing people for weeks 🔥",
+    "'no way that worked' — even ace sounds surprised at their own play 🤡",
+    "the way jay just walked past three enemies like they were furniture, unreal 💀",
+    "sable calling that a masterclass is sending me, my brother in christ that was chaos 😭",
+    "not nova rage quitting the callout mid-clip, iconic behavior honestly 🤡",
+    "ace really thinks this is normal gameplay, respectfully it is not 😤",
+    "'watch me clutch this' — remy, three deaths later, still talking 💀",
+]
+
 _CAPTION_OPENER_STYLES = [
     "a mock-shocked aside (e.g. start with 'the way {name}...' or 'not {name}...')",
     "a direct jab/roast at the streamer over what just happened",
@@ -1670,6 +1740,36 @@ _WATCHING_INTROS = [
     "👀 Currently watching {name} — check this out:",
     "⚡ Live with {name} right now, here's what just happened:",
 ]
+
+# Same first-person framing as _WATCHING_INTROS, but honest about the clip no
+# longer being live — used instead whenever the post is actually going out well
+# after capture, or the streamer isn't live anymore. Which pool gets used is
+# decided at actual publish time by _choose_intro, not baked in here at
+# process_clip() time — a clip can sit in the pending queue for hours.
+_MISSED_INTROS = [
+    "📼 Missed {name} live? Here's what happened:",
+    "🌙 Catch up on what {name} did on stream:",
+    "⏪ Watch what you missed from {name}:",
+    "🎬 In case you missed {name} live, here's the clip:",
+    "👀 Something from {name}'s stream you might've missed:",
+]
+
+# How fresh a capture has to be (relative to when it's actually posted) for a
+# _WATCHING_INTROS "live now" line to still be honest. Matched to the ~28 min
+# peak-hours publish cadence (PublishClipPeakTimeCron in streamers/StreamersApp.json)
+# so a clip published on schedule still qualifies, but one that sat through a queue
+# backlog or an off-peak gap doesn't.
+_LIVE_INTRO_MAX_MINUTES = 45.0
+
+
+def _choose_intro(streamer_name: str, is_live: bool, minutes_since_capture: float) -> str:
+    """Picks the "live now" framing only when it's still actually true — fresh
+    capture and streamer confirmed live right now — otherwise the honest "missed
+    it" framing. See publish_clip() for where this is actually called."""
+    if is_live and minutes_since_capture <= _LIVE_INTRO_MAX_MINUTES:
+        return random.choice(_WATCHING_INTROS).format(name=streamer_name)
+    return random.choice(_MISSED_INTROS).format(name=streamer_name)
+
 
 # A run of the same short substring repeated many times in a row — the
 # degenerate "zerszerszerszers..." decoding failure mode small models can fall into.
@@ -1799,6 +1899,30 @@ def _build_tweet(caption: str, source: str, streamer: str, x_handle: str = "") -
     return body + suffix
 
 
+# Matches the "\n\nTwitch streaming ..."/"\n\nKick streaming ..." suffix _build_tweet
+# appends, so _prepend_intro can trim the body instead of the suffix if needed.
+_PLATFORM_SUFFIX_RE = re.compile(r'\n\n(?:Twitch|Kick) streaming .*$', re.DOTALL)
+
+
+def _prepend_intro(intro: str, tweet_text: str) -> str:
+    """Prepend a publish-time intro line to an already-built tweet, re-trimming
+    the body (never the intro or the fixed platform suffix) if needed to stay
+    under 280 chars — tweet_text may also carry operator edits from the approval
+    UI, which this must not clobber beyond what's necessary to fit."""
+    combined = f"{intro}\n\n{tweet_text}"
+    if len(combined) <= 280:
+        return combined
+
+    m = _PLATFORM_SUFFIX_RE.search(tweet_text)
+    suffix = m.group(0) if m else ""
+    body = tweet_text[:m.start()] if m else tweet_text
+
+    max_body = max(280 - len(intro) - 2 - len(suffix), 0)
+    if len(body) > max_body:
+        body = body[:max(max_body - 1, 0)].rstrip() + "…"
+    return f"{intro}\n\n{body}{suffix}"
+
+
 async def process_clip(clip: dict) -> dict:
     """Transcribe clip audio with Whisper, generate caption with vLLM.
     Returns enriched clip dict ready to publish to processed_clips."""
@@ -1848,6 +1972,9 @@ async def process_clip(clip: dict) -> dict:
         if has_transcript:
             streamer_name = clip.get("streamer", "unknown")
             opener_style = random.choice(_CAPTION_OPENER_STYLES).format(name=streamer_name)
+            # A different random subset of the example pool per call, not the same
+            # fixed examples every time — see _CAPTION_EXAMPLES for why.
+            example_lines = "\n".join(f"- \"{ex}\"" for ex in random.sample(_CAPTION_EXAMPLES, 4))
             messages = [
                 {
                     "role": "system",
@@ -1877,11 +2004,7 @@ async def process_clip(clip: dict) -> dict:
                         "6. Under 200 characters.\n\n"
                         "Examples of the range of openers/tone to draw from (do not reuse these "
                         "verbatim, and don't let any one of them become your default template):\n"
-                        "- \"nobody does it like riven, the rest of this lobby should just log off 💀\"\n"
-                        "- \"kai really said 'trust me' right before eating that grenade 😭\"\n"
-                        "- \"'i got this' — kai, three seconds before absolutely not getting this 🤡\"\n"
-                        "- \"the way sable just no-scoped that and immediately started crying, we are "
-                        "not the same 🔥\"\n"
+                        f"{example_lines}\n"
                         "Example of what NOT to do: \"She just clutched a 1v5, how does she do it?!\" "
                         "— wrong, this guesses gender from the name instead of using it directly."
                     ),
@@ -1945,10 +2068,13 @@ async def process_clip(clip: dict) -> dict:
                                 continue
                             break
                         else:
+                            # No "watching live" intro baked in here — a clip can sit
+                            # in the pending queue for hours before it's actually
+                            # published, so whether that framing is still honest is
+                            # decided at publish time instead (see publish_clip()).
                             x_handle = get_x_handle(clip.get("streamer", ""))
-                            intro = random.choice(_WATCHING_INTROS).format(name=streamer_name)
                             caption = _build_tweet(
-                                f"{intro}\n\n{cleaned}", clip.get("source", "twitch"), clip.get("streamer", ""), x_handle
+                                cleaned, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle
                             )
                             error = ""
                             break
@@ -2154,9 +2280,29 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
 async def publish_clip(
     clip_path: str, tweet_text: str, clip_id: str = "", title: str = "",
     source: str = "", streamer: str = "", url: str = "",
-    thumbnail_url: str = "", x_handle: str = "",
+    thumbnail_url: str = "", x_handle: str = "", created_at: str = "",
 ) -> dict:
-    result = await asyncio.to_thread(_publish_sync, clip_path, tweet_text)
+    # Decided here, at the last possible moment before the actual X post, not
+    # back at process_clip() time — a clip can sit in the pending queue for
+    # hours, so "watching live now" framing baked in early can go stale. Any
+    # failure here (bad timestamp, live-check error) falls back to the honest
+    # "missed it" framing rather than risking a false live claim.
+    minutes_since_capture = float("inf")
+    if created_at:
+        try:
+            captured = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            minutes_since_capture = (datetime.now(timezone.utc) - captured).total_seconds() / 60.0
+        except Exception:
+            pass
+    is_live = False
+    if streamer:
+        entry = f"kick:{streamer}" if source == "kick" else streamer
+        async with httpx.AsyncClient(verify=settings.NIFI_VERIFY_TLS, timeout=15.0) as live_client:
+            is_live = await is_streamer_live(live_client, entry)
+    intro = _choose_intro(streamer or "them", is_live, minutes_since_capture)
+    final_text = _prepend_intro(intro, tweet_text)
+
+    result = await asyncio.to_thread(_publish_sync, clip_path, final_text)
     if result.get("ok") and clip_id:
         mark_published(
             clip_id, title, source, streamer, url, thumbnail_url, x_handle,
