@@ -718,7 +718,6 @@ _OVERLAY_LOGOS = {
 _OVERLAY_DOMAINS = {"kick": "KICK.COM", "twitch": "TWITCH.TV"}
 # Kick's cropped wordmark reads smaller than Twitch's at the same pixel height, so it gets a bigger ratio.
 _OVERLAY_LOGO_HEIGHT_RATIO = {"kick": 0.13, "twitch": 0.16}
-_OVERLAY_LOGO_Y_OFFSET = {"kick": 20, "twitch": 10}
 
 # Tiny tuna mascot, placed right before the PLATFORM.COM/HANDLE label. Sized off
 # font_size (not bar_h) so it scales with the text rather than the bar. Ratios
@@ -811,7 +810,6 @@ def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> int:
     font_size = round(height * 0.07)
     left_pad = round(width * 0.0146)
     right_pad = round(width * 0.0208)
-    logo_y_offset = _OVERLAY_LOGO_Y_OFFSET.get(source, 10)
     label = f"{_OVERLAY_DOMAINS.get(source, source.upper())}/{streamer.upper()}"
     tmp = dest.with_suffix(".overlay.mp4")
 
@@ -834,7 +832,7 @@ def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> int:
     filter_complex = (
         f"[0:v]pad=width={width}:height={new_height}:x=0:y={bar_h}:color=black[padded];"
         f"[1:v]scale=-1:{logo_h}[logo];"
-        f"[padded][logo]overlay=x={left_pad}:y=({bar_h}-overlay_h)/2+{logo_y_offset}[v1];"
+        f"[padded][logo]overlay=x={left_pad}:y=({bar_h}-overlay_h)/2[v1];"
         f"{tuna_stage}"
         f"[{text_input}]drawtext=fontfile={_OVERLAY_FONT}:text='{label}':fontcolor=white:"
         f"fontsize={font_size}:x=w-tw-{right_pad}:y={bar_h}-th-{right_pad}[vout]"
