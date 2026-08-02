@@ -23,6 +23,7 @@ from pathlib import Path
 import httpx
 from aiokafka import AIOKafkaConsumer, TopicPartition
 from aiokafka.admin import AIOKafkaAdminClient
+from PIL import ImageFont
 
 from config import settings
 
@@ -75,7 +76,7 @@ _KICK_LOGINS: list[str] = [
     "roshtein", "ac7ionman",
     "adinross", "n3on",
     "clavicular",
-    "bbjess", "whiz", "trainwreckstv",
+    "bbjess", "whiz", "rampagejackson",
 ]
 
 _watchlist: list[str] = []
@@ -719,6 +720,14 @@ _OVERLAY_DOMAINS = {"kick": "KICK.COM", "twitch": "TWITCH.TV"}
 _OVERLAY_LOGO_HEIGHT_RATIO = {"kick": 0.13, "twitch": 0.16}
 _OVERLAY_LOGO_Y_OFFSET = {"kick": 20, "twitch": 10}
 
+# Tiny tuna mascot, placed right before the PLATFORM.COM/HANDLE label. Sized off
+# font_size (not bar_h) so it scales with the text rather than the bar. Ratios
+# tuned against a mockup on DesktopShare issue #87 (Steven: "perfect, ship that").
+_TUNA_ICON = _ASSETS_DIR / "icons" / "tuna.png"
+_TUNA_ICON_HEIGHT_RATIO = 1.7
+_TUNA_ICON_GAP_RATIO = 0.4
+_TUNA_ICON_Y_NUDGE_RATIO = 0.35
+
 # Re-encoding one clip at a time keeps CPU/memory bounded under the pod's
 # 1 CPU / 1Gi limits — running several ffmpeg burns in parallel (one per
 # streamer in fetch_clips' asyncio.gather, or an ad-hoc reprocessing script
@@ -805,18 +814,36 @@ def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> int:
     logo_y_offset = _OVERLAY_LOGO_Y_OFFSET.get(source, 10)
     label = f"{_OVERLAY_DOMAINS.get(source, source.upper())}/{streamer.upper()}"
     tmp = dest.with_suffix(".overlay.mp4")
+
+    # Tuna mascot goes right before the label, sized/gapped off font_size so it
+    # tracks the label's actual rendered width (varies with streamer name
+    # length) instead of a fixed offset that would drift for short/long names.
+    inputs = ["-i", str(dest), "-i", str(logo_path)]
+    tuna_stage = ""
+    text_input = "v1"
+    if _TUNA_ICON.exists():
+        label_w = round(ImageFont.truetype(str(_OVERLAY_FONT), font_size).getlength(label))
+        icon_h = round(font_size * _TUNA_ICON_HEIGHT_RATIO)
+        icon_gap = round(font_size * _TUNA_ICON_GAP_RATIO)
+        icon_y = round((bar_h - icon_h) / 2) + round(font_size * _TUNA_ICON_Y_NUDGE_RATIO)
+        icon_left = width - right_pad - label_w - icon_gap
+        inputs += ["-i", str(_TUNA_ICON)]
+        tuna_stage = f"[2:v]scale=-1:{icon_h}[tuna];[v1][tuna]overlay=x={icon_left}-overlay_w:y={icon_y}[v2];"
+        text_input = "v2"
+
     filter_complex = (
         f"[0:v]pad=width={width}:height={new_height}:x=0:y={bar_h}:color=black[padded];"
         f"[1:v]scale=-1:{logo_h}[logo];"
         f"[padded][logo]overlay=x={left_pad}:y=({bar_h}-overlay_h)/2+{logo_y_offset}[v1];"
-        f"[v1]drawtext=fontfile={_OVERLAY_FONT}:text='{label}':fontcolor=white:"
-        f"fontsize={font_size}:x=w-tw-{right_pad}:y=({bar_h}-th)/2[vout]"
+        f"{tuna_stage}"
+        f"[{text_input}]drawtext=fontfile={_OVERLAY_FONT}:text='{label}':fontcolor=white:"
+        f"fontsize={font_size}:x=w-tw-{right_pad}:y={bar_h}-th-{right_pad}[vout]"
     )
     try:
         with _overlay_lock():
             result = subprocess.run(
                 [
-                    "ffmpeg", "-y", "-threads", "1", "-i", str(dest), "-i", str(logo_path),
+                    "ffmpeg", "-y", "-threads", "1", *inputs,
                     "-filter_complex", filter_complex,
                     "-map", "[vout]", "-map", "0:a?",
                     "-threads", "1", "-c:v", "libx264", "-preset", "veryfast",

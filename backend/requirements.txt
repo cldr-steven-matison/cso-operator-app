@@ -10,3 +10,4 @@ kubernetes_asyncio>=32
 tweepy>=4.14
 asyncpg>=0.29
 websockets>=13
+Pillow>=10.4
