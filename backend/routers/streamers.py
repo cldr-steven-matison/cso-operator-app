@@ -145,7 +145,6 @@ async def publish(body: PublishRequest):
         return await streamers.publish_clip(
             body.clip_path, body.tweet_text, body.clip_id, body.title,
             body.source, body.streamer, body.url, body.thumbnail_url, body.x_handle,
-            body.created_at,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))

@@ -1337,7 +1337,7 @@ async def publish_pending(clip_id: str) -> dict:
         result = await publish_clip(
             clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""),
             clip.get("source", ""), clip.get("streamer", ""), clip.get("url", ""),
-            clip.get("thumbnail_url", ""), clip.get("x_handle", ""), clip.get("created_at", ""),
+            clip.get("thumbnail_url", ""), clip.get("x_handle", ""),
         )
     except Exception:
         with _pending_lock():
@@ -1369,7 +1369,7 @@ async def publish_next() -> dict:
         result = await publish_clip(
             clip["clip_path"], clip["tweet_text"], clip["clip_id"], clip.get("title", ""),
             clip.get("source", ""), clip.get("streamer", ""), clip.get("url", ""),
-            clip.get("thumbnail_url", ""), clip.get("x_handle", ""), clip.get("created_at", ""),
+            clip.get("thumbnail_url", ""), clip.get("x_handle", ""),
         )
     except Exception:
         with _pending_lock():
@@ -1792,23 +1792,38 @@ _MISSED_INTROS = [
     "⏪ Watch what you missed from {name}:",
     "🎬 In case you missed {name} live, here's the clip:",
     "👀 Something from {name}'s stream you might've missed:",
+    "🕐 {name} went live earlier — here's the highlight:",
+    "📌 From {name}'s last stream, in case you weren't there:",
 ]
 
-# How fresh a capture has to be (relative to when it's actually posted) for a
-# _WATCHING_INTROS "live now" line to still be honest. Matched to the ~28 min
-# peak-hours publish cadence (PublishClipPeakTimeCron in streamers/StreamersApp.json)
-# so a clip published on schedule still qualifies, but one that sat through a queue
-# backlog or an off-peak gap doesn't.
-_LIVE_INTRO_MAX_MINUTES = 45.0
+# Straight random.choice() over a 5-7 item pool repeats noticeably within a
+# handful of posts at this account's actual cadence (a post every ~10-30 min) —
+# confirmed 2026-07-31 when the last several posts in a row all landed on one
+# of two _MISSED_INTROS lines. Tracks the last few template strings actually
+# used (pre-.format(), so different streamer names on the same template still
+# count as a repeat) and excludes them from the next pick. In-memory only
+# (not persisted) — worst case a redeploy resets it and one post might repeat,
+# which is an acceptable trade for not adding another JSON state file to the
+# non-atomic-write pile (see streamers.py module docstring).
+_RECENT_INTROS_MAX = 3
+_recent_intros: list[str] = []
 
 
-def _choose_intro(streamer_name: str, is_live: bool, minutes_since_capture: float) -> str:
-    """Picks the "live now" framing only when it's still actually true — fresh
-    capture and streamer confirmed live right now — otherwise the honest "missed
-    it" framing. See publish_clip() for where this is actually called."""
-    if is_live and minutes_since_capture <= _LIVE_INTRO_MAX_MINUTES:
-        return random.choice(_WATCHING_INTROS).format(name=streamer_name)
-    return random.choice(_MISSED_INTROS).format(name=streamer_name)
+def _choose_intro(streamer_name: str, is_live: bool) -> str:
+    """Picks the "live now" framing whenever the streamer is confirmed live at
+    actual publish time — that live check (is_streamer_live, called right
+    before this) is already ground truth, checked in real time, so it doesn't
+    matter how old the underlying clip capture is: if they're live right now,
+    "come join us" is true. Only falls back to "missed it" framing when the
+    live check says they're not live (or the check itself failed/errored —
+    is_streamer_live returns False on any error, which is the safe default
+    here too). See publish_clip() for where this is actually called."""
+    pool = _WATCHING_INTROS if is_live else _MISSED_INTROS
+    candidates = [t for t in pool if t not in _recent_intros] or pool
+    template = random.choice(candidates)
+    _recent_intros.append(template)
+    del _recent_intros[:-_RECENT_INTROS_MAX]
+    return template.format(name=streamer_name)
 
 
 # A run of the same short substring repeated many times in a row — the
@@ -2330,26 +2345,22 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
 async def publish_clip(
     clip_path: str, tweet_text: str, clip_id: str = "", title: str = "",
     source: str = "", streamer: str = "", url: str = "",
-    thumbnail_url: str = "", x_handle: str = "", created_at: str = "",
+    thumbnail_url: str = "", x_handle: str = "",
 ) -> dict:
     # Decided here, at the last possible moment before the actual X post, not
     # back at process_clip() time — a clip can sit in the pending queue for
-    # hours, so "watching live now" framing baked in early can go stale. Any
-    # failure here (bad timestamp, live-check error) falls back to the honest
-    # "missed it" framing rather than risking a false live claim.
-    minutes_since_capture = float("inf")
-    if created_at:
-        try:
-            captured = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            minutes_since_capture = (datetime.now(timezone.utc) - captured).total_seconds() / 60.0
-        except Exception:
-            pass
+    # hours, so "watching live now" framing baked in early can go stale.
+    # is_streamer_live is a real-time check made right now, so its answer is
+    # ground truth regardless of how old the underlying clip capture is. Any
+    # failure here (live-check error) falls back to False, which _choose_intro
+    # treats as the honest "missed it" framing rather than risking a false
+    # live claim.
     is_live = False
     if streamer:
         entry = f"kick:{streamer}" if source == "kick" else streamer
         async with httpx.AsyncClient(verify=settings.NIFI_VERIFY_TLS, timeout=15.0) as live_client:
             is_live = await is_streamer_live(live_client, entry)
-    intro = _choose_intro(streamer or "them", is_live, minutes_since_capture)
+    intro = _choose_intro(streamer or "them", is_live)
     final_text = _prepend_intro(intro, tweet_text)
 
     result = await asyncio.to_thread(_publish_sync, clip_path, final_text)
