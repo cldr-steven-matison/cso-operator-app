@@ -536,6 +536,8 @@ function WatchList() {
   const [fetchMode, setFetchMode] = useState<{ mode: string; period: string }>({ mode: "recent", period: "month" });
   const [liveStatus, setLiveStatus] = useState<Record<string, boolean>>({});
   const [liveLoading, setLiveLoading] = useState(false);
+  const [triggeringAlert, setTriggeringAlert] = useState(false);
+  const [triggerAlertResult, setTriggerAlertResult] = useState<string | null>(null);
 
   const refreshLiveStatus = async (forLogins: string[]) => {
     if (forLogins.length === 0) { setLiveStatus({}); return; }
@@ -595,6 +597,19 @@ function WatchList() {
       refreshLiveStatus(r.logins);
     } finally {
       setRotating(false);
+    }
+  }
+
+  async function triggerLiveStreamerAlert() {
+    setTriggeringAlert(true);
+    setTriggerAlertResult(null);
+    try {
+      await api.streamersTrigger("LiveStreamerAlert");
+      setTriggerAlertResult("Triggered LiveStreamerAlert.");
+    } catch (e) {
+      setTriggerAlertResult(`Error: ${String(e)}`);
+    } finally {
+      setTriggeringAlert(false);
     }
   }
 
@@ -709,6 +724,14 @@ function WatchList() {
                 All Time
               </button>
             </div>
+          )}
+        </div>
+        <div className="pt-2 border-t border-border flex items-center gap-3">
+          <Button className="text-xs" onClick={triggerLiveStreamerAlert} disabled={triggeringAlert}>
+            {triggeringAlert ? "Triggering…" : "Trigger LiveStreamerAlert"}
+          </Button>
+          {triggerAlertResult && (
+            <p className={`text-xs ${triggerAlertResult.startsWith("Error") ? "text-bad" : "text-accent"}`}>{triggerAlertResult}</p>
           )}
         </div>
       </div>
@@ -1237,6 +1260,8 @@ export function StreamersPage() {
   const [usersBotsTarget, setUsersBotsTarget] = useState<UsersBotsTarget | null>(null);
   const [approvingAll, setApprovingAll] = useState(false);
   const [approveAllResult, setApproveAllResult] = useState<string | null>(null);
+  const [triggering, setTriggering] = useState<string | null>(null);
+  const [triggerResult, setTriggerResult] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refreshFlows = async () => {
@@ -1304,6 +1329,20 @@ export function StreamersPage() {
 
   const dismiss = (offset: number) =>
     setDismissed((prev) => new Set(prev).add(offset));
+
+  const doTrigger = async (name: "FetchClips" | "PublishClip") => {
+    setTriggering(name);
+    setTriggerResult(null);
+    try {
+      await api.streamersTrigger(name);
+      setTriggerResult(`Triggered ${name}.`);
+      await refreshFlows();
+    } catch (e) {
+      setTriggerResult(`Error triggering ${name}: ${String(e)}`);
+    } finally {
+      setTriggering(null);
+    }
+  };
 
   const doApproveAll = async () => {
     if (visibleClips.length === 0) return;
@@ -1503,6 +1542,20 @@ export function StreamersPage() {
           <div className="flex items-center gap-2">
             <Button
               className="text-xs"
+              onClick={() => doTrigger("FetchClips")}
+              disabled={triggering !== null}
+            >
+              {triggering === "FetchClips" ? "Triggering…" : "Trigger FetchClips"}
+            </Button>
+            <Button
+              className="text-xs"
+              onClick={() => doTrigger("PublishClip")}
+              disabled={triggering !== null}
+            >
+              {triggering === "PublishClip" ? "Triggering…" : "Trigger PublishClips"}
+            </Button>
+            <Button
+              className="text-xs"
               onClick={doApproveAll}
               disabled={approvingAll || visibleClips.length === 0}
             >
@@ -1513,6 +1566,9 @@ export function StreamersPage() {
             </Button>
           </div>
         </div>
+        {triggerResult && (
+          <p className={`text-xs mb-3 ${triggerResult.startsWith("Error") ? "text-bad" : "text-accent"}`}>{triggerResult}</p>
+        )}
         {approveAllResult && (
           <p className="text-xs mb-3 text-accent">{approveAllResult}</p>
         )}

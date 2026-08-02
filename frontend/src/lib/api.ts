@@ -289,6 +289,7 @@ export const api = {
   streamersFlows: () => jget<StreamerFlows>("/api/streamers/flows"),
   streamersFlowStart: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/start`),
   streamersFlowStop: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/stop`),
+  streamersTrigger: (name: string) => jpost<{ ok: boolean; request: string; status: number }>(`/api/streamers/flows/trigger/${encodeURIComponent(name)}`),
   streamersQueue: () => jget<StreamerClip[]>("/api/streamers/queue"),
   streamersApprove: (
     clip_path: string, tweet_text: string, clip_id?: string, title?: string,
