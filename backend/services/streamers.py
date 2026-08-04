@@ -1142,6 +1142,7 @@ _STREAMER_CATALOG: dict[str, str] = {
     "bbjess":         "bbjess",
     "whiz":           "crashoverride",
     "trainwreckstv":  "trainwreckstv",
+    "rampagejackson": "rampagejackson",
 }
 
 def get_x_handle(login: str) -> str:
