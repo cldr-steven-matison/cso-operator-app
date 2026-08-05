@@ -5,11 +5,11 @@ import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config import settings
-from services import inspector, streamers
+from services import chat_activity, inspector, streamers
 
 router = APIRouter(prefix="/streamers")
 
@@ -59,6 +59,20 @@ async def flow_trigger(name: str, request: Request):
     entry point -- name must be one of streamers.TRIGGER_REQUESTS."""
     try:
         return await streamers.trigger_flow(request.app.state.http, name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/flows/LiveStreamerAlert/refresh-oauth")
+async def live_streamer_alert_refresh_oauth(request: Request):
+    """Manual off-cycle run of the same disable/re-enable forced-token-refresh
+    start_oauth_refresh_scheduler() does daily -- for verifying the fix works
+    without waiting for the next scheduled cycle, or for an on-call to force it
+    if a token goes bad between scheduled runs."""
+    try:
+        return await streamers.refresh_live_alert_oauth_tokens(request.app.state.http)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -249,6 +263,16 @@ async def get_roster():
     return {"logins": streamers.get_roster()}
 
 
+@router.get("/discover/top")
+async def discover_top(request: Request, limit: int = 5):
+    """Top live Twitch streams not already in the known roster -- for
+    TopStreamerJoiner's presence-expansion bot. Read-only, never touches the
+    watchlist/roster itself."""
+    limit = max(1, min(limit, 20))
+    logins = await streamers.discover_top_unfollowed(request.app.state.http, limit)
+    return {"logins": logins}
+
+
 class WatchlistUpdate(BaseModel):
     logins: list[str]
 
@@ -345,6 +369,30 @@ async def inspect_chat(login: str, request: Request, chat_seconds: int = 25):
     for the Users/Bots page. Read-only, offline streamers skip capture."""
     chat_seconds = max(10, min(chat_seconds, 60))
     return await inspector.inspect_chat(request.app.state.http, login, chat_seconds)
+
+
+@router.get("/chat-activity/{login}")
+async def get_chat_activity(login: str):
+    """Latest WatchlistChatSnapshotPoller cycle + short recent history for a
+    watchlisted streamer — for the Users/Bots page's live mode. Populated by
+    the NiFi poller re-running /inspect/chat on a timer, not by this endpoint
+    itself. 404 if nothing's been recorded yet (not watchlisted, or the
+    poller hasn't run a cycle for it)."""
+    snapshot = chat_activity.get_snapshot(login)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="no chat activity recorded for this login yet")
+    return snapshot
+
+
+@router.get("/chat-activity/{login}/tail")
+async def tail_chat_activity(login: str):
+    """SSE live tail of new WatchlistChatSnapshotPoller cycles for one
+    streamer — same StreamingResponse shape as /api/kafka/tail/{topic}."""
+    async def stream():
+        async for snapshot in chat_activity.tail_streamer(login):
+            yield f"data: {json.dumps(snapshot)}\n\n".encode()
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 class QueueClipRequest(BaseModel):

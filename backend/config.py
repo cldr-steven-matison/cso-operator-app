@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     CLIP_STORAGE_PATH: str = "/clips"
     NEW_CLIPS_TOPIC: str = "new_clips"
     PROCESSED_CLIPS_TOPIC: str = "processed_clips"
+    TOPIC_CHAT_ACTIVITY: str = "twitch_chat_activity"
 
     # Toggle for the glitch-intro burn in _fetch_twitch_clips/_fetch_kick_clips.
     # Set false to pause it without touching the ffmpeg pipeline itself.

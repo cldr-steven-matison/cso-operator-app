@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
 import {
   api,
+  openSSE,
+  type ChatActivitySnapshot,
   type ChatInspectResult,
   type InspectorChatter,
   type InspectorClip,
@@ -759,6 +761,14 @@ function ChatterRow({ c, rank }: { c: InspectorChatter; rank?: number }) {
               no badges
             </span>
           )}
+          {!!c.cross_channel_count && c.cross_channel_count > 0 && (
+            <span
+              className="text-[10px] px-1 py-0.5 rounded border border-bad/40 text-bad"
+              title="Active chatter in multiple other watchlisted channels recently — a real bot-farm signal, but also just an active community member who follows several of these streamers"
+            >
+              seen in {c.cross_channel_count} other channel{c.cross_channel_count === 1 ? "" : "s"}
+            </span>
+          )}
         </div>
         {c.samples.length > 0 && (
           <p className="text-xs text-muted truncate mt-0.5">{c.samples[0]}</p>
@@ -1090,8 +1100,17 @@ function UsersBots({ target }: { target: UsersBotsTarget | null }) {
   const [platform, setPlatform] = useState<"twitch" | "kick">("twitch");
   const [chatSeconds, setChatSeconds] = useState(25);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<ChatInspectResult | null>(null);
+  const [result, setResult] = useState<ChatInspectResult | ChatActivitySnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Whether `result` is coming from WatchlistChatSnapshotPoller's continuous
+  // feed (Twitch-only, watchlisted channels) rather than a one-shot capture.
+  const [live, setLive] = useState(false);
+  const closeTail = useRef<(() => void) | null>(null);
+
+  const stopTail = () => {
+    closeTail.current?.();
+    closeTail.current = null;
+  };
 
   const doInspectChat = async (overrideBare?: string, overridePlatform?: "twitch" | "kick") => {
     const plat = overridePlatform ?? platform;
@@ -1099,10 +1118,45 @@ function UsersBots({ target }: { target: UsersBotsTarget | null }) {
     if (!bare) return;
     setLogin(bare);
     setPlatform(plat);
-    const t = plat === "kick" ? `kick:${bare}` : bare;
+    stopTail();
+    setLive(false);
     setLoading(true);
     setError(null);
     setResult(null);
+
+    // Watchlisted Twitch channels get WatchlistChatSnapshotPoller's continuous
+    // feed instead of a bounded one-shot capture. Kick isn't covered by that
+    // poller yet (same Twitch-only boundary WatchlistChatJoiner has) — always
+    // falls back to the one-shot path below.
+    if (plat === "twitch") {
+      try {
+        const wl = await api.streamersWatchlist();
+        if (wl.logins.includes(bare)) {
+          setLive(true);
+          try {
+            setResult(await api.streamersChatActivity(bare));
+          } catch {
+            // No snapshot recorded yet (poller hasn't run a cycle for this
+            // login) — still go live, the SSE tail below fills it in once
+            // the next cycle publishes.
+          }
+          closeTail.current = openSSE(
+            `/api/streamers/chat-activity/${encodeURIComponent(bare)}/tail`,
+            (_evt, data) => {
+              try {
+                setResult(JSON.parse(data) as ChatActivitySnapshot);
+              } catch {}
+            },
+          );
+          setLoading(false);
+          return;
+        }
+      } catch {
+        // Watchlist lookup failed — fall through to the one-shot path.
+      }
+    }
+
+    const t = plat === "kick" ? `kick:${bare}` : bare;
     try {
       const r = await api.streamersInspectChat(t, chatSeconds);
       setResult(r);
@@ -1117,6 +1171,8 @@ function UsersBots({ target }: { target: UsersBotsTarget | null }) {
     if (target) doInspectChat(target.login, target.platform);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target?.nonce]);
+
+  useEffect(() => stopTail, []);
 
   return (
     <div className="space-y-4">
@@ -1146,7 +1202,7 @@ function UsersBots({ target }: { target: UsersBotsTarget | null }) {
             s
           </label>
           <Button onClick={() => doInspectChat()} disabled={loading || !login.trim()}>
-            {loading ? `Capturing… (~${chatSeconds}s)` : "Inspect Channel"}
+            {loading ? (live ? "Loading…" : `Capturing… (~${chatSeconds}s)`) : "Inspect Channel"}
           </Button>
         </div>
         {error && <p className="text-xs text-bad mt-2">{error}</p>}
@@ -1159,6 +1215,16 @@ function UsersBots({ target }: { target: UsersBotsTarget | null }) {
               <PlatformBadge platform={result.platform} />
               <span className="font-mono text-sm text-text">{result.login}</span>
               <Badge tone={result.live ? "ok" : "neutral"}>{result.live ? "LIVE" : "OFFLINE"}</Badge>
+              {live && (
+                <span title="Continuously refreshed by WatchlistChatSnapshotPoller — not a one-shot capture">
+                  <Badge tone="ok">AUTO-UPDATING</Badge>
+                </span>
+              )}
+              {result.bot_flag_likely && (
+                <span title="unique_chatters is under 10% of viewer_count at real scale — a cheap secondary signal, not a verdict on its own">
+                  <Badge tone="bad">LOW ENGAGEMENT RATIO</Badge>
+                </span>
+              )}
             </div>
             {result.live && (
               <p className="text-xs text-muted">
@@ -1167,7 +1233,8 @@ function UsersBots({ target }: { target: UsersBotsTarget | null }) {
                     <span className="text-text font-semibold">{result.viewer_count.toLocaleString()}</span> viewers
                     reported by the platform, only <span className="text-text font-semibold">{result.unique_chatters}</span> unique
                     account{result.unique_chatters === 1 ? "" : "s"} actually spoke in a {result.duration_sec}s window
-                    ({result.messages_seen} message{result.messages_seen === 1 ? "" : "s"} seen{result.message_cap_hit ? ", hit the capture cap" : ""}).
+                    ({result.messages_seen} message{result.messages_seen === 1 ? "" : "s"} seen{result.message_cap_hit ? ", hit the capture cap" : ""}
+                    {result.engagement_ratio !== null ? `, ${(result.engagement_ratio * 100).toFixed(1)}% engagement ratio` : ""}).
                     Most viewers lurking is completely normal — this ratio alone isn't evidence of anything fake.
                   </>
                 ) : (

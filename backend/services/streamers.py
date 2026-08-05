@@ -12,6 +12,7 @@ import fcntl
 import glob
 import html
 import json
+import logging
 import random
 import re
 import subprocess
@@ -26,6 +27,8 @@ from aiokafka.admin import AIOKafkaAdminClient
 from PIL import ImageFont
 
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClipOffPeakDay", "PublishClipPeakTimeCron")
 
@@ -409,6 +412,133 @@ async def run_live_streamer_alert_once(client: httpx.AsyncClient) -> dict:
     return {"ok": True, "processor": LIVE_STREAMER_ALERT_POLL_PROCESSOR, "triggered": True, "restored_state": "RUNNING" if was_running else "STOPPED"}
 
 
+# ── LiveStreamerAlert OAuth2 token refresh ──────────────────────────────────
+#
+# Incident 2026-08-04: GetTwitchLiveStatus 401'd on every request for an
+# unknown number of days -- the watchlist only ever had Kick entries even
+# though several roster Twitch streamers were live. Root cause: NiFi's
+# StandardOauth2AccessTokenProvider only refetches a client_credentials token
+# once its own tracked expiry elapses; if Twitch invalidates the token early
+# (secret rotation, revocation, whatever) it keeps serving the same dead
+# token to every poll forever with no detection, since a 401 from the API
+# doesn't tell the provider "this token is bad, get a new one." Disabling
+# then re-enabling the controller service forces a fresh token fetch -- same
+# reset technique already used for LiveAlert MapCacheServer's dedup cache,
+# applied here to the OAuth2 providers instead. Doing this preemptively on a
+# schedule (see start_oauth_refresh_scheduler below) means a dead token gets
+# replaced before anyone notices the watchlist looks wrong, instead of after.
+LIVE_ALERT_OAUTH_PROVIDERS = (
+    ("Twitch OAuth2 (client_credentials)", "GetTwitchLiveStatus"),
+    ("Kick OAuth2 (client_credentials)", "GetKickLiveStatus"),
+)
+
+# Run well outside PollTimer's live-alert window (20-23,0-3 EDT, i.e.
+# 00:00-08:00 UTC covering both EDT/EST) so the brief processor stop/start
+# below never overlaps a real poll cycle.
+_OAUTH_REFRESH_HOUR_UTC = 18
+
+
+async def _find_controller_service(client: httpx.AsyncClient, pg_id: str, name: str) -> dict | None:
+    """Controller services aren't scoped to the PG that uses them -- this walks up
+    through ancestor groups too, same as NiFi's own UI dropdown does."""
+    from services.nifi import _get
+    data = await _get(client, f"/flow/process-groups/{pg_id}/controller-services")
+    for entry in data.get("controllerServices", []):
+        if entry.get("component", {}).get("name") == name:
+            return entry
+    return None
+
+
+async def _set_controller_service_state(client: httpx.AsyncClient, cs: dict, state: str) -> dict:
+    from services.nifi import _put
+    comp = cs["component"]
+    body = {"revision": cs["revision"], "component": {"id": comp["id"], "state": state}}
+    return await _put(client, f"/controller-services/{comp['id']}", body)
+
+
+async def refresh_live_alert_oauth_tokens(client: httpx.AsyncClient) -> dict:
+    """Force both LiveStreamerAlert OAuth2 providers to fetch a fresh token.
+
+    For each (controller service, dependent InvokeHTTP) pair: remember whether
+    the processor was running, disable the CS (NiFi auto-stops any processor
+    using it), re-enable it (forces a fresh client_credentials fetch), then
+    restore the processor to whatever state it was actually in -- same
+    remember-then-restore shape as run_live_streamer_alert_once, so this never
+    leaves a processor stopped if it wasn't already.
+    """
+    pg = await _find_pg_by_name(client, LIVE_STREAMER_ALERT_PG_NAME)
+    if not pg:
+        raise ValueError(f"Process group '{LIVE_STREAMER_ALERT_PG_NAME}' not found")
+
+    results: dict[str, str] = {}
+    for cs_name, proc_name in LIVE_ALERT_OAUTH_PROVIDERS:
+        cs = await _find_controller_service(client, pg["id"], cs_name)
+        proc = await _find_processor(client, pg["id"], proc_name)
+        if not cs or not proc:
+            results[cs_name] = "not_found"
+            continue
+
+        was_running = proc["component"]["state"] == "RUNNING"
+
+        await _set_controller_service_state(client, cs, "DISABLED")
+        await asyncio.sleep(2)
+
+        cs = await _find_controller_service(client, pg["id"], cs_name)
+        await _set_controller_service_state(client, cs, "ENABLED")
+        await asyncio.sleep(3)
+
+        if was_running:
+            proc = await _find_processor(client, pg["id"], proc_name)
+            if proc:
+                await _set_processor_state(client, proc, running=True)
+
+        results[cs_name] = "refreshed"
+
+    return {"ok": True, "providers": results}
+
+
+def _seconds_until_next_oauth_refresh() -> float:
+    now = datetime.now(timezone.utc)
+    target = now.replace(hour=_OAUTH_REFRESH_HOUR_UTC, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+_oauth_refresh_task: asyncio.Task | None = None
+
+
+async def start_oauth_refresh_scheduler(client: httpx.AsyncClient) -> None:
+    """Daily background loop, one cycle/day at _OAUTH_REFRESH_HOUR_UTC. Intended to
+    be run as a background task from the app's lifespan, same shape as
+    chat_activity.start_aggregator()."""
+    global _oauth_refresh_task
+    _oauth_refresh_task = asyncio.current_task()
+    try:
+        while True:
+            await asyncio.sleep(_seconds_until_next_oauth_refresh())
+            try:
+                result = await refresh_live_alert_oauth_tokens(client)
+                logger.info("oauth refresh: %s", result)
+            except Exception:
+                logger.warning("oauth refresh cycle failed", exc_info=True)
+    except asyncio.CancelledError:
+        pass
+
+
+async def stop_oauth_refresh_scheduler() -> None:
+    global _oauth_refresh_task
+    task = _oauth_refresh_task
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    _oauth_refresh_task = None
+
+
 # ── Trigger (ListenHTTP -> RouteOnAttribute) ────────────────────────────────
 #
 # StreamersApp has a single shared on-demand entry point: a ListenHTTP
@@ -707,6 +837,32 @@ async def is_streamer_live(client: httpx.AsyncClient, entry: str) -> bool:
         return bool(r.json().get("data"))
     except Exception:
         return False
+
+
+async def discover_top_unfollowed(client: httpx.AsyncClient, limit: int = 5) -> list[str]:
+    """Top live Twitch streams by viewer count (Helix's default sort when
+    called with no user_login filter) that aren't already in get_roster() --
+    for TopStreamerJoiner's chat-presence-expansion bot. Deliberately doesn't
+    touch the watchlist/roster itself; the caller (TopStreamerJoiner) just
+    joins their chat to say hi, it doesn't feed the clip-fetch pipeline the
+    way add_to_watchlist() does."""
+    token = await _twitch_token_refresh(client)
+    r = await client.get(
+        "https://api.twitch.tv/helix/streams",
+        params={"first": "100"},
+        headers=_twitch_headers(token),
+        timeout=10.0,
+    )
+    r.raise_for_status()
+    known = {e.lower() for e in get_roster()}
+    candidates: list[str] = []
+    for stream in r.json().get("data", []):
+        login = (stream.get("user_login") or "").lower()
+        if login and login not in known and login not in candidates:
+            candidates.append(login)
+        if len(candidates) >= limit:
+            break
+    return candidates
 
 
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"

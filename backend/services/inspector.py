@@ -71,6 +71,15 @@ _KNOWN_TWITCH_BOTS = {
 # isn't enough either, but the combo needed tightening after a real miss).
 _KNOWN_KICK_BOTS = {"botrix", "kickbot", "serybot", "sery_bot"}
 
+# Engagement-ratio bot-likelihood heuristic — adopted from reviewing
+# botted.wtf's published methodology (unique_chatters / viewer_count; their
+# own default flag rule is <10% engagement at >=100 concurrent viewers).
+# A cheap secondary signal on top of the per-account bot flags above — a
+# channel can have zero flagged accounts and still read as mostly-lurkers-or-
+# view-botted if the ratio is this low at real scale.
+_ENGAGEMENT_RATIO_THRESHOLD = 0.10
+_ENGAGEMENT_MIN_VIEWERS = 100
+
 
 # ── Clip listing (metadata only — no download/ffmpeg) ──────────────────────
 
@@ -475,6 +484,7 @@ async def inspect_chat(
             "viewer_count": None, "duration_sec": 0,
             "unique_chatters": 0, "messages_seen": 0, "message_cap_hit": False,
             "bots": [], "chatters": [], "clusters": [],
+            "engagement_ratio": None, "bot_flag_likely": False,
             "error": None, "note": "streamer is offline — skipped live chat capture",
         }
 
@@ -506,6 +516,16 @@ async def inspect_chat(
     humans = [c for c in chatters if not c["is_bot"]][:_TOP_CHATTERS_LIMIT]
     clusters = _find_message_clusters(chat_result.get("all_messages", []))
 
+    # unique_chatters vs viewer_count — low engagement at real scale is a cheap
+    # secondary signal on top of the per-account bot flags above (see the
+    # threshold constants' docstring near the top of this file).
+    engagement_ratio = len(chatters) / viewer_count if viewer_count else None
+    bot_flag_likely = (
+        engagement_ratio is not None
+        and viewer_count >= _ENGAGEMENT_MIN_VIEWERS
+        and engagement_ratio < _ENGAGEMENT_RATIO_THRESHOLD
+    )
+
     return {
         "login": entry,
         "platform": platform,
@@ -518,6 +538,8 @@ async def inspect_chat(
         "bots": bots,
         "chatters": humans,
         "clusters": clusters,
+        "engagement_ratio": engagement_ratio,
+        "bot_flag_likely": bot_flag_likely,
         "error": chat_result.get("error"),
         "note": chat_result.get("note"),
     }

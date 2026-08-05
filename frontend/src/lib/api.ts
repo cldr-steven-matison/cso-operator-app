@@ -143,6 +143,11 @@ export type InspectorChatter = {
   investment_score: number;
   samples: string[];
   is_bot: boolean;
+  // Only present on chat-activity snapshots (WatchlistChatSnapshotPoller) —
+  // how many *other* watchlisted channels this username has recently shown
+  // up as an active chatter in. Absent (not zero) on one-shot /inspect/chat
+  // results, which have no cross-channel visibility.
+  cross_channel_count?: number;
 };
 
 export type MessageCluster = {
@@ -180,8 +185,19 @@ export type ChatInspectResult = {
   bots: InspectorChatter[];
   chatters: InspectorChatter[];
   clusters: MessageCluster[];
+  // unique_chatters vs viewer_count heuristic — see inspector.py's threshold
+  // constants. null/false when viewer_count is unavailable.
+  engagement_ratio: number | null;
+  bot_flag_likely: boolean;
   error?: string | null;
   note?: string | null;
+};
+
+// Same shape as ChatInspectResult (WatchlistChatSnapshotPoller re-runs
+// /inspect/chat verbatim and publishes the result) plus a short recent
+// history — for the Users/Bots page's live mode on watchlisted channels.
+export type ChatActivitySnapshot = ChatInspectResult & {
+  history: ChatInspectResult[];
 };
 
 export type PostedClip = {
@@ -335,6 +351,8 @@ export const api = {
     jget<ChatInspectResult>(
       `/api/streamers/inspect/chat?login=${encodeURIComponent(login)}&chat_seconds=${chatSeconds}`,
     ),
+  streamersChatActivity: (login: string) =>
+    jget<ChatActivitySnapshot>(`/api/streamers/chat-activity/${encodeURIComponent(login)}`),
   streamersLiveBulk: (logins: string[]) =>
     jget<{ statuses: Record<string, boolean> }>(
       `/api/streamers/live-bulk?logins=${encodeURIComponent(logins.join(","))}`,

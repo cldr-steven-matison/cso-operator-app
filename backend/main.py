@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,9 +13,13 @@ from routers import efm, health, ingest, k8s, kafka, nifi, qdrant, query
 
 _enabled_modules = [m.strip() for m in settings.MODULES.split(",") if m.strip()]
 
+_chat_activity_task: asyncio.Task | None = None
+_oauth_refresh_task: asyncio.Task | None = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _chat_activity_task, _oauth_refresh_task
     app.state.http = httpx.AsyncClient(verify=settings.NIFI_VERIFY_TLS, timeout=30.0)
     # Small pool — this is a read-only, low-frequency admin query (agent-classes/agents
     # polled every 15s by one page), not app traffic.
@@ -27,7 +32,17 @@ async def lifespan(app: FastAPI):
         min_size=0,
         max_size=2,
     )
+    if "streamers" in _enabled_modules:
+        from services import chat_activity, streamers as streamers_service
+        _chat_activity_task = asyncio.create_task(chat_activity.start_aggregator())
+        _oauth_refresh_task = asyncio.create_task(streamers_service.start_oauth_refresh_scheduler(app.state.http))
     yield
+    if _chat_activity_task is not None:
+        from services import chat_activity
+        await chat_activity.stop_aggregator()
+    if _oauth_refresh_task is not None:
+        from services import streamers as streamers_service
+        await streamers_service.stop_oauth_refresh_scheduler()
     await app.state.efm_db.close()
     await app.state.http.aclose()
 
