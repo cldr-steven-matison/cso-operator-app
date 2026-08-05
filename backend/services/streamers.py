@@ -1961,6 +1961,11 @@ _CAPTION_EXAMPLES = [
     "'watch me clutch this' — remy, three deaths later, still talking 💀",
 ]
 
+# A transcript this thin gives the LLM nothing real to react to — it was
+# inventing unrelated/mean filler just to produce a caption-length response.
+# At or under this many words, quote what was actually said instead.
+_SHORT_TRANSCRIPT_WORDS = 6
+
 _CAPTION_OPENER_STYLES = [
     "a mock-shocked aside (e.g. start with 'the way {name}...' or 'not {name}...')",
     "a direct jab/roast at the streamer over what just happened",
@@ -2225,7 +2230,12 @@ async def process_clip(clip: dict) -> dict:
         # vLLM caption generation
         caption = ""
         error = ""
-        if has_transcript:
+        if has_transcript and len(transcript.split()) <= _SHORT_TRANSCRIPT_WORDS:
+            streamer_name = clip.get("streamer", "unknown")
+            x_handle = get_x_handle(clip.get("streamer", ""))
+            quoted = f'"{transcript.strip()}" — {streamer_name}'
+            caption = _build_tweet(quoted, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle)
+        elif has_transcript:
             streamer_name = clip.get("streamer", "unknown")
             opener_style = random.choice(_CAPTION_OPENER_STYLES).format(name=streamer_name)
             # A different random subset of the example pool per call, not the same
