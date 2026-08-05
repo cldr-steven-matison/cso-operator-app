@@ -13,6 +13,7 @@ import glob
 import html
 import json
 import logging
+import os
 import random
 import re
 import subprocess
@@ -99,13 +100,36 @@ _topic_stats_ts: float = 0.0
 _TOPIC_STATS_TTL = 30.0
 
 
+def _atomic_write_json(path: Path, data) -> None:
+    """Write JSON to `path` via a same-directory temp file + os.replace(), never
+    a plain write_text(). write_text() isn't atomic -- a crash mid-write (this
+    pod's ffmpeg calls are confirmed OOM-killable) can leave a torn/truncated
+    file, and every loader in this module treats a JSON-parse failure as empty
+    state, not an error, so a torn .pending_publish.json/.watchlist.json/etc.
+    silently reads back as "nothing here" instead of surfacing anything wrong.
+    os.replace() is atomic on the same filesystem, so a reader never observes a
+    half-written file. Flagged in the 2026-07-17 review, proposed then, applied
+    now. Orthogonal to _pending_lock/_overlay_lock (those serialize concurrent
+    writers; this protects a single writer against its own crash mid-write) --
+    callers that already take one of those locks should keep doing so."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data))
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp_name)
+        raise
+
+
 def _watchlist_path() -> Path:
     return Path(settings.CLIP_STORAGE_PATH) / ".watchlist.json"
 
 
 def _save_watchlist():
-    _watchlist_path().parent.mkdir(parents=True, exist_ok=True)
-    _watchlist_path().write_text(json.dumps(_watchlist))
+    _atomic_write_json(_watchlist_path(), _watchlist)
 
 
 def _init_watchlist():
@@ -1236,8 +1260,7 @@ def _load_id_set(path: Path) -> set[str]:
 
 
 def _save_id_set(path: Path, ids: set[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(sorted(ids)))
+    _atomic_write_json(path, sorted(ids))
 
 
 def _skipped_path() -> Path:
@@ -1272,8 +1295,7 @@ def get_fetch_mode() -> dict:
 
 def set_fetch_mode(mode: str, period: str) -> dict:
     data = {"mode": mode, "period": period}
-    _fetch_mode_path().parent.mkdir(parents=True, exist_ok=True)
-    _fetch_mode_path().write_text(json.dumps(data))
+    _atomic_write_json(_fetch_mode_path(), data)
     return data
 
 
@@ -1330,8 +1352,7 @@ def _load_pending() -> list[dict]:
 
 
 def _save_pending(pending: list[dict]) -> None:
-    _pending_path().parent.mkdir(parents=True, exist_ok=True)
-    _pending_path().write_text(json.dumps(pending))
+    _atomic_write_json(_pending_path(), pending)
 
 
 def mark_skipped(clip_id: str) -> None:
@@ -1363,8 +1384,7 @@ def mark_published(
             "tweet_id": tweet_id, "tweet_url": tweet_url,
             "published_at": datetime.now(timezone.utc).isoformat(),
         })
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(history[-500:]))
+        _atomic_write_json(p, history[-500:])
 
 
 def get_published_history(limit: int = 60) -> list[dict]:
@@ -1454,7 +1474,7 @@ async def backfill_metadata() -> dict:
             1 for entry in history
             if entry.get("clip_id") in by_id and _patch_missing_metadata(entry, by_id[entry["clip_id"]])
         )
-        hist_path.write_text(json.dumps(history))
+        _atomic_write_json(hist_path, history)
 
     return {
         "indexed": len(by_id),
@@ -1617,8 +1637,7 @@ def _next_fetch_batch(logins: list[str], batch_size: int) -> list[str]:
             index = 0
     index %= len(logins)
     batch = [logins[(index + i) % len(logins)] for i in range(min(batch_size, len(logins)))]
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"index": (index + batch_size) % len(logins)}))
+    _atomic_write_json(p, {"index": (index + batch_size) % len(logins)})
     return batch
 
 
@@ -1706,7 +1725,7 @@ async def fetch_clips() -> dict:
 
     if fetched:
         await _publish_clips_to_kafka(fetched)
-        seen_file.write_text(json.dumps(list(seen)))
+        _atomic_write_json(seen_file, list(seen))
 
     return {"fetched": len(fetched), "clips": [c["clip_id"] for c in fetched], "errors": errors}
 

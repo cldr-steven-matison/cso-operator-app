@@ -26,6 +26,7 @@ from typing import AsyncIterator
 from aiokafka import AIOKafkaConsumer
 
 from config import settings
+from services.streamers import _atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -104,14 +105,14 @@ def _update_chatter_index(streamer: str, snapshot: dict, ts: float) -> None:
 
 def _persist_snapshot(streamer: str, snapshot: dict) -> None:
     try:
-        _snapshot_path(streamer).write_text(json.dumps(snapshot))
+        _atomic_write_json(_snapshot_path(streamer), snapshot)
     except Exception:
         logger.warning("chat_activity: failed to persist snapshot for %s", streamer, exc_info=True)
 
 
 def _persist_index() -> None:
     try:
-        _index_path().write_text(json.dumps(_chatter_index))
+        _atomic_write_json(_index_path(), _chatter_index)
     except Exception:
         logger.warning("chat_activity: failed to persist chatter index", exc_info=True)
 

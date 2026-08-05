@@ -19,6 +19,7 @@ import httpx
 
 from config import settings
 from services.streamers import (
+    _atomic_write_json,
     _burn_glitch_intro,
     _burn_platform_overlay,
     _download_clip,
@@ -602,6 +603,6 @@ async def queue_specific_clip(
     }
     await _publish_clips_to_kafka([clip])
     seen.add(full_clip_id)
-    seen_file.write_text(json.dumps(list(seen)))
+    _atomic_write_json(seen_file, list(seen))
 
     return {"ok": True, "clip_id": full_clip_id, "duration": clip["duration"]}
