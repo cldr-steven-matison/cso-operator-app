@@ -25,7 +25,7 @@ from pathlib import Path
 import httpx
 from aiokafka import AIOKafkaConsumer, TopicPartition
 from aiokafka.admin import AIOKafkaAdminClient
-from PIL import ImageFont
+from PIL import Image, ImageFont
 
 from config import settings
 
@@ -907,6 +907,13 @@ _TUNA_ICON_HEIGHT_RATIO = 1.7
 _TUNA_ICON_GAP_RATIO = 0.4
 _TUNA_ICON_Y_NUDGE_RATIO = 0.35
 
+# Base font size ratio (fraction of clip height) — the size used for short
+# streamer names. Long names shrink down from this, never grow past it.
+_OVERLAY_FONT_SIZE_RATIO = 0.07
+# Never shrink the label past this fraction of clip height, however long the
+# name — it'd stop reading as a link at all.
+_OVERLAY_MIN_FONT_SIZE_RATIO = 0.04
+
 # Re-encoding one clip at a time keeps CPU/memory bounded under the pod's
 # 1 CPU / 1Gi limits — running several ffmpeg burns in parallel (one per
 # streamer in fetch_clips' asyncio.gather, or an ad-hoc reprocessing script
@@ -987,11 +994,41 @@ def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> int:
     bar_h = round(height * 0.19 / 2) * 2  # keep even — libx264 needs even dimensions
     new_height = height + bar_h
     logo_h = round(height * _OVERLAY_LOGO_HEIGHT_RATIO.get(source, 0.16))
-    font_size = round(height * 0.07)
     left_pad = round(width * 0.0146)
     right_pad = round(width * 0.0208)
     label = f"{_OVERLAY_DOMAINS.get(source, source.upper())}/{streamer.upper()}"
     tmp = dest.with_suffix(".overlay.mp4")
+
+    # Logo's rendered width, needed to know how much room is left for the
+    # label — scale=-1 in the filter graph derives it from logo_h the same way.
+    with Image.open(logo_path) as logo_img:
+        logo_w = round(logo_h * logo_img.width / logo_img.height)
+
+    # Shrink the font (down to a floor) if the label would otherwise run into
+    # the logo — long streamer names at the fixed base size overflowed past
+    # the available width (DesktopShare issue #135). Both the label text and
+    # the tuna icon scale ~linearly with font_size, so measuring once at the
+    # base size and scaling by the overflow ratio gets the fit right without
+    # iterating.
+    max_font_size = round(height * _OVERLAY_FONT_SIZE_RATIO)
+    min_font_size = round(height * _OVERLAY_MIN_FONT_SIZE_RATIO)
+    inter_gap = round(width * 0.02)
+    available_w = width - left_pad - logo_w - inter_gap - right_pad
+
+    label_w = round(ImageFont.truetype(str(_OVERLAY_FONT), max_font_size).getlength(label))
+    content_w = label_w
+    tuna_available = _TUNA_ICON.exists()
+    if tuna_available:
+        with Image.open(_TUNA_ICON) as tuna_img:
+            tuna_aspect = tuna_img.width / tuna_img.height
+        icon_w_at_max = round(max_font_size * _TUNA_ICON_HEIGHT_RATIO * tuna_aspect)
+        icon_gap_at_max = round(max_font_size * _TUNA_ICON_GAP_RATIO)
+        content_w += icon_w_at_max + icon_gap_at_max
+
+    font_size = max_font_size
+    if content_w > available_w > 0:
+        font_size = max(min_font_size, round(max_font_size * available_w / content_w))
+        label_w = round(ImageFont.truetype(str(_OVERLAY_FONT), font_size).getlength(label))
 
     # Tuna mascot goes right before the label, sized/gapped off font_size so it
     # tracks the label's actual rendered width (varies with streamer name
@@ -999,8 +1036,7 @@ def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> int:
     inputs = ["-i", str(dest), "-i", str(logo_path)]
     tuna_stage = ""
     text_input = "v1"
-    if _TUNA_ICON.exists():
-        label_w = round(ImageFont.truetype(str(_OVERLAY_FONT), font_size).getlength(label))
+    if tuna_available:
         icon_h = round(font_size * _TUNA_ICON_HEIGHT_RATIO)
         icon_gap = round(font_size * _TUNA_ICON_GAP_RATIO)
         icon_y = round((bar_h - icon_h) / 2) + round(font_size * _TUNA_ICON_Y_NUDGE_RATIO)
