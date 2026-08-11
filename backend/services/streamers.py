@@ -2220,6 +2220,37 @@ def _prepend_intro(intro: str, tweet_text: str) -> str:
     return f"{intro}\n\n{body}{suffix}"
 
 
+def _format_srt_timestamp(seconds: float) -> str:
+    total_ms = int(round(max(seconds, 0.0) * 1000))
+    hours, rem = divmod(total_ms, 3_600_000)
+    minutes, rem = divmod(rem, 60_000)
+    secs, ms = divmod(rem, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+
+
+def _build_srt(chunks: list[dict]) -> str:
+    """Turn Whisper's return_timestamps=True chunks ([{"text", "timestamp": (start, end)}])
+    into standard SRT. A chunk's end can be None (cut off mid-word); fall back to the
+    prior chunk's end plus a small pad rather than dropping the cue."""
+    lines = []
+    prev_end = 0.0
+    idx = 0
+    for chunk in chunks:
+        text = (chunk.get("text") or "").strip()
+        if not text:
+            continue
+        start, end = chunk.get("timestamp", (None, None))
+        start = start if start is not None else prev_end
+        end = end if end is not None else start + 2.0
+        prev_end = end
+        idx += 1
+        lines.append(str(idx))
+        lines.append(f"{_format_srt_timestamp(start)} --> {_format_srt_timestamp(end)}")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines)
+
+
 async def process_clip(clip: dict) -> dict:
     """Transcribe clip audio with Whisper, generate caption with vLLM.
     Returns enriched clip dict ready to publish to processed_clips."""
@@ -2248,7 +2279,15 @@ async def process_clip(clip: dict) -> dict:
                     files={"file": ("clip.wav", f, "audio/wav")},
                 )
             if r.status_code == 200:
-                transcript = r.json().get("text", "").strip()
+                data = r.json()
+                transcript = data.get("text", "").strip()
+                chunks = data.get("chunks") or []
+                if chunks:
+                    try:
+                        srt_path = Path(clip_path).with_suffix(".srt")
+                        srt_path.write_text(_build_srt(chunks), encoding="utf-8")
+                    except Exception as e:
+                        print(f"[process_clip] srt build failed for {clip_path}: {e}")
         except Exception as e:
             transcript = f"[transcription error: {e}]"
         finally:
@@ -2572,7 +2611,29 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
         settings.X_ACCESS_TOKEN_SECRET,
     )
     api_v1 = tweepy.API(auth)
-    media = api_v1.media_upload(str(path), chunked=True)
+    media = api_v1.media_upload(str(path), chunked=True, media_category="TweetVideo")
+
+    srt_path = path.with_suffix(".srt")
+    if srt_path.exists():
+        try:
+            subtitle_media = api_v1.media_upload(str(srt_path), media_category="Subtitles")
+            api_v1.request(
+                "POST", "media/subtitles/create",
+                json_payload={
+                    "media_id": media.media_id,
+                    "media_category": "TweetVideo",
+                    "subtitle_info": {
+                        "subtitles": [{
+                            "media_file": subtitle_media.media_id,
+                            "language_code": "en",
+                            "display_name": "English",
+                        }],
+                    },
+                },
+                upload_api=True,
+            )
+        except Exception as e:
+            print(f"[_publish_sync] subtitle attach failed for {path.name}: {e}")
 
     client = tweepy.Client(
         consumer_key=settings.X_API_KEY,

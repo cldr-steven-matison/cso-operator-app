@@ -89,7 +89,7 @@ async def transcribe(file: UploadFile = File(...)):
     try:
         result = pipe(tmp_path, chunk_length_s=60, batch_size=24, return_timestamps=True)
         os.unlink(tmp_path)
-        return {"text": result["text"]}
+        return {"text": result["text"], "chunks": result.get("chunks", [])}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
