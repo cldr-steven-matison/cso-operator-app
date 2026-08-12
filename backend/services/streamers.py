@@ -2622,11 +2622,11 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
             api_v1.request(
                 "POST", "media/subtitles/create",
                 json_payload={
-                    "media_id": media.media_id,
+                    "media_id": media.media_id_string,
                     "media_category": "TweetVideo",
                     "subtitle_info": {
                         "subtitles": [{
-                            "media_file": subtitle_media.media_id,
+                            "media_id": subtitle_media.media_id_string,
                             "language_code": "en",
                             "display_name": "English",
                         }],
