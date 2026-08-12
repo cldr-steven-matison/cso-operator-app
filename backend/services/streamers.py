@@ -2228,10 +2228,53 @@ def _format_srt_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
 
 
+# Whisper's segment timestamps can span 50+ seconds of pause-free streamer speech,
+# which X renders as one giant on-screen caption block (#153). Cap each cue and
+# interpolate timing across words so CC appears roughly as spoken.
+_SRT_MAX_CUE_SECONDS = 6.0
+_SRT_MAX_CUE_CHARS = 84
+
+
+def _split_srt_cue(text: str, start: float, end: float) -> list[tuple[str, float, float]]:
+    """Split one Whisper chunk into cues no longer than _SRT_MAX_CUE_SECONDS /
+    _SRT_MAX_CUE_CHARS, distributing the chunk's time span across the pieces
+    proportionally to their character length (Whisper only gave us segment-level
+    timing, so per-word timing is a linear estimate)."""
+    duration = max(end - start, 0.0)
+    if duration <= _SRT_MAX_CUE_SECONDS and len(text) <= _SRT_MAX_CUE_CHARS:
+        return [(text, start, end)]
+    secs_per_char = duration / len(text) if text else 0.0
+    pieces: list[tuple[str, int]] = []  # (piece text, char weight)
+    cur: list[str] = []
+    cur_chars = 0
+    for word in text.split():
+        added = len(word) + (1 if cur else 0)
+        if cur and (
+            cur_chars + added > _SRT_MAX_CUE_CHARS
+            or (cur_chars + added) * secs_per_char > _SRT_MAX_CUE_SECONDS
+        ):
+            pieces.append((" ".join(cur), cur_chars))
+            cur, cur_chars = [], 0
+            added = len(word)
+        cur.append(word)
+        cur_chars += added
+    if cur:
+        pieces.append((" ".join(cur), cur_chars))
+    total_chars = sum(chars for _, chars in pieces) or 1
+    cues = []
+    t = start
+    for i, (piece, chars) in enumerate(pieces):
+        piece_end = end if i == len(pieces) - 1 else t + duration * chars / total_chars
+        cues.append((piece, t, piece_end))
+        t = piece_end
+    return cues
+
+
 def _build_srt(chunks: list[dict]) -> str:
     """Turn Whisper's return_timestamps=True chunks ([{"text", "timestamp": (start, end)}])
     into standard SRT. A chunk's end can be None (cut off mid-word); fall back to the
-    prior chunk's end plus a small pad rather than dropping the cue."""
+    prior chunk's end plus a small pad rather than dropping the cue. Long chunks are
+    split into short cues via _split_srt_cue."""
     lines = []
     prev_end = 0.0
     idx = 0
@@ -2243,11 +2286,12 @@ def _build_srt(chunks: list[dict]) -> str:
         start = start if start is not None else prev_end
         end = end if end is not None else start + 2.0
         prev_end = end
-        idx += 1
-        lines.append(str(idx))
-        lines.append(f"{_format_srt_timestamp(start)} --> {_format_srt_timestamp(end)}")
-        lines.append(text)
-        lines.append("")
+        for cue_text, cue_start, cue_end in _split_srt_cue(text, start, end):
+            idx += 1
+            lines.append(str(idx))
+            lines.append(f"{_format_srt_timestamp(cue_start)} --> {_format_srt_timestamp(cue_end)}")
+            lines.append(cue_text)
+            lines.append("")
     return "\n".join(lines)
 
 
