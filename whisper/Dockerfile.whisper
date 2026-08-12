@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Dockerfile.whisper.12 - Final Stable "G1" Build
 # Targets: CUDA 12.4, Flash Attention 2, Whisper-Large-v3
 # Author: Steven Matison (Solutions Engineer, Cloudera)
