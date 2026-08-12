@@ -2616,7 +2616,9 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     srt_path = path.with_suffix(".srt")
     if srt_path.exists():
         try:
-            subtitle_media = api_v1.media_upload(str(srt_path), media_category="Subtitles")
+            subtitle_media = api_v1.chunked_upload(
+                str(srt_path), file_type="text/srt", media_category="Subtitles",
+            )
             api_v1.request(
                 "POST", "media/subtitles/create",
                 json_payload={
