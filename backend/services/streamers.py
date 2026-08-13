@@ -452,8 +452,8 @@ async def run_live_streamer_alert_once(client: httpx.AsyncClient) -> dict:
 # schedule (see start_oauth_refresh_scheduler below) means a dead token gets
 # replaced before anyone notices the watchlist looks wrong, instead of after.
 LIVE_ALERT_OAUTH_PROVIDERS = (
-    ("Twitch OAuth2 (client_credentials)", "GetTwitchLiveStatus"),
-    ("Kick OAuth2 (client_credentials)", "GetKickLiveStatus"),
+    "Twitch OAuth2 (client_credentials)",
+    "Kick OAuth2 (client_credentials)",
 )
 
 # Run well outside PollTimer's live-alert window (20-23,0-3 EDT, i.e.
@@ -483,26 +483,39 @@ async def _set_controller_service_state(client: httpx.AsyncClient, cs: dict, sta
 async def refresh_live_alert_oauth_tokens(client: httpx.AsyncClient) -> dict:
     """Force both LiveStreamerAlert OAuth2 providers to fetch a fresh token.
 
-    For each (controller service, dependent InvokeHTTP) pair: remember whether
-    the processor was running, disable the CS (NiFi auto-stops any processor
-    using it), re-enable it (forces a fresh client_credentials fetch), then
-    restore the processor to whatever state it was actually in -- same
-    remember-then-restore shape as run_live_streamer_alert_once, so this never
-    leaves a processor stopped if it wasn't already.
+    For each controller service: snapshot which of its referencing processors
+    are running, disable the CS (NiFi auto-stops every processor using it),
+    re-enable it (forces a fresh client_credentials fetch), then restart
+    exactly the processors that were running -- the whole referencing set, not
+    just the poller, so this never leaves a processor stopped that wasn't
+    already stopped.
     """
+    from services.nifi import _get
+
     pg = await _find_pg_by_name(client, LIVE_STREAMER_ALERT_PG_NAME)
     if not pg:
         raise ValueError(f"Process group '{LIVE_STREAMER_ALERT_PG_NAME}' not found")
 
     results: dict[str, str] = {}
-    for cs_name, proc_name in LIVE_ALERT_OAUTH_PROVIDERS:
+    for cs_name in LIVE_ALERT_OAUTH_PROVIDERS:
         cs = await _find_controller_service(client, pg["id"], cs_name)
-        proc = await _find_processor(client, pg["id"], proc_name)
-        if not cs or not proc:
+        if not cs:
             results[cs_name] = "not_found"
             continue
 
-        was_running = proc["component"]["state"] == "RUNNING"
+        # The disable auto-stops *every* processor referencing the CS, not just
+        # the poller this refresh exists for -- GetKickChannelId shares the Kick
+        # provider with GetKickLiveStatus and kept getting left stopped when
+        # only the paired poller was restored (incident 2026-08-12). So the
+        # restore set has to be the CS's own referencing components, not a
+        # hardcoded processor name.
+        full_cs = await _get(client, f"/controller-services/{cs['component']['id']}")
+        was_running_ids = [
+            ref["component"]["id"]
+            for ref in full_cs["component"].get("referencingComponents", [])
+            if ref["component"].get("referenceType") == "Processor"
+            and ref["component"].get("state") == "RUNNING"
+        ]
 
         await _set_controller_service_state(client, cs, "DISABLED")
         await asyncio.sleep(2)
@@ -511,10 +524,9 @@ async def refresh_live_alert_oauth_tokens(client: httpx.AsyncClient) -> dict:
         await _set_controller_service_state(client, cs, "ENABLED")
         await asyncio.sleep(3)
 
-        if was_running:
-            proc = await _find_processor(client, pg["id"], proc_name)
-            if proc:
-                await _set_processor_state(client, proc, running=True)
+        for proc_id in was_running_ids:
+            proc = await _get(client, f"/processors/{proc_id}")
+            await _set_processor_state(client, proc, running=True)
 
         results[cs_name] = "refreshed"
 
