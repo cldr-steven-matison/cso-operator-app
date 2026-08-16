@@ -2147,6 +2147,178 @@ def _clean_caption(text: str) -> str:
     return text.strip()
 
 
+# ── Quoted-post fallback (#175) ───────────────────────────────────────────────
+# When the model can't actually tell what the streamer is talking about, forcing
+# the cocky-gaming-chat persona anyway makes it fabricate (2026-08-16, bbjess:
+# an IRL relationship clip became "just flipped a 1v3" plus a fully invented
+# quote). In that case the post is a verbatim quote of the streamer instead of
+# an AI reaction — same format the ≤_SHORT_TRANSCRIPT_WORDS path already uses.
+
+# Straight/curly double-quoted spans, and single-quoted spans bounded by
+# whitespace (so apostrophes inside words don't open a span).
+_QUOTE_SPAN_RES = [
+    re.compile(r'["“]([^"“”]{3,200})["”]'),
+    re.compile(r"(?:^|\s)'([^']{3,200})'(?=[\s,.!?…]|$)"),
+]
+
+_QUOTE_MAX_WORDS = 24
+
+
+def _norm_quote_text(text: str) -> str:
+    """Lowercase, strip everything but letters/digits/spaces, collapse runs —
+    so a verbatim-copied span still matches the transcript across punctuation,
+    casing, and apostrophe differences."""
+    text = re.sub(r"[^a-z0-9\s]", " ", text.lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _has_fabricated_quote(caption: str, transcript: str) -> bool:
+    """True if the caption quote-marks a span of 3+ words that doesn't appear
+    verbatim in the transcript — the model invented a quote."""
+    haystack = _norm_quote_text(transcript)
+    for span_re in _QUOTE_SPAN_RES:
+        for span in span_re.findall(caption):
+            norm = _norm_quote_text(span)
+            if len(norm.split()) >= 3 and norm not in haystack:
+                return True
+    return False
+
+
+def _quoted_caption(quote: str, streamer_name: str) -> str:
+    return f'"{quote.strip()}" — {streamer_name}'
+
+
+# Generic words the topic sentence can't earn grounding credit for — function
+# words plus the framing vocabulary the model uses whether or not it understood
+# anything ("the streamer is talking about...").
+_TOPIC_STOPWORDS = {
+    "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "at", "is",
+    "are", "was", "were", "be", "being", "been", "about", "with", "for", "from",
+    "their", "they", "them", "this", "that", "these", "those", "it", "its",
+    "his", "her", "hers", "he", "she", "him", "himself", "herself", "someone",
+    "something", "thing", "things", "person", "people", "viewers", "chat",
+    "streamer", "stream", "streaming", "live", "clip", "talking", "talks",
+    "discussing", "discusses", "describing", "saying", "says", "doing", "does",
+    "possibly", "related", "recent", "some", "kind", "sort", "how", "what",
+    "who", "when", "where", "why", "while", "during", "very", "really",
+}
+
+
+def _topic_grounded(topic: str, transcript: str, streamer_name: str) -> bool:
+    """True if at least one content word of the claimed topic actually appears
+    in the transcript (normalized; 4-char prefix match covers inflections like
+    betting/bets). Asked what a pure-filler transcript is about, the model
+    confidently invents a topic with zero word overlap — self-rated confidence
+    doesn't catch that (measured 2026-08-16 on Qwen2.5-3B), this does."""
+    stop = _TOPIC_STOPWORDS | set(_norm_quote_text(streamer_name).split())
+    twords = set(_norm_quote_text(transcript).split())
+    tprefix = {w[:4] for w in twords if len(w) >= 4}
+    for w in _norm_quote_text(topic).split():
+        if len(w) < 3 or w in stop:
+            continue
+        if w in twords or (len(w) >= 4 and w[:4] in tprefix):
+            return True
+    return False
+
+
+async def _comprehend_topic(client: httpx.AsyncClient, transcript: str, streamer_name: str) -> str:
+    """One short sentence of what the streamer is talking about, or "" when the
+    AI can't actually figure it out. The model always answers a TOPIC (asking it
+    to refuse with an UNCLEAR token made it refuse on nearly every real messy
+    transcript — measured 2026-08-16), so "can't figure it out" is detected
+    instead by _topic_grounded's word-overlap check, a LOW self-rating, a
+    malformed reply, or any error (an unreachable vLLM quotes rather than
+    drops the clip)."""
+    try:
+        r = await client.post(
+            f"{settings.VLLM_URL}/v1/chat/completions",
+            json={
+                "model": settings.VLLM_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You analyze live-stream clip transcripts. Follow the output format exactly.",
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Read this transcript from {streamer_name}'s live stream. It is raw "
+                            f"speech-to-text of casual talk — broken grammar, filler, and repetition "
+                            f"are normal, read through them.\n"
+                            f"Answer in exactly two lines:\n"
+                            f"TOPIC: <one short sentence — what {streamer_name} is talking about or doing>\n"
+                            f"CONFIDENCE: <HIGH, MEDIUM, or LOW — how sure you are that your TOPIC "
+                            f"line is really what the clip is about>\n\n"
+                            f"Transcript: {transcript[:600]}"
+                        ),
+                    },
+                ],
+                "max_tokens": 80,
+                "temperature": 0.2,
+            },
+        )
+        if r.status_code != 200:
+            return ""
+        ans = r.json()["choices"][0]["message"]["content"].strip()
+        topic, confidence = "", ""
+        for line in ans.split("\n"):
+            line = line.strip()
+            if line.upper().startswith("TOPIC:"):
+                topic = line[len("TOPIC:"):].strip()
+            elif line.upper().startswith("CONFIDENCE:"):
+                confidence = line[len("CONFIDENCE:"):].strip().upper()
+        if not topic or "LOW" in confidence:
+            return ""
+        if not _topic_grounded(topic, transcript, streamer_name):
+            return ""
+        return topic[:200]
+    except Exception:
+        return ""
+
+
+async def _extract_transcript_quote(client: httpx.AsyncClient, transcript: str) -> str:
+    """Pick the most quotable verbatim span of a long transcript for a quoted
+    post. Asks vLLM to copy the best contiguous phrase, then verifies the copy
+    really is a substring of the transcript (normalized) — a fabricated 'quote'
+    can't slip through; on any failure falls back to the transcript's opening
+    words."""
+    try:
+        r = await client.post(
+            f"{settings.VLLM_URL}/v1/chat/completions",
+            json={
+                "model": settings.VLLM_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You select quotes from transcripts. Output only text copied word-for-word from the transcript — no commentary, no quote marks.",
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Copy the single most interesting, funny, or quotable contiguous "
+                            f"phrase or sentence from this transcript, word-for-word. At most "
+                            f"{_QUOTE_MAX_WORDS} words. Output only the copied words.\n\n"
+                            f"Transcript: {transcript[:600]}"
+                        ),
+                    },
+                ],
+                "max_tokens": 80,
+                "temperature": 0.3,
+            },
+        )
+        if r.status_code == 200:
+            cand = r.json()["choices"][0]["message"]["content"].strip()
+            cand = cand.split("\n")[0].strip().strip('"“”')
+            words = cand.split()
+            if 3 <= len(words) <= _QUOTE_MAX_WORDS + 6 and _norm_quote_text(cand) in _norm_quote_text(transcript):
+                return cand
+    except Exception:
+        pass
+    words = transcript.split()
+    quote = " ".join(words[:_QUOTE_MAX_WORDS])
+    return quote + ("…" if len(words) > _QUOTE_MAX_WORDS else "")
+
+
 def _is_junk_title(title: str) -> bool:
     """True if a streamer-supplied title is too thin for vLLM to work with —
     e.g. '1', '.', 'asdf123' typed just to get the clip creation flow started."""
@@ -2361,133 +2533,171 @@ async def process_clip(clip: dict) -> dict:
         # vLLM caption generation
         caption = ""
         error = ""
+        caption_mode = ""
+        quote_reason = ""
         if has_transcript and len(transcript.split()) <= _SHORT_TRANSCRIPT_WORDS:
             streamer_name = clip.get("streamer", "unknown")
             x_handle = get_x_handle(clip.get("streamer", ""))
-            quoted = f'"{transcript.strip()}" — {streamer_name}'
+            quoted = _quoted_caption(transcript, streamer_name)
             caption = _build_tweet(quoted, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle)
+            caption_mode, quote_reason = "quoted", "short transcript"
         elif has_transcript:
             streamer_name = clip.get("streamer", "unknown")
-            opener_style = random.choice(_CAPTION_OPENER_STYLES).format(name=streamer_name)
-            # A different random subset of the example pool per call, not the same
-            # fixed examples every time — see _CAPTION_EXAMPLES for why.
-            example_lines = "\n".join(f"- \"{ex}\"" for ex in random.sample(_CAPTION_EXAMPLES, 4))
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a cocky, trash-talking gaming chat regular live-reacting to clips — "
-                        "funny, arrogant, a little trollish, but never boring. Sometimes you hype the "
-                        "streamer up like they're the main character and everyone else should log off; "
-                        "sometimes you roast them for what just happened in the clip. Pick whichever "
-                        "fits the clip. Follow every rule exactly:\n"
-                        f"1. The streamer's name is \"{streamer_name}\" — refer to them ONLY by this "
-                        f"exact name. Never use he, she, him, her, his, or hers for {streamer_name}, "
-                        f"even if the name sounds gendered to you, and even if the transcript uses a "
-                        f"pronoun for someone else in the clip. You do not know {streamer_name}'s "
-                        "gender and must not guess it.\n"
-                        "2. Output ONLY the reaction sentence(s) — no labels, no headers, no markdown, "
-                        "no quotes around the whole thing. Before you answer, check your first few "
-                        f"words: if they are \"{streamer_name} just\" or \"{streamer_name}'s\" or any "
-                        "other name-first-verb-second pattern, throw that draft out and rewrite with a "
-                        "different opener. Required: open with a callout, a mock-shocked aside, a "
-                        "direct jab, a bragging comparison, or a quote lead-in — never with the "
-                        "streamer's name as the very first word.\n"
-                        "3. Stay 100% grounded in the transcript. Never invent names, people, items, "
-                        "or events that are not in it.\n"
-                        "4. Exactly 1 emoji. No hashtags. No @ mentions. No links or URLs.\n"
-                        "5. Keep it funny and a little cocky/trollish — teasing the streamer or "
-                        "trash-talking on their behalf is encouraged. No slurs or hate speech.\n"
-                        "6. Under 200 characters.\n\n"
-                        "Examples of the range of openers/tone to draw from (do not reuse these "
-                        "verbatim, and don't let any one of them become your default template):\n"
-                        f"{example_lines}\n"
-                        "Example of what NOT to do: \"She just clutched a 1v5, how does she do it?!\" "
-                        "— wrong, this guesses gender from the name instead of using it directly."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"React to this clip by {streamer_name} like you're a cocky regular in "
-                        f"their Twitch chat. Quote or paraphrase something actually said in the "
-                        f"transcript, or roast/hype them over what just happened. "
-                        f"For this one, your opener MUST be: {opener_style}. Do not start with "
-                        f"\"{streamer_name} just\" or \"{streamer_name}'s\" — use the required opener "
-                        f"style instead. "
-                        f"Clip title: '{title}'. "
-                        f"Transcript: {transcript[:600]}\n\n"
-                        f"Remember: call them {streamer_name}, never a pronoun."
-                    ),
-                },
-            ]
+            # Comprehension gate (#175): if the model can't say what the streamer
+            # is talking about, don't let the persona prompt force a reaction it
+            # will have to fabricate — post the streamer's own words instead.
+            topic = await _comprehend_topic(client, transcript, streamer_name)
+            if not topic:
+                quote_reason = "topic unclear"
+            if topic:
+                opener_style = random.choice(_CAPTION_OPENER_STYLES).format(name=streamer_name)
+                # A different random subset of the example pool per call, not the same
+                # fixed examples every time — see _CAPTION_EXAMPLES for why.
+                example_lines = "\n".join(f"- \"{ex}\"" for ex in random.sample(_CAPTION_EXAMPLES, 4))
+                messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a cocky, trash-talking gaming chat regular live-reacting to clips — "
+                            "funny, arrogant, a little trollish, but never boring. Sometimes you hype the "
+                            "streamer up like they're the main character and everyone else should log off; "
+                            "sometimes you roast them for what just happened in the clip. Pick whichever "
+                            "fits the clip. Follow every rule exactly:\n"
+                            f"1. The streamer's name is \"{streamer_name}\" — refer to them ONLY by this "
+                            f"exact name. Never use he, she, him, her, his, or hers for {streamer_name}, "
+                            f"even if the name sounds gendered to you, and even if the transcript uses a "
+                            f"pronoun for someone else in the clip. You do not know {streamer_name}'s "
+                            "gender and must not guess it.\n"
+                            "2. Output ONLY the reaction sentence(s) — no labels, no headers, no markdown, "
+                            "no quotes around the whole thing. Before you answer, check your first few "
+                            f"words: if they are \"{streamer_name} just\" or \"{streamer_name}'s\" or any "
+                            "other name-first-verb-second pattern, throw that draft out and rewrite with a "
+                            "different opener. Required: open with a callout, a mock-shocked aside, a "
+                            "direct jab, a bragging comparison, or a quote lead-in — never with the "
+                            "streamer's name as the very first word.\n"
+                            "3. Stay 100% grounded in the transcript. Never invent names, people, items, "
+                            "or events that are not in it. If you put words inside quotation marks, they "
+                            "must be copied word-for-word from the transcript — never invent a quote.\n"
+                            "4. Exactly 1 emoji. No hashtags. No @ mentions. No links or URLs.\n"
+                            "5. Keep it funny and a little cocky/trollish — teasing the streamer or "
+                            "trash-talking on their behalf is encouraged. No slurs or hate speech.\n"
+                            "6. Under 200 characters.\n\n"
+                            "Examples of the range of openers/tone to draw from (do not reuse these "
+                            "verbatim, and don't let any one of them become your default template):\n"
+                            f"{example_lines}\n"
+                            "Example of what NOT to do: \"She just clutched a 1v5, how does she do it?!\" "
+                            "— wrong, this guesses gender from the name instead of using it directly."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"React to this clip by {streamer_name} like you're a cocky regular in "
+                            f"their Twitch chat. Quote or paraphrase something actually said in the "
+                            f"transcript, or roast/hype them over what just happened. "
+                            f"What {streamer_name} is talking about in this clip: {topic} "
+                            f"If that isn't about gameplay, react to what it's actually about — do "
+                            f"not invent gameplay events (kills, clutches, 1v3s) that are not in "
+                            f"the transcript. "
+                            f"For this one, your opener MUST be: {opener_style}. Do not start with "
+                            f"\"{streamer_name} just\" or \"{streamer_name}'s\" — use the required opener "
+                            f"style instead. "
+                            f"Clip title: '{title}'. "
+                            f"Transcript: {transcript[:600]}\n\n"
+                            f"Remember: call them {streamer_name}, never a pronoun."
+                        ),
+                    },
+                ]
 
-            # Gendered-pronoun violations get corrective retries before disqualifying —
-            # the LLM is told exactly what it did wrong and asked to redo it, rather than
-            # the clip just being thrown away on the first slip (2026-07-23, all streamers;
-            # bumped to 3 retries same day per Steven's ask).
-            max_attempts = 4
-            for attempt in range(max_attempts):
-                try:
-                    r = await client.post(
-                        f"{settings.VLLM_URL}/v1/chat/completions",
-                        json={
-                            "model": settings.VLLM_MODEL,
-                            "messages": messages,
-                            "max_tokens": 120,
-                            "temperature": 0.7,
-                            "frequency_penalty": 0.6,
-                            "presence_penalty": 0.3,
-                        },
-                    )
-                    if r.status_code == 200:
-                        raw = r.json()["choices"][0]["message"]["content"]
-                        cleaned = _clean_caption(raw)
-                        if not cleaned:
-                            error = "disqualified: empty caption after cleaning"
-                            break
-                        elif _has_degenerate_repetition(cleaned):
-                            error = "disqualified: degenerate repeated output"
-                            break
-                        elif _has_gendered_pronoun(cleaned):
-                            error = f"disqualified: gendered pronoun used for {streamer_name}"
-                            if attempt < max_attempts - 1:
-                                messages.append({"role": "assistant", "content": raw})
-                                messages.append({
-                                    "role": "user",
-                                    "content": (
-                                        f"That used a gendered pronoun (he/him/his/she/her/hers) for "
-                                        f"{streamer_name}. You do not know {streamer_name}'s gender. Rewrite "
-                                        f"it — same rules as before, but refer to them ONLY as "
-                                        f"\"{streamer_name}\", zero pronouns anywhere in the sentence."
-                                    ),
-                                })
-                                continue
-                            break
+                # Gendered-pronoun violations get corrective retries before disqualifying —
+                # the LLM is told exactly what it did wrong and asked to redo it, rather than
+                # the clip just being thrown away on the first slip (2026-07-23, all streamers;
+                # bumped to 3 retries same day per Steven's ask).
+                max_attempts = 4
+                for attempt in range(max_attempts):
+                    try:
+                        r = await client.post(
+                            f"{settings.VLLM_URL}/v1/chat/completions",
+                            json={
+                                "model": settings.VLLM_MODEL,
+                                "messages": messages,
+                                "max_tokens": 120,
+                                "temperature": 0.7,
+                                "frequency_penalty": 0.6,
+                                "presence_penalty": 0.3,
+                            },
+                        )
+                        if r.status_code == 200:
+                            raw = r.json()["choices"][0]["message"]["content"]
+                            cleaned = _clean_caption(raw)
+                            if not cleaned:
+                                error = "disqualified: empty caption after cleaning"
+                                break
+                            elif _has_degenerate_repetition(cleaned):
+                                error = "disqualified: degenerate repeated output"
+                                break
+                            elif _has_gendered_pronoun(cleaned):
+                                error = f"disqualified: gendered pronoun used for {streamer_name}"
+                                if attempt < max_attempts - 1:
+                                    messages.append({"role": "assistant", "content": raw})
+                                    messages.append({
+                                        "role": "user",
+                                        "content": (
+                                            f"That used a gendered pronoun (he/him/his/she/her/hers) for "
+                                            f"{streamer_name}. You do not know {streamer_name}'s gender. Rewrite "
+                                            f"it — same rules as before, but refer to them ONLY as "
+                                            f"\"{streamer_name}\", zero pronouns anywhere in the sentence."
+                                        ),
+                                    })
+                                    continue
+                                break
+                            elif _has_fabricated_quote(cleaned, transcript):
+                                # Quote-marked words that aren't in the transcript — the
+                                # model invented a quote (#175). Post a real one instead.
+                                quote_reason = "fabricated quote"
+                                break
+                            else:
+                                # No "watching live" intro baked in here — a clip can sit
+                                # in the pending queue for hours before it's actually
+                                # published, so whether that framing is still honest is
+                                # decided at publish time instead (see publish_clip()).
+                                x_handle = get_x_handle(clip.get("streamer", ""))
+                                caption = _build_tweet(
+                                    cleaned, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle
+                                )
+                                caption_mode = "reaction"
+                                error = ""
+                                break
                         else:
-                            # No "watching live" intro baked in here — a clip can sit
-                            # in the pending queue for hours before it's actually
-                            # published, so whether that framing is still honest is
-                            # decided at publish time instead (see publish_clip()).
-                            x_handle = get_x_handle(clip.get("streamer", ""))
-                            caption = _build_tweet(
-                                cleaned, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle
-                            )
-                            error = ""
+                            error = f"caption error: vLLM returned {r.status_code}"
                             break
-                    else:
-                        error = f"caption error: vLLM returned {r.status_code}"
+                    except Exception as e:
+                        error = f"caption error: {e}"
                         break
-                except Exception as e:
-                    error = f"caption error: {e}"
-                    break
+
+            if quote_reason and not caption:
+                # The AI couldn't figure out what the streamer is talking about
+                # (gate) or proved it by inventing a quote (check above) — post
+                # the streamer's own words instead of an AI reaction (#175).
+                quote = await _extract_transcript_quote(client, transcript)
+                x_handle = get_x_handle(clip.get("streamer", ""))
+                caption = _build_tweet(
+                    _quoted_caption(quote, streamer_name), clip.get("source", "twitch"),
+                    clip.get("streamer", ""), x_handle,
+                )
+                caption_mode = "quoted"
+                error = ""
+                print(f"[process_clip] quoted-post fallback ({quote_reason}) for {clip.get('clip_id', clip_path)}")
         else:
             error = "disqualified: no transcript"
 
         if error and not caption:
             return {**clip, "title": title, "transcript": transcript, "caption": "", "error": error}
 
-    return {**clip, "title": title, "transcript": transcript, "caption": caption}
+    return {
+        **clip, "title": title, "transcript": transcript, "caption": caption,
+        "caption_mode": caption_mode, "quote_reason": quote_reason,
+    }
 
 
 # ── Clip queue ────────────────────────────────────────────────────────────────
