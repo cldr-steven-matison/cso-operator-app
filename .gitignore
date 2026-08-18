@@ -29,3 +29,11 @@ frontend/vite.config.d.ts
 
 # Local
 *.local
+
+# OpenCV face models for the reaction-GIF cut (YuNet + SFace, ~38MB).
+# Fetched from the opencv_zoo release, not carried in the repo:
+#   https://github.com/opencv/opencv_zoo/tree/main/models
+# The image build bakes in whatever sits here, so a fresh clone needs them
+# downloaded before `scripts/deploy.sh` or every gif skips with
+# "face models missing from assets/models".
+backend/assets/models/

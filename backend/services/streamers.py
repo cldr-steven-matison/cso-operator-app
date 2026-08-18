@@ -977,6 +977,434 @@ def _probe_video_duration(path: Path) -> float | None:
         return None
 
 
+# ── Reaction GIFs (#173, automated) ──────────────────────────────────────────
+# The #173 giphy clipping action, automated for gif-flagged streamers (see
+# _STREAMER_PATH_OVERRIDES) to the conventions the manual #173 rounds set:
+# a tight cut of the streamer's face at the clip's loudest moment, overlay
+# bar excluded, and NO output at all when a confident face cut isn't possible
+# — a wrong-person or full-frame gif is worse than no gif.
+#
+# Face pipeline: YuNet detection on frames sampled from the peak-audio window,
+# clustered into per-person tracks; on-screen UI portraits (tiny or pixel-
+# static, e.g. scoreboard avatars) are filtered out; the streamer is picked by
+# SFace identity match against their own Twitch profile avatar, falling back
+# to "the single dominant face" (the solo-facecam case). Multiple big faces
+# with no confident identity -> skip.
+
+_GIF_SECONDS = 5.0            # #173 round-3 recuts settled on ~5s arcs
+_GIF_FPS = 18
+_GIF_WIDTHS = (480, 360)      # retry narrower if the encode lands over the cap
+_GIF_MAX_BYTES = 14_000_000   # X's animated-GIF hard cap is 15MB; leave headroom
+_GIF_RMS_HOP_SECONDS = 0.25
+
+_YUNET_MODEL = _ASSETS_DIR / "models" / "face_detection_yunet_2023mar.onnx"
+_SFACE_MODEL = _ASSETS_DIR / "models" / "face_recognition_sface_2021dec.onnx"
+_SFACE_CONFIDENT = 0.363      # opencv's published same-identity cosine threshold
+_SFACE_MARGIN = 0.12          # min lead over runner-up to trust a sub-threshold match
+_FACE_MIN_FRAC = 0.05         # candidate faces must be >=5% of frame width
+_FACE_UI_FRAC = 0.045         # smaller = on-screen UI portrait, drop
+_FACE_UI_STATIC_PX = 1.5      # center stddev below this = static UI element, drop
+
+# Framing. A reaction gif is a head-and-shoulders shot, not a scene: pad the
+# face box tightly and let the output size vary per gif rather than framing
+# wide for a uniform size. Wide crops are what pulled the overlay bar, the
+# streamer's own burned-in captions / HUD scoreboard, and source pillarbox
+# black into the earlier cuts.
+_FACE_PAD_X = 0.30            # side padding, in median face widths
+_FACE_PAD_TOP = 0.40          # headroom above the face box, in face heights
+_FACE_PAD_BOTTOM = 0.55       # chin/shoulders below the face box
+_FACE_MAX_CROP = 3.2          # crop extent cap, in face widths/heights
+_BAR_GUARD_PX = 4             # keep this far below the overlay bar (rounding)
+_GIF_MAX_UPSCALE = 1.6        # a tight crop may be scaled up this much to 480
+
+
+def _face_refs_dir() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".face_refs"
+
+
+async def _fetch_streamer_avatar(client: httpx.AsyncClient, login: str) -> Path | None:
+    """Twitch profile avatar for a login, cached on the PVC — the identity
+    reference for picking the streamer's face out of a multi-person clip.
+    None for non-Twitch logins or any failure (the picker then only trusts
+    the single-dominant-face case)."""
+    login = login.strip().lower()
+    if not login:
+        return None
+    dest = _face_refs_dir() / f"{login}.png"
+    if dest.exists() and dest.stat().st_size > 1_000:
+        return dest
+    try:
+        r = await client.post(
+            "https://gql.twitch.tv/gql",
+            json={"query": "query($l: String!) { user(login: $l) { profileImageURL(width: 300) } }",
+                  "variables": {"l": login}},
+            headers={"Client-ID": _TWITCH_WEB_CLIENT_ID},
+            timeout=10.0,
+        )
+        url = (r.json().get("data") or {}).get("user", {}).get("profileImageURL") if r.status_code == 200 else None
+        if not url:
+            return None
+        img = await client.get(url, timeout=15.0)
+        if img.status_code != 200 or len(img.content) < 1_000:
+            return None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(img.content)
+        return dest
+    except Exception:
+        return None
+
+
+def _parse_cropdetect(stderr: str, W: int, H: int) -> tuple[int, int, int, int]:
+    """Content box (x, y, w, h) from a cropdetect-instrumented ffmpeg run —
+    the frame minus any letter/pillarbox black. Falls back to the full frame
+    when cropdetect printed nothing usable (it stays silent on sources with
+    no borders at all, which is the common case)."""
+    box = (0, 0, W, H)
+    for line in stderr.splitlines():
+        i = line.rfind("crop=")
+        if i < 0:
+            continue
+        try:
+            cw, ch, cx, cy = (int(v) for v in line[i + 5:].strip().split(":")[:4])
+        except ValueError:
+            continue
+        # Sanity: a plausible box inside the frame. cropdetect on a genuinely
+        # dark scene can propose a silly crop; ignore anything that throws
+        # away more than a third of the frame.
+        if cw <= 0 or ch <= 0 or cx < 0 or cy < 0 or cx + cw > W or cy + ch > H:
+            continue
+        # A real letter/pillarbox keeps most of one axis (4:3 in 16:9 is 75%
+        # of the width, a vertical source about a third); anything smaller is
+        # cropdetect chewing into a dark scene, not a border.
+        if cw * ch < 0.20 * W * H:
+            continue
+        box = (cx, cy, cw, ch)
+    return box
+
+
+def _pick_face_crop(
+    src: Path, start: float | None, avatar_path: Path | None,
+) -> tuple[tuple[int, int, int, int] | None, str, float, float]:
+    """Choose the streamer's face crop for the gif window. Returns
+    (crop (x,y,w,h), reason, gif_start, gif_duration) — the start/duration are
+    trimmed to the span the chosen face is actually on screen, since clips can
+    scene-cut mid-window (facecam -> screen share). crop is None when no
+    confident face cut exists and the gif must be skipped.
+    Sync + CPU-bound — call via asyncio.to_thread."""
+    import shutil
+    import statistics
+    import tempfile
+
+    try:
+        import cv2
+    except Exception as e:
+        return None, f"cv2 unavailable: {e}", 0.0, 0.0
+    if not _YUNET_MODEL.exists() or not _SFACE_MODEL.exists():
+        return None, "face models missing from assets/models", 0.0, 0.0
+
+    duration = _probe_video_duration(src)
+    if start is None:
+        start = max(0.0, ((duration or _GIF_SECONDS) - _GIF_SECONDS) / 2)
+    dims = _probe_video_dims(src)
+    if not dims:
+        return None, "could not probe video dimensions", 0.0, 0.0
+    W, H = dims
+    # The platform overlay pads the top with bar_h = round(orig_h*0.19/2)*2
+    # (_burn_platform_overlay); invert from the padded height so face boxes
+    # in the bar (logo/text) are ignored and the crop never includes it.
+    bar_h = 2 * round((H / 1.19) * 0.19 / 2)
+
+    fdir = Path(tempfile.mkdtemp(prefix="giffaces_"))
+    try:
+        # Sample well past the peak window on both sides — when a scene cut
+        # (facecam -> screen share) lands inside the window, the best face
+        # span is often just before or after it, and the cut slides there.
+        t0 = max(0.0, start - 3.0)
+        # cropdetect rides along on the same decode (reset=0 = union of every
+        # non-black region seen, so it only ever reports true letter/pillarbox
+        # borders) and gives the content box the crop gets clamped into —
+        # source black bars were leaking into the earlier cuts.
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-ss", f"{t0:.2f}", "-t", str(_GIF_SECONDS + 6.0),
+             "-i", str(src), "-vf", "fps=2,cropdetect=limit=24:round=2:reset=0",
+             "-threads", "1", str(fdir / "f_%02d.png")],
+            capture_output=True, timeout=120,
+        )
+        frames = sorted(fdir.glob("f_*.png"))
+        if r.returncode != 0 or len(frames) < 4:
+            return None, "frame sampling failed", 0.0, 0.0
+        content = _parse_cropdetect(r.stderr.decode(errors="replace"), W, H)
+
+        detector = cv2.FaceDetectorYN_create(str(_YUNET_MODEL), "", (W, H), 0.7)
+        recognizer = cv2.FaceRecognizerSF_create(str(_SFACE_MODEL), "")
+
+        dets = []  # (frame_idx, x, y, w, h, raw_face_row, frame_image)
+        for i, f in enumerate(frames):
+            img = cv2.imread(str(f))
+            if img is None:
+                continue
+            detector.setInputSize((img.shape[1], img.shape[0]))
+            _, faces = detector.detect(img)
+            for face in (faces if faces is not None else []):
+                x, y, fw, fh = (int(v) for v in face[:4])
+                if y + fh / 2 < bar_h:
+                    continue
+                dets.append((i, x, y, fw, fh, face.copy(), img))
+
+        # Cluster detections into per-person tracks by center proximity
+        clusters: list[list] = []
+        thr = W * 0.10
+        for d in dets:
+            cx, cy = d[1] + d[3] / 2, d[2] + d[4] / 2
+            for cl in clusters:
+                mx = statistics.mean(c[1] + c[3] / 2 for c in cl)
+                my = statistics.mean(c[2] + c[4] / 2 for c in cl)
+                if abs(cx - mx) < thr and abs(cy - my) < thr:
+                    cl.append(d)
+                    break
+            else:
+                clusters.append([d])
+
+        candidates = []
+        for cl in clusters:
+            if len({c[0] for c in cl}) < 3:
+                continue
+            mw = statistics.median(c[3] for c in cl)
+            jitter = max(
+                statistics.pstdev([c[1] + c[3] / 2 for c in cl]),
+                statistics.pstdev([c[2] + c[4] / 2 for c in cl]),
+            )
+            # Scoreboard/HUD portraits are small and pixel-static — a live
+            # face always jitters at least a little between sampled frames.
+            if mw < W * _FACE_UI_FRAC or jitter < _FACE_UI_STATIC_PX:
+                continue
+            if mw < W * _FACE_MIN_FRAC:
+                continue
+            candidates.append(cl)
+        if not candidates:
+            return None, "no stable real face in peak window", 0.0, 0.0
+
+        ref_feat = None
+        if avatar_path is not None and avatar_path.exists():
+            av = cv2.imread(str(avatar_path))
+            if av is not None:
+                detector.setInputSize((av.shape[1], av.shape[0]))
+                _, av_faces = detector.detect(av)
+                if av_faces is not None and len(av_faces):
+                    ref_feat = recognizer.feature(recognizer.alignCrop(av, av_faces[0]))
+
+        scored = []
+        for cl in candidates:
+            sim = -1.0
+            if ref_feat is not None:
+                sim = max(
+                    float(recognizer.match(
+                        ref_feat,
+                        recognizer.feature(recognizer.alignCrop(c[6], c[5])),
+                        cv2.FaceRecognizerSF_FR_COSINE,
+                    ))
+                    for c in cl[:4]
+                )
+            scored.append((sim, statistics.median(c[3] for c in cl), cl))
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+
+        best_sim = scored[0][0]
+        if ref_feat is not None and best_sim >= _SFACE_CONFIDENT:
+            chosen, why = scored[0][2], f"identity match cosine={best_sim:.3f}"
+        elif len(candidates) == 1:
+            chosen, why = candidates[0], "single dominant face"
+        elif ref_feat is not None and len(scored) > 1 \
+                and best_sim - scored[1][0] >= _SFACE_MARGIN and best_sim > 0.2:
+            chosen, why = scored[0][2], f"identity margin {best_sim:.3f} vs {scored[1][0]:.3f}"
+        else:
+            if ref_feat is not None:
+                return None, f"ambiguous: {len(candidates)} faces, best cosine {best_sim:.3f}", 0.0, 0.0
+            return None, f"ambiguous: {len(candidates)} faces, no identity reference", 0.0, 0.0
+
+        # Cut only where the chosen face is actually on screen — clips can
+        # scene-cut mid-window (facecam -> screen share), and a gif whose tail
+        # is a desktop capture is not a face cut. Frames are ~0.5s apart from
+        # t0; group detections into contiguous spans (tolerating one missed
+        # frame) and place the cut inside the longest span, biased toward the
+        # audio peak.
+        idxs = sorted({c[0] for c in chosen})
+        segments, seg = [], [idxs[0]]
+        for i in idxs[1:]:
+            if i - seg[-1] <= 2:
+                seg.append(i)
+            else:
+                segments.append(seg)
+                seg = [i]
+        segments.append(seg)
+        seg = max(segments, key=lambda s: (s[-1] - s[0], len(s)))
+        span_start = t0 + seg[0] * 0.5
+        span_end = t0 + seg[-1] * 0.5 + 0.5
+        if span_end - span_start < 2.5:
+            return None, f"face on screen only {span_end - span_start:.1f}s near the peak", 0.0, 0.0
+        gif_dur = min(_GIF_SECONDS, span_end - span_start)
+
+        fw = statistics.median(c[3] for c in chosen)
+        fh = statistics.median(c[4] for c in chosen)
+        boxes: dict[int, tuple[int, int, int, int]] = {}
+        for c in chosen:
+            b = boxes.get(c[0])
+            nb = (c[1], c[2], c[1] + c[3], c[2] + c[4])
+            boxes[c[0]] = nb if b is None else (
+                min(b[0], nb[0]), min(b[1], nb[1]), max(b[2], nb[2]), max(b[3], nb[3]))
+
+        def _union(frames_in_window):
+            bs = [boxes[i] for i in frames_in_window]
+            return (min(b[0] for b in bs), min(b[1] for b in bs),
+                    max(b[2] for b in bs), max(b[3] for b in bs))
+
+        # Slide the cut window inside the span and take the least-travelled
+        # placement, tie-broken toward the audio peak: the tighter the face
+        # stays put, the tighter the single fixed crop can be drawn around it
+        # (ffmpeg's crop can't track). This is what buys the zoom.
+        best = None
+        for i in seg:
+            w_start = t0 + i * 0.5
+            if w_start < span_start - 1e-6 or w_start + gif_dur > span_end + 1e-6:
+                continue
+            win = [j for j in seg if w_start - 1e-6 <= t0 + j * 0.5 < w_start + gif_dur]
+            if not win:
+                continue
+            ux0, uy0, ux1, uy1 = _union(win)
+            travel = max((ux1 - ux0) / max(fw, 1.0), (uy1 - uy0) / max(fh, 1.0))
+            score = travel + 0.06 * abs(w_start - start)
+            if best is None or score < best[0]:
+                best = (score, w_start, (ux0, uy0, ux1, uy1))
+        if best is None:
+            # start as close to the audio peak as the span allows
+            gif_start = min(max(start, span_start), span_end - gif_dur)
+            ux0, uy0, ux1, uy1 = _union(seg)
+        else:
+            _, gif_start, (ux0, uy0, ux1, uy1) = best
+
+        # Head-and-shoulders framing: tight padding on the union of the face's
+        # boxes over the cut window, extent capped so a face that does wander
+        # widens the crop only so far, then clamped inside the source's own
+        # content box and below the overlay bar. Output size varies per gif by
+        # design — matching sizes is what forced the wide, border-catching
+        # crops before.
+        x0 = ux0 - _FACE_PAD_X * fw
+        x1 = ux1 + _FACE_PAD_X * fw
+        y0 = uy0 - _FACE_PAD_TOP * fh
+        y1 = uy1 + _FACE_PAD_BOTTOM * fh
+        if x1 - x0 > _FACE_MAX_CROP * fw:
+            mid = (x0 + x1) / 2
+            x0, x1 = mid - _FACE_MAX_CROP * fw / 2, mid + _FACE_MAX_CROP * fw / 2
+        if y1 - y0 > _FACE_MAX_CROP * fh:
+            mid = (y0 + y1) / 2
+            y0, y1 = mid - _FACE_MAX_CROP * fh / 2, mid + _FACE_MAX_CROP * fh / 2
+        # Clamp into the content box, but never past the face itself — an
+        # over-eager cropdetect on a dark scene must not eat the subject.
+        cbx, cby, cbw, cbh = content
+        lo_x, hi_x = min(cbx, ux0), max(cbx + cbw, ux1)
+        lo_y = min(max(bar_h + _BAR_GUARD_PX, cby), uy0)
+        hi_y = max(cby + cbh, uy1)
+        x0 = max(lo_x, x0); x1 = min(hi_x, x1)
+        y0 = max(lo_y, y0); y1 = min(hi_y, y1)
+        # Round the origin *up* and the size *down* to even — rounding the
+        # origin down can push it a pixel back into the bar or the pillarbox.
+        x0, y0 = -(-int(x0) // 2) * 2, -(-int(y0) // 2) * 2
+        cw, ch = int(x1 - x0) // 2 * 2, int(y1 - y0) // 2 * 2
+        if cw < 140 or ch < 140:
+            return None, f"crop too small ({cw}x{ch})", 0.0, 0.0
+        return (x0, y0, cw, ch), why, gif_start, gif_dur
+    finally:
+        shutil.rmtree(fdir, ignore_errors=True)
+
+
+def _peak_audio_window(wav_path: Path, window: float = _GIF_SECONDS) -> float | None:
+    """Return the start second of the loudest `window`-second span of a 16kHz
+    mono s16le WAV (the same file process_clip already extracts for Whisper),
+    via sliding-window RMS energy over _GIF_RMS_HOP_SECONDS hops.
+
+    This is the same trick the manual #173 cuts used to find scream peaks
+    (jynxzi-rager), minus the human judgment. None on any failure — the caller
+    falls back to a centered cut."""
+    import array
+    import wave
+
+    with wave.open(str(wav_path), "rb") as w:
+        rate = w.getframerate()
+        raw = w.readframes(w.getnframes())
+    samples = array.array("h")
+    samples.frombytes(raw[: len(raw) - (len(raw) % 2)])
+    if not samples or rate <= 0:
+        return None
+    total_seconds = len(samples) / rate
+    if total_seconds <= window:
+        return 0.0
+    hop = max(1, int(rate * _GIF_RMS_HOP_SECONDS))
+    hop_energy = [
+        sum(s * s for s in samples[i:i + hop])
+        for i in range(0, len(samples), hop)
+    ]
+    hops_per_window = max(1, int(window / _GIF_RMS_HOP_SECONDS))
+    if len(hop_energy) <= hops_per_window:
+        return 0.0
+    window_energy = sum(hop_energy[:hops_per_window])
+    best_energy, best_idx = window_energy, 0
+    for i in range(1, len(hop_energy) - hops_per_window + 1):
+        window_energy += hop_energy[i + hops_per_window - 1] - hop_energy[i - 1]
+        if window_energy > best_energy:
+            best_energy, best_idx = window_energy, i
+    return min(best_idx * _GIF_RMS_HOP_SECONDS, total_seconds - window)
+
+
+def _cut_reaction_gif(
+    src: Path, dest: Path, start: float, crop: tuple[int, int, int, int],
+    duration: float = _GIF_SECONDS,
+) -> str:
+    """Cut a looping face-crop reaction GIF from src: `start`/`duration` and
+    `crop` come from _pick_face_crop (already trimmed to the face's on-screen
+    span). Returns "" on success, error text on failure (dest removed).
+
+    palettegen/paletteuse in one filtergraph — plain GIF encode banding is ugly
+    on facecam footage, the palette pass is what made the #173 cuts look right."""
+    total = _probe_video_duration(src)
+    if total is not None:
+        start = max(0.0, min(start, max(0.0, total - duration)))
+    cx, cy, cw, ch = crop
+    for width in _GIF_WIDTHS:
+        # Crops are framed tight now, so they can land under the target width;
+        # scale up to it (bounded, so a small crop isn't blown into mush)
+        # rather than shipping a postage-stamp gif. Height follows the crop —
+        # gifs are deliberately not all the same size.
+        out_w = min(width, max(cw, int(cw * _GIF_MAX_UPSCALE)))
+        filtergraph = (
+            f"crop={cw}:{ch}:{cx}:{cy},"
+            f"fps={_GIF_FPS},scale={out_w}:-2:flags=lanczos,"
+            "split[a][b];[a]palettegen=stats_mode=diff[p];"
+            "[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle"
+        )
+        try:
+            # Same serialization + thread cap as every other ffmpeg call here —
+            # this pod is 1 CPU / 1Gi and concurrent encodes get OOM-killed.
+            with _overlay_lock():
+                r = subprocess.run(
+                    ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-t", f"{duration:.2f}",
+                     "-i", str(src), "-vf", filtergraph, "-loop", "0",
+                     "-threads", "1", str(dest)],
+                    capture_output=True, timeout=120,
+                )
+        except subprocess.TimeoutExpired:
+            dest.unlink(missing_ok=True)
+            return "gif encode timed out after 120s"
+        if r.returncode == 0 and dest.exists() and dest.stat().st_size > 10_000:
+            if dest.stat().st_size <= _GIF_MAX_BYTES:
+                return ""
+            continue  # over the X cap — retry at the next narrower width
+        err = r.stderr.decode(errors="replace")[-300:]
+        dest.unlink(missing_ok=True)
+        return f"gif encode failed (returncode={r.returncode}): {err}"
+    size = dest.stat().st_size if dest.exists() else 0
+    dest.unlink(missing_ok=True)
+    return f"gif too large at min width ({size} bytes > {_GIF_MAX_BYTES} cap)"
+
+
 def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> int:
     """Add a top bar above the clip: platform logo on the left, PLATFORM.COM/HANDLE on the right.
 
@@ -1376,6 +1804,22 @@ def get_x_handle(login: str) -> str:
     return _STREAMER_CATALOG.get(login.lower(), "")
 
 
+# Per-streamer posting paths — mirrors the Clip/GIF columns in
+# DesktopShare/streamers.md; keep both in sync when changing a streamer's path.
+# clip = caption the clip and post the MP4 (the original path);
+# gif  = cut a reaction GIF from the clip and post that instead (#173).
+# Streamers not listed here are clip-only.
+_STREAMER_PATH_OVERRIDES: dict[str, dict[str, bool]] = {
+    "jasontheween": {"clip": False, "gif": True},
+    "extraemily":   {"clip": True,  "gif": True},
+}
+
+
+def streamer_paths(login: str) -> dict[str, bool]:
+    """Return {"clip": bool, "gif": bool} posting paths for a bare login."""
+    return dict(_STREAMER_PATH_OVERRIDES.get(login.lower(), {"clip": True, "gif": False}))
+
+
 _PENDING_LOCK_PATH = Path("/tmp/.pending_publish.lock")
 
 
@@ -1547,6 +1991,12 @@ def approve_clip(
 ) -> dict:
     """Queue a clip for X publishing. Returns immediately — NiFi drains the queue.
 
+    One approval fans out per the streamer's posting paths (streamer_paths /
+    DesktopShare/streamers.md): clip=Y queues the MP4 as before; gif=Y also
+    queues the reaction GIF process_clip cut next to it, as its own pending
+    entry under "{clip_id}-gif" with the same tweet text. A gif-only streamer
+    (clip=N) queues just the GIF — the MP4 is never posted.
+
     Locked read-modify-write: without this, two near-simultaneous approvals (or an
     approval racing publish_next) can each read the same pending list and overwrite
     each other's append, silently dropping an approved clip from the queue.
@@ -1555,17 +2005,38 @@ def approve_clip(
     duration/created_at) through so the Pending Publish panel can render a full card
     instead of just clip_id + text.
     """
+    paths = streamer_paths(streamer)
+    gif_path = Path(clip_path).with_suffix(".gif") if clip_path else None
+    queue_gif = paths["gif"] and gif_path is not None and gif_path.exists()
+
+    entries: list[dict] = []
+    base = {
+        "tweet_text": tweet_text, "title": title,
+        "source": source, "streamer": streamer, "url": url,
+        "thumbnail_url": thumbnail_url, "x_handle": x_handle, "view_count": view_count,
+        "duration": duration, "created_at": created_at,
+    }
+    if paths["clip"]:
+        entries.append({**base, "clip_id": clip_id, "clip_path": clip_path})
+    if queue_gif:
+        entries.append({**base, "clip_id": f"{clip_id}-gif", "clip_path": str(gif_path)})
+
+    if not entries:
+        # gif-only streamer whose gif cut failed — refuse rather than silently
+        # posting the MP4 against the clip=N flag.
+        return {"queued": False, "clip_id": clip_id,
+                "reason": "gif path is on but no .gif exists for this clip (cut failed?)"}
+
+    queued_ids: list[str] = []
     with _pending_lock():
         pending = _load_pending()
-        if not any(p["clip_id"] == clip_id for p in pending):
-            pending.append({
-                "clip_id": clip_id, "clip_path": clip_path, "tweet_text": tweet_text, "title": title,
-                "source": source, "streamer": streamer, "url": url,
-                "thumbnail_url": thumbnail_url, "x_handle": x_handle, "view_count": view_count,
-                "duration": duration, "created_at": created_at,
-            })
+        for entry in entries:
+            if not any(p["clip_id"] == entry["clip_id"] for p in pending):
+                pending.append(entry)
+                queued_ids.append(entry["clip_id"])
+        if queued_ids:
             _save_pending(pending)
-    return {"queued": True, "clip_id": clip_id, "position": len(pending)}
+    return {"queued": True, "clip_id": clip_id, "queued_ids": queued_ids, "position": len(pending)}
 
 
 async def publish_pending(clip_id: str) -> dict:
@@ -2488,7 +2959,17 @@ async def process_clip(clip: dict) -> dict:
 
     title = clip.get("title", "").strip()
 
+    # Posting paths for this streamer (clip / gif — see _STREAMER_PATH_OVERRIDES).
+    # The gif cut itself happens at the end, only for clips that survive
+    # captioning; the peak-audio analysis has to happen here while the Whisper
+    # WAV still exists.
+    paths = streamer_paths(clip.get("streamer", ""))
+    gif_start: float | None = None
+    avatar_path: Path | None = None
+
     async with httpx.AsyncClient(verify=False, timeout=300.0) as client:
+        if paths["gif"] and clip.get("source", "twitch") == "twitch":
+            avatar_path = await _fetch_streamer_avatar(client, clip.get("streamer", ""))
         # Extract 16kHz mono WAV — much smaller upload to Whisper than raw MP4
         transcript = ""
         wav_path = Path(clip_path).with_suffix(".wav")
@@ -2501,6 +2982,11 @@ async def process_clip(clip: dict) -> dict:
             )
             if proc.returncode != 0 or not wav_path.exists():
                 raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()[:200]}")
+            if paths["gif"]:
+                try:
+                    gif_start = await asyncio.to_thread(_peak_audio_window, wav_path)
+                except Exception:
+                    gif_start = None  # _cut_reaction_gif falls back to a centered cut
             with open(wav_path, "rb") as f:
                 r = await client.post(
                     f"{settings.WHISPER_URL}/transcribe",
@@ -2694,9 +3180,39 @@ async def process_clip(clip: dict) -> dict:
         if error and not caption:
             return {**clip, "title": title, "transcript": transcript, "caption": "", "error": error}
 
+    # Gif-flagged streamer and the clip survived captioning — pick the
+    # streamer's face crop and cut the reaction GIF now so it's on the PVC
+    # before the clip reaches the review queue (approve_clip queues whatever
+    # .gif sits next to the MP4). No confident face crop -> no gif at all
+    # (#173 bar: never a full-frame or wrong-person cut); the clip itself
+    # isn't disqualified, approve just won't have a gif to queue.
+    gif_path = ""
+    gif_error = ""
+    if paths["gif"]:
+        gif_dest = Path(clip_path).with_suffix(".gif")
+        crop, crop_why, cut_start, cut_dur = await asyncio.to_thread(
+            _pick_face_crop, Path(clip_path), gif_start, avatar_path
+        )
+        if crop is None:
+            gif_error = f"skipped: {crop_why}"
+            # A stale .gif from an earlier cut (or recipe) must not survive a
+            # skip — approve_clip queues whatever .gif sits next to the MP4.
+            gif_dest.unlink(missing_ok=True)
+            print(f"[process_clip] gif skipped for {clip.get('clip_id', clip_path)}: {crop_why}")
+        else:
+            gif_error = await asyncio.to_thread(
+                _cut_reaction_gif, Path(clip_path), gif_dest, cut_start, crop, cut_dur
+            )
+            if gif_error:
+                print(f"[process_clip] gif cut failed for {clip.get('clip_id', clip_path)}: {gif_error}")
+            else:
+                gif_path = str(gif_dest)
+                print(f"[process_clip] gif cut ({crop_why}) for {clip.get('clip_id', clip_path)}")
+
     return {
         **clip, "title": title, "transcript": transcript, "caption": caption,
         "caption_mode": caption_mode, "quote_reason": quote_reason,
+        "paths": paths, "gif_path": gif_path, "gif_error": gif_error,
     }
 
 
@@ -2767,7 +3283,12 @@ async def clip_queue(limit: int = 20) -> list[dict]:
                 clip_path = record.get("clip_path", "")
                 if not clip_path or not Path(clip_path).exists():
                     continue
-                if clip_id in skipped or clip_id in published or clip_id in pending:
+                # Gif-only streamers (clip=N) queue/publish under "{clip_id}-gif"
+                # with the base id never entering pending/published — without the
+                # gif-id check their card would reappear here forever.
+                gif_id = f"{clip_id}-gif"
+                if (clip_id in skipped or clip_id in published or clip_id in pending
+                        or gif_id in published or gif_id in pending):
                     continue
                 caption = record.get("caption", "")
                 if not caption or caption.startswith("["):
@@ -2859,16 +3380,22 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Clip not found: {clip_path}")
 
-    duration, trimmed, err = _trim_if_oversized(path)
-    if duration is not None and duration > MAX_TWEET_VIDEO_DURATION:
-        if trimmed:
-            print(f"[_publish_sync] trimmed {path.name}: {duration:.1f}s -> "
-                  f"{MAX_TWEET_VIDEO_DURATION:.1f}s (exceeded X's 2min limit)")
-        else:
-            raise RuntimeError(
-                f"trim failed for {path.name} ({duration:.1f}s, exceeds "
-                f"{MAX_TWEET_VIDEO_DURATION:.0f}s X limit): {err}"
-            )
+    # Reaction-GIF pending entries (gif posting path, #173) point clip_path at
+    # the .gif — those skip the video trim (already cut to _GIF_SECONDS and
+    # size-capped at encode time) and the SRT attach, and upload as TweetGif.
+    is_gif = path.suffix.lower() == ".gif"
+
+    if not is_gif:
+        duration, trimmed, err = _trim_if_oversized(path)
+        if duration is not None and duration > MAX_TWEET_VIDEO_DURATION:
+            if trimmed:
+                print(f"[_publish_sync] trimmed {path.name}: {duration:.1f}s -> "
+                      f"{MAX_TWEET_VIDEO_DURATION:.1f}s (exceeded X's 2min limit)")
+            else:
+                raise RuntimeError(
+                    f"trim failed for {path.name} ({duration:.1f}s, exceeds "
+                    f"{MAX_TWEET_VIDEO_DURATION:.0f}s X limit): {err}"
+                )
 
     auth = tweepy.OAuth1UserHandler(
         settings.X_API_KEY,
@@ -2877,10 +3404,13 @@ def _publish_sync(clip_path: str, tweet_text: str) -> dict:
         settings.X_ACCESS_TOKEN_SECRET,
     )
     api_v1 = tweepy.API(auth)
-    media = api_v1.media_upload(str(path), chunked=True, media_category="TweetVideo")
+    media = api_v1.media_upload(
+        str(path), chunked=True,
+        media_category="TweetGif" if is_gif else "TweetVideo",
+    )
 
     srt_path = path.with_suffix(".srt")
-    if srt_path.exists():
+    if not is_gif and srt_path.exists():
         try:
             subtitle_media = api_v1.chunked_upload(
                 str(srt_path), file_type="text/srt", media_category="Subtitles",

@@ -155,9 +155,23 @@ async def publish(body: PublishRequest):
         raise HTTPException(status_code=400, detail="clip_path and tweet_text are required")
     if not os.path.exists(body.clip_path):
         raise HTTPException(status_code=404, detail=f"Clip file not found: {body.clip_path} — re-fetch clips first")
+    # Gif-only streamers (clip=N in streamer_paths / streamers.md) never post
+    # the MP4 — the review card's Post Now button hits this endpoint with the
+    # clip path, so redirect it to the reaction GIF the same way approve does.
+    clip_path = body.clip_path
+    paths = streamers.streamer_paths(body.streamer)
+    if not paths["clip"]:
+        gif_path = Path(clip_path).with_suffix(".gif")
+        if paths["gif"] and gif_path.exists():
+            clip_path = str(gif_path)
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=f"clip posting is disabled for {body.streamer} and no .gif exists for this clip",
+            )
     try:
         return await streamers.publish_clip(
-            body.clip_path, body.tweet_text, body.clip_id, body.title,
+            clip_path, body.tweet_text, body.clip_id, body.title,
             body.source, body.streamer, body.url, body.thumbnail_url, body.x_handle,
         )
     except Exception as e:
