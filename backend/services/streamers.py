@@ -1084,6 +1084,7 @@ def _parse_cropdetect(stderr: str, W: int, H: int) -> tuple[int, int, int, int]:
 
 def _pick_face_crop(
     src: Path, start: float | None, avatar_path: Path | None,
+    min_span: float = 2.5,
 ) -> tuple[tuple[int, int, int, int] | None, str, float, float]:
     """Choose the streamer's face crop for the gif window. Returns
     (crop (x,y,w,h), reason, gif_start, gif_duration) — the start/duration are
@@ -1151,7 +1152,11 @@ def _pick_face_crop(
                     continue
                 dets.append((i, x, y, fw, fh, face.copy(), img))
 
-        # Cluster detections into per-person tracks by center proximity
+        # Cluster detections into per-person tracks by center proximity. The
+        # radius scales with face size: a handheld closeup (300px+ face) drifts
+        # across the frame by more than the fixed radius between samples, and a
+        # fragmented track gets dropped as unstable; small facecam boxes keep
+        # the old fixed radius.
         clusters: list[list] = []
         thr = W * 0.10
         for d in dets:
@@ -1159,7 +1164,8 @@ def _pick_face_crop(
             for cl in clusters:
                 mx = statistics.mean(c[1] + c[3] / 2 for c in cl)
                 my = statistics.mean(c[2] + c[4] / 2 for c in cl)
-                if abs(cx - mx) < thr and abs(cy - my) < thr:
+                thr_cl = max(thr, 0.75 * max(d[3], statistics.median(c[3] for c in cl)))
+                if abs(cx - mx) < thr_cl and abs(cy - my) < thr_cl:
                     cl.append(d)
                     break
             else:
@@ -1239,7 +1245,7 @@ def _pick_face_crop(
         seg = max(segments, key=lambda s: (s[-1] - s[0], len(s)))
         span_start = t0 + seg[0] * 0.5
         span_end = t0 + seg[-1] * 0.5 + 0.5
-        if span_end - span_start < 2.5:
+        if span_end - span_start < min_span:
             return None, f"face on screen only {span_end - span_start:.1f}s near the peak", 0.0, 0.0
         gif_dur = min(_GIF_SECONDS, span_end - span_start)
 
@@ -1352,6 +1358,104 @@ def _peak_audio_window(wav_path: Path, window: float = _GIF_SECONDS) -> float | 
         if window_energy > best_energy:
             best_energy, best_idx = window_energy, i
     return min(best_idx * _GIF_RMS_HOP_SECONDS, total_seconds - window)
+
+
+_GIF_SCAN_WIDTH = 640      # downscaled decode width for the full-clip rescan
+_GIF_SCAN_MIN_HITS = 4     # confident frames (at 2fps) a rescan window must hold
+_GIF_SCAN_MAX_SECONDS = 90  # decode cap — clips are <=60s, don't chew a stray VOD
+_GIF_RESCAN_MIN_SPAN = 1.5  # rescan windows are identity-confirmed; a ~2s
+                            # closeup loop beats a 5s cut of the wrong moment
+
+
+def _identity_face_windows(src: Path, avatar_path: Path) -> list[float]:
+    """Fallback for when the peak-audio window holds no confident face cut:
+    the loudest span of an IRL clip is often a crowd shot with the streamer
+    off-camera (jasontheween 2026-08-19), so rescan the WHOLE clip — decoded
+    small at 2fps — scoring every face against the identity reference, and
+    return the starts of up to three non-overlapping _GIF_SECONDS windows
+    where the streamer is confidently on screen, best first. Empty when they never
+    show confidently. Sync + CPU-bound — call via asyncio.to_thread."""
+    import shutil
+    import tempfile
+
+    try:
+        import cv2
+    except Exception:
+        return []
+    if not _YUNET_MODEL.exists() or not _SFACE_MODEL.exists():
+        return []
+
+    fdir = Path(tempfile.mkdtemp(prefix="gifscan_"))
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-t", str(_GIF_SCAN_MAX_SECONDS), "-i", str(src),
+             "-vf", f"fps=2,scale={_GIF_SCAN_WIDTH}:-2",
+             "-threads", "1", str(fdir / "s_%03d.png")],
+            capture_output=True, timeout=240,
+        )
+        frames = sorted(fdir.glob("s_*.png"))
+        if r.returncode != 0 or len(frames) < 4:
+            return []
+
+        av = cv2.imread(str(avatar_path))
+        if av is None:
+            return []
+        detector = cv2.FaceDetectorYN_create(str(_YUNET_MODEL), "", (av.shape[1], av.shape[0]), 0.7)
+        recognizer = cv2.FaceRecognizerSF_create(str(_SFACE_MODEL), "")
+        detector.setInputSize((av.shape[1], av.shape[0]))
+        _, av_faces = detector.detect(av)
+        if av_faces is None or not len(av_faces):
+            return []
+        ref_feat = recognizer.feature(recognizer.alignCrop(av, av_faces[0]))
+
+        # Per sampled frame: (best cosine of any face, that face's width frac)
+        best_sims: list[tuple[float, float]] = []
+        for f in frames:
+            img = cv2.imread(str(f))
+            if img is None:
+                best_sims.append((-1.0, 0.0))
+                continue
+            h, w = img.shape[:2]
+            bar_s = (h / 1.19) * 0.19  # overlay bar, same layout as full res
+            detector.setInputSize((w, h))
+            _, faces = detector.detect(img)
+            best = (-1.0, 0.0)
+            for face in (faces if faces is not None else []):
+                x, y, fw, fh = (int(v) for v in face[:4])
+                if y + fh / 2 < bar_s or fw < w * _FACE_MIN_FRAC:
+                    continue
+                sim = float(recognizer.match(
+                    ref_feat,
+                    recognizer.feature(recognizer.alignCrop(img, face)),
+                    cv2.FaceRecognizerSF_FR_COSINE,
+                ))
+                if sim > best[0]:
+                    best = (sim, fw / w)
+            best_sims.append(best)
+
+        # Rank 5s windows by face-size-weighted confident mass — a 400px
+        # closeup of the streamer beats more frames of a 160px background
+        # face (the closeups are what make a reaction gif).
+        per_win = max(1, int(_GIF_SECONDS * 2))  # frames are 0.5s apart
+        scored = []
+        for i in range(0, max(1, len(best_sims) - per_win + 1)):
+            win = best_sims[i:i + per_win]
+            hits = sum(1 for s, _ in win if s >= _SFACE_CONFIDENT)
+            if hits >= _GIF_SCAN_MIN_HITS:
+                mass = sum(s * fw for s, fw in win if s >= _SFACE_CONFIDENT)
+                scored.append((mass, hits, i * 0.5))
+        scored.sort(reverse=True)
+        starts: list[float] = []
+        for _, _, t in scored:
+            if all(abs(t - prev) >= _GIF_SECONDS for prev in starts):
+                starts.append(t)
+            if len(starts) == 3:
+                break
+        return starts
+    except Exception:
+        return []
+    finally:
+        shutil.rmtree(fdir, ignore_errors=True)
 
 
 def _cut_reaction_gif(
@@ -3193,6 +3297,21 @@ async def process_clip(clip: dict) -> dict:
         crop, crop_why, cut_start, cut_dur = await asyncio.to_thread(
             _pick_face_crop, Path(clip_path), gif_start, avatar_path
         )
+        if crop is None and avatar_path is not None:
+            # The peak-audio window is deaf to where the streamer's face is —
+            # on IRL clips the loudest span is often a crowd shot with the
+            # streamer off-camera. Rescan the whole clip for windows where the
+            # identity match is confident and give the picker another shot.
+            for alt_start in await asyncio.to_thread(
+                _identity_face_windows, Path(clip_path), avatar_path
+            ):
+                crop, alt_why, cut_start, cut_dur = await asyncio.to_thread(
+                    _pick_face_crop, Path(clip_path), alt_start, avatar_path,
+                    _GIF_RESCAN_MIN_SPAN,
+                )
+                if crop is not None:
+                    crop_why = f"identity rescan @{alt_start:.1f}s: {alt_why}"
+                    break
         if crop is None:
             gif_error = f"skipped: {crop_why}"
             # A stale .gif from an earlier cut (or recipe) must not survive a
@@ -3208,6 +3327,16 @@ async def process_clip(clip: dict) -> dict:
             else:
                 gif_path = str(gif_dest)
                 print(f"[process_clip] gif cut ({crop_why}) for {clip.get('clip_id', clip_path)}")
+
+    if not paths["clip"] and not gif_path:
+        # Gif-only streamer with no gif has nothing publishable — disqualify
+        # instead of landing a card in review whose Post Now can only 409.
+        return {
+            **clip, "title": title, "transcript": transcript, "caption": "",
+            "caption_mode": caption_mode, "quote_reason": quote_reason,
+            "paths": paths, "gif_path": "", "gif_error": gif_error,
+            "error": f"disqualified: gif-only streamer, {gif_error or 'no gif cut'}",
+        }
 
     return {
         **clip, "title": title, "transcript": transcript, "caption": caption,
