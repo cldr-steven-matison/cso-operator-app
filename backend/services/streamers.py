@@ -1082,6 +1082,51 @@ def _parse_cropdetect(stderr: str, W: int, H: int) -> tuple[int, int, int, int]:
     return box
 
 
+_STATIC_BLACK_LIMIT = 0.35  # dead-black canvas fraction that disqualifies a
+                            # clip post; calibrated 2026-08-19 — normal clips
+                            # measure 0.00-0.14, the bad KaiCenat layout 0.63
+
+
+def _static_black_fraction(src: Path) -> float:
+    """Fraction of the frame (below the overlay bar) whose luma stays under
+    24 (cropdetect's bar threshold) across EVERY sampled frame — static black
+    canvas. Transiently dark scenes (night gameplay, horror) light up
+    somewhere over the clip and don't count, so they can't false-positive.
+    Returns -1.0 on any failure so callers fail open.
+    Sync + CPU-bound — call via asyncio.to_thread."""
+    import tempfile
+
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return -1.0
+    try:
+        with tempfile.TemporaryDirectory(prefix="blackscan_") as td:
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-t", str(_GIF_SCAN_MAX_SECONDS), "-i", str(src),
+                 "-vf", "fps=1,scale=320:-2", "-pix_fmt", "gray",
+                 "-threads", "1", str(Path(td) / "g_%03d.png")],
+                capture_output=True, timeout=240,
+            )
+            frames = sorted(Path(td).glob("g_*.png"))
+            if r.returncode != 0 or len(frames) < 4:
+                return -1.0
+            mx = None
+            for f in frames:
+                img = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
+                if img is None:
+                    continue
+                mx = img if mx is None else np.maximum(mx, img)
+            if mx is None:
+                return -1.0
+            # Exclude the burned top bar (black by design, logo/text aside).
+            bar = int(round((mx.shape[0] / 1.19) * 0.19))
+            return float((mx[bar:, :] < 24).mean())
+    except Exception:
+        return -1.0
+
+
 def _pick_face_crop(
     src: Path, start: float | None, avatar_path: Path | None,
     min_span: float = 2.5,
@@ -3070,6 +3115,19 @@ async def process_clip(clip: dict) -> dict:
     paths = streamer_paths(clip.get("streamer", ""))
     gif_start: float | None = None
     avatar_path: Path | None = None
+
+    # Clip-only streamers post the MP4 as-is, so a source that is mostly dead
+    # black canvas (phone-app layouts on a black stage — the KaiCenat post of
+    # 2026-08-19) goes out looking like black bars. Cropping can't fix it (the
+    # black is interior, not borders), so disqualify before spending Whisper/
+    # vLLM on it. Gif streamers are exempt — the gif crops to the face anyway.
+    if paths["clip"] and not paths["gif"]:
+        black_frac = await asyncio.to_thread(_static_black_fraction, Path(clip_path))
+        if black_frac > _STATIC_BLACK_LIMIT:
+            print(f"[process_clip] disqualified {clip.get('clip_id', clip_path)}: "
+                  f"{black_frac:.0%} static black canvas")
+            return {**clip, "title": title, "transcript": "", "caption": "",
+                    "error": f"disqualified: {black_frac:.0%} of the frame is static black canvas"}
 
     async with httpx.AsyncClient(verify=False, timeout=300.0) as client:
         if paths["gif"] and clip.get("source", "twitch") == "twitch":
