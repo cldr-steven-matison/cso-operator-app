@@ -8,7 +8,7 @@ This file (2000+ lines) is where every real incident in this project has origina
 
 1. **Grep the file for existing conventions first.** It already has established, working patterns for: ffmpeg thread-capping (`-threads 1 -x264opts threads=1:sliced-threads=0` — see `_burn_platform_overlay`, `_burn_glitch_intro`'s `encode_still`), file locking (`_pending_lock`/`_overlay_lock` via `flock`), atomic-ish JSON persistence patterns, and NiFi run-status-only edits (never GET-then-PUT a full processor entity). Don't re-derive a weaker version of something already solved here.
 2. **The pod's real resource limits are `cpu: "1"`, `memory: "1Gi"`** (`k8s/deployment.yaml`) — far below what libx264's auto-detected thread count (from host CPU count, not the cgroup limit) assumes. Any new ffmpeg/subprocess call doing real encoding work needs an explicit thread cap or it risks a silent OOM-kill (`returncode -9`) that looks like a mysterious transcoding failure.
-3. **JSON state files** (`.pending_publish.json`, `.published.json`, `.watchlist.json`, etc., all in `/clips` on the PVC) are written with plain `write_text()`, not atomic temp-then-rename. A crash mid-write silently truncates to invalid JSON, which the loaders treat as empty state, not an error. Known gap, not yet fixed — see `cso-operator-app-streamers-review-2026-07-17.md` in DesktopShare.
+3. **JSON state files** (`.pending_publish.json`, `.published.json`, `.watchlist.json`, etc., all in `/clips` on the PVC) go through `_atomic_write_json()` (`backend/services/streamers.py:103`) — temp-then-rename, so a crash mid-write can't truncate one to invalid JSON that the loaders would read as empty state. Any new state file must use it too; a plain `write_text()` reintroduces the gap. Background: `streamers/cso-operator-app-streamers-review-2026-07-17.md` in DesktopShare.
 
 ## Deploy
 
@@ -29,10 +29,10 @@ Re-export periodically, and definitely after any session that builds/rewires a f
 3. **Pretty-print before committing** (`json.dumps(d, indent=2)`) — the raw response is minified, and committing it that way makes every future diff unreviewable (whole-file rewrite instead of the real additive change).
 4. Confirmed safe to commit: Parameter Context sensitive values export as `null`, never real secret values, and processor properties aren't masked-then-leaked either. No credential risk in these files.
 
-Worked example with the exact commands: `DesktopShare/cso-operator-app-streamers.md` Session 21 (2026-07-24).
+Worked example with the exact commands: `DesktopShare/streamers/cso-operator-app-streamers.md` Session 21 (2026-07-24).
 
 ## Live traffic caution
 
 Fetch/publish can be running at any time. The full live-queue rules — no `kubectl exec` patches on `/clips`, no unilateral queue mutations, no injecting test data into live triggers, post-redeploy pod sanity — live in `DesktopShare/agent/live-queues.md`. Read that before touching anything queue-adjacent here.
 
-Full history and incident writeups: `DesktopShare/cso-operator-app-streamers.md` (golden source doc) and this session's Claude memory index on the local device.
+Full history and incident writeups: `DesktopShare/streamers/cso-operator-app-streamers.md` (golden source doc) and this session's Claude memory index on the local device.
