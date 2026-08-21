@@ -15,6 +15,7 @@ import {
   type PostedClip,
   type StreamerClip,
   type StreamerFlows,
+  type StreamerGif,
   type StreamerTopics,
 } from "@/lib/api";
 import { TopicPeek } from "./TopicPeek";
@@ -513,6 +514,156 @@ function PostedClipsPanel({ posted, loading }: { posted: PostedClip[]; loading: 
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ── GifsPanel ──────────────────────────────────────────────────────────────
+
+function GifsPanel({
+  items,
+  loading,
+  onReviewed,
+  onPosted,
+}: {
+  items: StreamerGif[];
+  loading: boolean;
+  onReviewed: (clip_id: string, verdict: "good" | "hidden") => void;
+  onPosted: (clip_id: string) => void;
+}) {
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
+  const [postingId, setPostingId] = useState<string | null>(null);
+  const [postResult, setPostResult] = useState<Record<string, { ok: boolean; url?: string; error?: string }>>({});
+
+  async function doReview(clip_id: string, verdict: "good" | "hidden") {
+    setReviewingId(clip_id);
+    try {
+      await api.streamersGifReview(clip_id, verdict);
+      onReviewed(clip_id, verdict);
+    } catch {} finally {
+      setReviewingId(null);
+    }
+  }
+
+  async function doPostNow(clip_id: string) {
+    setPostingId(clip_id);
+    try {
+      const r = await api.streamersGifPostNow(clip_id);
+      if (r.published === false) {
+        setPostResult((prev) => ({ ...prev, [clip_id]: { ok: false, error: r.reason || "not published" } }));
+      } else {
+        setPostResult((prev) => ({ ...prev, [clip_id]: { ok: true, url: r.url } }));
+        // Deliberately does NOT drop the card: the library is the archive of
+        // what we've made, so a posted gif stays on the shelf. Only ❌ hides.
+        onPosted(clip_id);
+      }
+    } catch (e) {
+      setPostResult((prev) => ({ ...prev, [clip_id]: { ok: false, error: String(e) } }));
+    } finally {
+      setPostingId(null);
+    }
+  }
+
+  if (loading) return <p className="text-muted text-sm">Loading GIFs…</p>;
+  if (items.length === 0) return <p className="text-muted text-sm">No GIFs cut yet.</p>;
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+      {items.map((g, i) => {
+        const result = postResult[g.clip_id];
+        const busy = reviewingId === g.clip_id || postingId === g.clip_id;
+        const hidden = g.verdict === "hidden";
+        return (
+          <div
+            key={g.clip_id || i}
+            className={`border rounded overflow-hidden bg-bg flex flex-col ${
+              hidden ? "border-border opacity-40 grayscale" : "border-border"
+            }`}
+          >
+            <img
+              src={`/api/streamers/gif/${encodeURIComponent(g.clip_id)}`}
+              alt={g.title || g.clip_id}
+              loading="lazy"
+              /* No forced aspect: the tile takes the gif's own shape, so what
+                 you review is exactly what gets posted. aspect-video +
+                 object-cover was 16:9-cropping the square cuts. */
+              className="w-full h-auto block bg-panel"
+            />
+            <div className="p-2 space-y-1 min-w-0 flex-1 flex flex-col">
+              <div className="flex items-center gap-1.5 text-[11px] text-muted flex-wrap">
+                {g.source && <PlatformBadge platform={g.source as "twitch" | "kick"} />}
+                {g.streamer && <span className="font-mono truncate text-text">{g.streamer}</span>}
+                {g.view_count != null && <span>· {g.view_count.toLocaleString()} views</span>}
+              </div>
+              {g.url ? (
+                <a
+                  href={g.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs font-semibold text-text hover:text-accent line-clamp-2"
+                >
+                  {g.title || g.clip_id || "Untitled Clip"}
+                </a>
+              ) : (
+                <p className="text-xs font-semibold text-text line-clamp-2">
+                  {g.title || g.clip_id || "Untitled Clip"}
+                </p>
+              )}
+              <div className="flex items-center gap-1.5 text-[10px] text-muted flex-wrap">
+                <span>{(g.gif_bytes / 1048576).toFixed(1)} MB</span>
+                {g.verdict === "good" && <Badge tone="ok">good</Badge>}
+                {hidden && <Badge tone="neutral">hidden</Badge>}
+                {g.tweet_url && (
+                  <a href={g.tweet_url} target="_blank" rel="noopener noreferrer" title="View the post on X">
+                    <Badge tone="ok">posted</Badge>
+                  </a>
+                )}
+              </div>
+              {g.crop_why && <p className="text-[10px] text-muted line-clamp-2">{g.crop_why}</p>}
+              {g.gif_error && <p className="text-[10px] text-bad line-clamp-2">{g.gif_error}</p>}
+              <div className="flex items-center gap-1 flex-wrap pt-1 mt-auto">
+                <Button
+                  onClick={() => doReview(g.clip_id, "good")}
+                  disabled={busy}
+                  variant="ghost"
+                  className="text-[11px] px-2 py-1"
+                >
+                  ✅ good
+                </Button>
+                <Button
+                  onClick={() => doReview(g.clip_id, "hidden")}
+                  disabled={busy}
+                  variant="ghost"
+                  className="text-[11px] px-2 py-1 opacity-70"
+                >
+                  ❌ hide
+                </Button>
+                <Button
+                  onClick={() => doPostNow(g.clip_id)}
+                  disabled={busy}
+                  className="text-[11px] px-2 py-1"
+                >
+                  {postingId === g.clip_id ? "Posting…" : g.tweet_url ? "post again" : "post now"}
+                </Button>
+              </div>
+              {result && (
+                <span className={result.ok ? "text-accent text-[11px]" : "text-bad text-[11px]"}>
+                  {result.ok ? (
+                    <>
+                      Posted ✓{" "}
+                      <a href={result.url} target="_blank" rel="noopener noreferrer" className="underline break-all">
+                        {result.url}
+                      </a>
+                    </>
+                  ) : (
+                    result.error
+                  )}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1323,13 +1474,19 @@ export function StreamersPage() {
   const [pendingLoading, setPendingLoading] = useState(true);
   const [posted, setPosted] = useState<PostedClip[]>([]);
   const [postedLoading, setPostedLoading] = useState(true);
-  const [view, setView] = useState<"main" | "posted" | "inspector" | "usersbots">("main");
+  const [gifs, setGifs] = useState<StreamerGif[]>([]);
+  const [gifsLoading, setGifsLoading] = useState(true);
+  const [gifsIncludeHidden, setGifsIncludeHidden] = useState(false);
+  const [view, setView] = useState<"main" | "posted" | "inspector" | "usersbots" | "gifs">("main");
   const [usersBotsTarget, setUsersBotsTarget] = useState<UsersBotsTarget | null>(null);
   const [approvingAll, setApprovingAll] = useState(false);
   const [approveAllResult, setApproveAllResult] = useState<string | null>(null);
   const [triggering, setTriggering] = useState<string | null>(null);
   const [triggerResult, setTriggerResult] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // The 30s poll effect runs once with [] deps, so its closure would freeze the
+  // include_hidden flag at its initial value — read it from a ref instead.
+  const gifsHiddenRef = useRef(false);
 
   const refreshFlows = async () => {
     try {
@@ -1354,6 +1511,38 @@ export function StreamersPage() {
     } catch {} finally {
       setPostedLoading(false);
     }
+  };
+
+  const refreshGifs = async (includeHidden = gifsHiddenRef.current) => {
+    try {
+      const r = await api.streamersGifs(includeHidden);
+      setGifs(r.gifs);
+    } catch {} finally {
+      setGifsLoading(false);
+    }
+  };
+
+  const onGifReviewed = (clip_id: string, verdict: "good" | "hidden") => {
+    setGifs((prev) =>
+      gifsHiddenRef.current
+        ? prev.map((g) => (g.clip_id === clip_id ? { ...g, verdict } : g))
+        : prev.filter((g) => g.clip_id !== clip_id || verdict !== "hidden"),
+    );
+  };
+
+  const onGifPosted = (_clip_id: string) => {
+    // Keep the gif in the library — refresh so it re-renders with its tweet_url
+    // (the "posted" badge) rather than disappearing.
+    refreshGifs();
+    refreshPosted();
+  };
+
+  const toggleGifsHidden = () => {
+    const next = !gifsIncludeHidden;
+    gifsHiddenRef.current = next;
+    setGifsIncludeHidden(next);
+    setGifsLoading(true);
+    refreshGifs(next);
   };
 
   const refreshQueue = async () => {
@@ -1464,6 +1653,7 @@ export function StreamersPage() {
     refreshTopics();
     refreshPending();
     refreshPosted();
+    refreshGifs();
 
     const startPoll = () => {
       if (pollRef.current) clearInterval(pollRef.current);
@@ -1471,6 +1661,7 @@ export function StreamersPage() {
         if (!document.hidden) {
           refreshFlows();
           refreshPending();
+          refreshGifs();
         }
       }, 30000);
     };
@@ -1481,6 +1672,7 @@ export function StreamersPage() {
       } else {
         refreshFlows();
         refreshPending();
+        refreshGifs();
         startPoll();
       }
     };
@@ -1524,6 +1716,12 @@ export function StreamersPage() {
           className={`px-3 py-1 border-l border-border transition-colors ${view === "usersbots" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
         >
           Users/Bots
+        </button>
+        <button
+          onClick={() => setView("gifs")}
+          className={`px-3 py-1 border-l border-border transition-colors ${view === "gifs" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+        >
+          GIFs{gifs.length > 0 ? ` (${gifs.length})` : ""}
         </button>
       </div>
 
@@ -1711,6 +1909,35 @@ export function StreamersPage() {
       )}
 
       {view === "usersbots" && <UsersBots target={usersBotsTarget} />}
+
+      {view === "gifs" && (
+      <Card>
+        <div className="flex items-center justify-between mb-2">
+          <CardTitle>
+            GIFs
+            {gifs.length > 0 && (
+              <span className="ml-2 text-xs text-muted font-normal">
+                {gifs.length} cut
+              </span>
+            )}
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <Button className="text-xs" variant="ghost" onClick={toggleGifsHidden}>
+              {gifsIncludeHidden ? "Hide hidden" : "Show hidden"}
+            </Button>
+            <Button className="text-xs" onClick={() => refreshGifs()}>
+              Refresh
+            </Button>
+          </div>
+        </div>
+        <GifsPanel
+          items={gifs}
+          loading={gifsLoading}
+          onReviewed={onGifReviewed}
+          onPosted={onGifPosted}
+        />
+      </Card>
+      )}
 
     </div>
   );

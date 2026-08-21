@@ -101,6 +101,8 @@ export type StreamerClip = {
   view_count?: number;
   created_at?: string;
   clip_path?: string;
+  gif_path?: string;
+  paths?: { clip: boolean; gif: boolean; gif_post?: boolean };
   transcript?: string;
   caption?: string;
   _offset?: number;
@@ -114,6 +116,8 @@ export type WatchlistResponse = { logins: string[] };
 export type PendingClip = {
   clip_id: string;
   clip_path: string;
+  gif_path?: string;
+  paths?: { clip: boolean; gif: boolean; gif_post?: boolean };
   tweet_text: string;
   title?: string;
   source?: string;
@@ -124,6 +128,29 @@ export type PendingClip = {
   view_count?: number;
   duration?: number;
   created_at?: string;
+};
+
+export type StreamerGif = {
+  clip_id: string;
+  streamer: string;
+  source: string;
+  title: string;
+  url: string;
+  thumbnail_url: string;
+  x_handle: string;
+  view_count: number;
+  created_at: string;
+  gif_path: string;
+  gif_bytes: number;
+  crop_why: string;
+  gif_error: string;
+  indexed_at: string;
+  verdict: "good" | "hidden" | null;
+  // Set once the gif has been posted to X. Posting does NOT remove it from the
+  // library listing — only a "hidden" verdict does.
+  tweet_url?: string;
+  tweet_id?: string;
+  posted_at?: string;
 };
 
 export type InspectorClip = {
@@ -371,6 +398,19 @@ export const api = {
     jpost<{ ok: boolean; clip_id?: string; duration?: number; error?: string }>(
       "/api/streamers/inspect/queue-clip",
       { platform, streamer, clip_id, url, thumbnail_url, title, view_count, created_at },
+    ),
+  streamersGifs: (includeHidden = false) =>
+    jget<{ gifs: StreamerGif[] }>(
+      `/api/streamers/gifs${includeHidden ? "?include_hidden=1" : ""}`,
+    ),
+  streamersGifReview: (clip_id: string, verdict: "good" | "hidden") =>
+    jpost<{ ok: boolean; clip_id: string; verdict: string }>(
+      `/api/streamers/gifs/${encodeURIComponent(clip_id)}/review`,
+      { verdict },
+    ),
+  streamersGifPostNow: (clip_id: string) =>
+    jpost<{ ok?: boolean; published?: boolean; tweet_id?: string; url?: string; reason?: string }>(
+      `/api/streamers/gifs/${encodeURIComponent(clip_id)}/post-now`,
     ),
 };
 
