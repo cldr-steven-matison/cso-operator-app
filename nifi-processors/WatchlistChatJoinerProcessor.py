@@ -11,7 +11,7 @@ class WatchlistChatJoinerProcessor(FlowFileTransform):
         implements = ['org.apache.nifi.python.processor.FlowFileTransform']
 
     class ProcessorDetails:
-        version = '0.0.5-SNAPSHOT'
+        version = '0.0.6-SNAPSHOT'
         description = (
             'Holds one persistent IRC connection, opened once in onScheduled, and executes JOIN + '
             'PRIVMSG (the one-time greeting) for whichever streamer the incoming FlowFile names. Does '
@@ -21,7 +21,12 @@ class WatchlistChatJoinerProcessor(FlowFileTransform):
             'at all, exactly once per streamer per newly-detected join. This processor only ever does '
             'the one thing NiFi cannot do natively: hold a live authenticated Twitch IRC socket. '
             'Fully separate connection and refresh token from TwitchChatListenerProcessor - never '
-            'shares state with it. Dry Run (default true) skips opening the real IRC connection '
+            'shares state with it. Twitch rotates the refresh token on every use, so the rotated '
+            'value is persisted to NiFi component state (Scope.LOCAL, key "refresh_token") and read '
+            'back on the next onScheduled - a restart no longer needs a manual device-code re-auth. '
+            'State is per processor instance, so two instances of this class (WatchlistChatJoiner and '
+            'TopStreamerJoiner) keep separate tokens for their separate Twitch apps. '
+            'Dry Run (default true) skips opening the real IRC connection '
             'entirely and logs what would be sent instead.'
         )
         tags = ['twitch', 'irc', 'chat', 'streamers', 'watchlist', 'chat-bot']
@@ -52,7 +57,11 @@ class WatchlistChatJoinerProcessor(FlowFileTransform):
         name="Refresh Token",
         description="Independent user refresh token for the bot account (chat:read+chat:edit scopes). "
                      "Do NOT reuse TwitchChatListenerProcessor's refresh token - Twitch rotates it on "
-                     "every use and two processors refreshing from the same seed will race each other.",
+                     "every use and two processors refreshing from the same seed will race each other. "
+                     "This is a SEED only: it is read on the first start and whenever component state is "
+                     "empty, after which the rotated token is persisted to state and this property is "
+                     "ignored. To force a re-seed, paste a freshly minted token here (or in the Parameter "
+                     "Context) and restart - a dead stored token is dropped automatically on HTTP 400.",
         required=True,
         sensitive=True,
         validators=[StandardValidators.NON_EMPTY_VALIDATOR],
@@ -81,6 +90,10 @@ class WatchlistChatJoinerProcessor(FlowFileTransform):
         validators=[StandardValidators.BOOLEAN_VALIDATOR],
     )
 
+    # Component-state key holding the rotated refresh token. NiFi scopes component state per
+    # processor instance, so the two instances of this class do not collide.
+    STATE_KEY_REFRESH_TOKEN = 'refresh_token'
+
     def __init__(self, **kwargs):
         # 'pass' is the safest initialization in many containerized environments —
         # real state is set up in onScheduled, which is guaranteed to run before transform().
@@ -98,10 +111,30 @@ class WatchlistChatJoinerProcessor(FlowFileTransform):
         self._username = context.getProperty(self.BOT_USERNAME).getValue()
         self._client_id = context.getProperty(self.CLIENT_ID).getValue()
         self._client_secret = context.getProperty(self.CLIENT_SECRET).getValue()
-        # Seeded from the property once; rotates in-memory on every refresh after that,
-        # same discipline as TwitchChatListenerProcessor. Its own independent seed -
-        # never TwitchChatListenerProcessor's twitch-bot-refresh-token.
-        self._refresh_token = context.getProperty(self.REFRESH_TOKEN).getValue()
+        # The property is a seed, not the token in ongoing use: Twitch rotates the refresh
+        # token on every use, so the live value lives in component state and the property is
+        # only consulted when state is empty (first ever start, or after a deliberate re-seed).
+        # Its own independent seed - never TwitchChatListenerProcessor's twitch-bot-refresh-token.
+        # Guarded: a NiFi build without the state binding must degrade to the old
+        # property-seed behaviour, not fail to start the processor at all.
+        try:
+            self._state_manager = context.getStateManager()
+        except Exception as e:
+            self._state_manager = None
+            if self.logger:
+                self.logger.warn(f"Component state unavailable; the rotated Twitch refresh token "
+                                 f"will not survive a restart: {e}")
+        self._property_seed = context.getProperty(self.REFRESH_TOKEN).getValue()
+        self._reseed_attempted = False
+        stored = self._read_stored_refresh_token()
+        if stored:
+            self._refresh_token = stored
+            self._token_source = 'state'
+        else:
+            self._refresh_token = self._property_seed
+            self._token_source = 'property'
+        if self.logger:
+            self.logger.info(f"Twitch refresh token seeded from {self._token_source}")
         self._sock = None
         # Already-joined-this-session dedup, belt-and-suspenders alongside the upstream
         # DistributedMapCache gate - a restart of this processor alone (bundle-version
@@ -173,7 +206,29 @@ class WatchlistChatJoinerProcessor(FlowFileTransform):
         self._drain(timeout=2)
 
     def _refresh_access_token(self):
+        import urllib.error
+        try:
+            return self._request_access_token()
+        except urllib.error.HTTPError as e:
+            # 400 here means the refresh token itself is dead, not that Twitch is unreachable.
+            # If the dead one came out of component state, drop it and give the property seed
+            # exactly one chance - that makes re-seeding "paste a fresh token into the Parameter
+            # Context and restart" instead of a code change. Only once per run: retrying a seed
+            # that is itself spent just burns calls and muddies the log.
+            if e.code != 400 or self._token_source != 'state' or self._reseed_attempted:
+                raise
+            self._reseed_attempted = True
+            if self.logger:
+                self.logger.warn("Persisted Twitch refresh token was rejected (HTTP 400); "
+                                 "clearing component state and retrying once from the property seed")
+            self._clear_stored_refresh_token()
+            self._refresh_token = self._property_seed
+            self._token_source = 'property'
+            return self._request_access_token()
+
+    def _request_access_token(self):
         import json
+        import urllib.error
         import urllib.parse
         import urllib.request
         body = urllib.parse.urlencode({
@@ -183,10 +238,77 @@ class WatchlistChatJoinerProcessor(FlowFileTransform):
             "client_secret": self._client_secret,
         }).encode()
         req = urllib.request.Request("https://id.twitch.tv/oauth2/token", data=body, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            payload = json.loads(resp.read().decode('utf-8'))
-        self._refresh_token = payload["refresh_token"]
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                payload = json.loads(resp.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            # Without this, transform()'s broad except reports a dead token identically to a
+            # network blip, and a botched deploy looks exactly like Twitch being unreachable.
+            # Log Twitch's own body. Same handling as TwitchChatListenerProcessor.
+            detail = e.read().decode('utf-8', errors='ignore')[:500]
+            if self.logger:
+                self.logger.error(f"Twitch token refresh rejected: HTTP {e.code} {detail}")
+            raise
+        if "access_token" not in payload:
+            raise RuntimeError(f"Twitch token refresh returned no access_token: {json.dumps(payload)[:500]}")
+        # Twitch rotates the refresh token on every use - the old one is now invalid. It has
+        # been observed absent on some responses; keeping the previous value is strictly better
+        # than a KeyError that reads as a connection failure.
+        rotated = payload.get("refresh_token")
+        if rotated:
+            self._refresh_token = rotated
+            self._token_source = 'state'
+            # Safe to write straight through: unlike TwitchChatListenerProcessor, this whole
+            # path runs on the NiFi task thread under transform(), not a background thread.
+            self._persist_refresh_token(rotated)
+        elif self.logger:
+            self.logger.warn("Twitch token refresh returned no refresh_token; keeping the previous one")
         return payload["access_token"]
+
+    # --- Component state: the rotated refresh token ---
+    #
+    # Imported lazily rather than at module scope: nifiapi.componentstate resolves
+    # Scope.LOCAL/CLUSTER through the py4j JVM bridge at import time.
+    # State is not encrypted the way a sensitive property is, and this pod's volumes are
+    # emptyDir - so this survives a processor or NiFi restart, but not a pod delete. A pod
+    # delete already destroys the entire flow, so that is no worse than the flow's own
+    # durability. Every one of these is best-effort: a state failure must never take down a
+    # join, since the in-memory token still works for the life of the process.
+
+    def _read_stored_refresh_token(self):
+        if self._state_manager is None:
+            return None
+        try:
+            from nifiapi.componentstate import Scope
+            return self._state_manager.getState(Scope.LOCAL).get(self.STATE_KEY_REFRESH_TOKEN)
+        except Exception as e:
+            if self.logger:
+                self.logger.warn(f"Could not read the persisted Twitch refresh token from state, "
+                                 f"falling back to the property seed: {e}")
+            return None
+
+    def _persist_refresh_token(self, token):
+        if self._state_manager is None:
+            return
+        try:
+            from nifiapi.componentstate import Scope
+            state = self._state_manager.getState(Scope.LOCAL).toMap()
+            state[self.STATE_KEY_REFRESH_TOKEN] = token
+            self._state_manager.setState(state, Scope.LOCAL)
+        except Exception as e:
+            if self.logger:
+                self.logger.warn(f"Could not persist the rotated Twitch refresh token; this run is "
+                                 f"fine but the next restart will need a re-seed: {e}")
+
+    def _clear_stored_refresh_token(self):
+        if self._state_manager is None:
+            return
+        try:
+            from nifiapi.componentstate import Scope
+            self._state_manager.clear(Scope.LOCAL)
+        except Exception as e:
+            if self.logger:
+                self.logger.warn(f"Could not clear the rejected Twitch refresh token from state: {e}")
 
     def _send(self, message):
         self._sock.sendall((message + "\r\n").encode('utf-8'))

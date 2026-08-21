@@ -19,8 +19,8 @@ class TwitchChatListenerProcessor(FlowFileSource):
         implements = ['org.apache.nifi.python.processor.FlowFileSource']
 
     class ProcessorDetails:
-        version = '0.0.22-SNAPSHOT'
-        description = 'Holds a persistent connection to Twitch IRC chat and emits one FlowFile per detected "!load <streamer> [screen]" command (screen optional, defaults to screen1, "!l" accepted as a short alias) or "!matrix <screen1|screen2|screen3|screen4>" command (screen required, no default - unlike !load, a bare "!matrix" with no screen is not a recognized command; screen1 targets the Jetson, screen2 targets GamingPC, screen3/screen4 target TunaStarlink). Requests the twitch.tv/tags IRCv3 capability to read each message'"'"'s badges/mod tags. Mod-only short forms: "!m" for !matrix, "k:" in place of "kick:" on a streamer login, and "s1"/"s2"/"s3"/"s4" in place of screen1-4 - each is checked independently, and a non-broadcaster/non-moderator sender using any of them has the whole command silently ignored (same as an unrecognized command); the existing full-text forms (including the pre-existing "!l" alias) keep working for everyone, unchanged. Before dispatching a !load, checks the streamer'"'"'s live status via the Live Check API URL (cso-operator-app, covers both Twitch and Kick "kick:" logins) and replies "not live" instead of queuing if they'"'"'re offline - a lookup failure fails open (dispatches anyway) rather than silently blocking a real load. Also carries prefix-anchored chat triggers that need no "!" prefix, matched against a normalized copy of the message (Twitch'"'"'s invisible TAG-SELECTOR stripped, variation selectors stripped, NFKC, whitespace collapsed, lowercased) and evaluated most-specific-first: the Watchlist Trigger Command ("tuna tuna tuna" by default) or its three-fish-emoji equivalent, optionally followed by a streamer name, adds that streamer to the watchlist once Trigger Vote Count (default 3) occurrences land inside Trigger Vote Window Seconds (default 120) - every occurrence counts, including one person repeating themselves, and the tally is per (trigger, target) so three people naming three streamers is three separate tallies; it is open to everyone and posts a single progress reply one vote short of firing. The three-fish-plus-clapper form (or "<Watchlist Trigger Command> clip") is broadcaster/moderator-only, fires on one use with no vote, and requests a real clip post; a non-mod using it is ignored silently, exactly like the other mod-only short forms. It is gated behind Clip Trigger Enabled (default false - the feature ships dark and that property is the instant off-switch during a raid) and a rolling 24-hour Clip Daily Cap. A trigger with no streamer named targets whoever was last loaded by !load in this running process, and says so once (rate-limited) if nothing has been loaded yet. Rate limiting is one generic ladder: !load and !matrix share the single global Cooldown Seconds timer they always have, while each trigger must clear a global, a per-user and a per-target window before it fires - mods bypass the vote count, never the cooldowns, because the cost sits on the backend rather than on who asked. A fired trigger only enqueues a "chat_trigger" FlowFile and returns immediately; the listener never calls the backend itself, because blocking the IRC reader thread through a 30-90s clip job would blow past Twitch'"'"'s PING tolerance and force a reconnect, burning a refresh token every time. Announces itself once on join across two messages (a single PRIVMSG caps at 500 characters) with no auto-posted watchlist - reconnects happen often enough that repeating it every time reads as spam; responds to "!commands"/"!help" and "!watchlist" ("!w" alias accepted) on demand only. Mints a fresh access token from the refresh token before every (re)connect, so it never hits the ~4hr access-token expiry. Reconnects with backoff on disconnect.'
+        version = '0.0.23-SNAPSHOT'
+        description = 'Holds a persistent connection to Twitch IRC chat and emits one FlowFile per detected "!load <streamer> [screen]" command (screen optional, defaults to screen1, "!l" accepted as a short alias) or "!matrix <screen1|screen2|screen3|screen4>" command (screen required, no default - unlike !load, a bare "!matrix" with no screen is not a recognized command; screen1 targets the Jetson, screen2 targets GamingPC, screen3/screen4 target TunaStarlink). Requests the twitch.tv/tags IRCv3 capability to read each message'"'"'s badges/mod tags. Mod-only short forms: "!m" for !matrix, "k:" in place of "kick:" on a streamer login, and "s1"/"s2"/"s3"/"s4" in place of screen1-4 - each is checked independently, and a non-broadcaster/non-moderator sender using any of them has the whole command silently ignored (same as an unrecognized command); the existing full-text forms (including the pre-existing "!l" alias) keep working for everyone, unchanged. Before dispatching a !load, checks the streamer'"'"'s live status via the Live Check API URL (cso-operator-app, covers both Twitch and Kick "kick:" logins) and replies "not live" instead of queuing if they'"'"'re offline - a lookup failure fails open (dispatches anyway) rather than silently blocking a real load. Also carries prefix-anchored chat triggers that need no "!" prefix, matched against a normalized copy of the message (Twitch'"'"'s invisible TAG-SELECTOR stripped, variation selectors stripped, NFKC, whitespace collapsed, lowercased) and evaluated most-specific-first: the Watchlist Trigger Command ("tuna tuna tuna" by default) or its three-fish-emoji equivalent, optionally followed by a streamer name, adds that streamer to the watchlist once Trigger Vote Count (default 3) occurrences land inside Trigger Vote Window Seconds (default 120) - every occurrence counts, including one person repeating themselves, and the tally is per (trigger, target) so three people naming three streamers is three separate tallies; it is open to everyone and posts a single progress reply one vote short of firing. The three-fish-plus-clapper form (or "<Watchlist Trigger Command> clip") is broadcaster/moderator-only, fires on one use with no vote, and requests a real clip post; a non-mod using it is ignored silently, exactly like the other mod-only short forms. It is gated behind Clip Trigger Enabled (default false - the feature ships dark and that property is the instant off-switch during a raid) and a rolling 24-hour Clip Daily Cap. A trigger with no streamer named targets whoever was last loaded by !load in this running process, and says so once (rate-limited) if nothing has been loaded yet. Rate limiting is one generic ladder: !load and !matrix share the single global Cooldown Seconds timer they always have, while each trigger must clear a global, a per-user and a per-target window before it fires - mods bypass the vote count, never the cooldowns, because the cost sits on the backend rather than on who asked. A fired trigger only enqueues a "chat_trigger" FlowFile and returns immediately; the listener never calls the backend itself, because blocking the IRC reader thread through a 30-90s clip job would blow past Twitch'"'"'s PING tolerance and force a reconnect, burning a refresh token every time. Announces itself once on join across two messages (a single PRIVMSG caps at 500 characters) with no auto-posted watchlist - reconnects happen often enough that repeating it every time reads as spam; responds to "!commands"/"!help" and "!watchlist" ("!w" alias accepted) on demand only. Mints a fresh access token from the refresh token before every (re)connect, so it never hits the ~4hr access-token expiry. Twitch rotates the refresh token on every one of those refreshes, so the rotated value is persisted to NiFi component state (Scope.LOCAL, key "refresh_token") and read back on the next onScheduled - a restart no longer needs a manual device-code re-auth. The write is deferred to create()/onStopped rather than done inline, because the refresh runs on the background IRC thread and the state manager is a py4j bridge into the JVM. Reconnects with backoff on disconnect.'
         tags = ['twitch', 'irc', 'chat', 'streamers', 'chat-bot']
         dependencies = []
 
@@ -51,7 +51,7 @@ class TwitchChatListenerProcessor(FlowFileSource):
     )
     REFRESH_TOKEN = PropertyDescriptor(
         name="Refresh Token",
-        description="User refresh token for the bot account (chat:read+chat:edit scopes). Used once at startup to mint the first access token — Twitch rotates the refresh token on every use, so this stored value goes stale after the first refresh; it's only a seed, not the token in ongoing use.",
+        description="User refresh token for the bot account (chat:read+chat:edit scopes). A SEED only, not the token in ongoing use: Twitch rotates the refresh token on every use, so the rotated value is persisted to component state and this property is read only when state is empty (first ever start, or after a deliberate re-seed). To force a re-seed, paste a freshly minted token here (or in the Parameter Context) and restart - a dead stored token is dropped automatically on HTTP 400.",
         required=True,
         sensitive=True,
         validators=[StandardValidators.NON_EMPTY_VALIDATOR],
@@ -191,6 +191,10 @@ class TwitchChatListenerProcessor(FlowFileSource):
                 self.TRIGGER_PROGRESS_REPLIES, self.WATCHLIST_API_URL,
                 self.LIVE_CHECK_API_URL, self.COOLDOWN_SECONDS]
 
+    # Component-state key holding the rotated refresh token. NiFi scopes component state per
+    # processor instance, so this never collides with WatchlistChatJoinerProcessor's copy.
+    STATE_KEY_REFRESH_TOKEN = 'refresh_token'
+
     def onScheduled(self, context):
         username = context.getProperty(self.BOT_USERNAME).getValue()
         channel = context.getProperty(self.CHANNEL).getValue().lstrip('#')
@@ -211,8 +215,31 @@ class TwitchChatListenerProcessor(FlowFileSource):
         self._watchlist_url = watchlist_url
         self._live_check_url = live_check_url
         self._cooldown_seconds = cooldown_seconds
-        # Seeded from the property once; rotates in-memory on every refresh after that.
-        self._refresh_token = context.getProperty(self.REFRESH_TOKEN).getValue()
+        # The property is a seed, not the token in ongoing use: Twitch rotates the refresh
+        # token on every use, so the live value lives in component state and the property is
+        # only consulted when state is empty (first ever start, or after a deliberate re-seed).
+        # Guarded: a NiFi build without the state binding must degrade to the old property-seed
+        # behaviour, not fail to start the processor at all.
+        try:
+            self._state_manager = context.getStateManager()
+        except Exception as e:
+            self._state_manager = None
+            if self.logger:
+                self.logger.warn(f"Component state unavailable; the rotated Twitch refresh token "
+                                 f"will not survive a restart: {e}")
+        self._property_seed = context.getProperty(self.REFRESH_TOKEN).getValue()
+        self._pending_token_write = None
+        self._pending_state_clear = False
+        self._reseed_attempted = False
+        stored = self._read_stored_refresh_token()
+        if stored:
+            self._refresh_token = stored
+            self._token_source = 'state'
+        else:
+            self._refresh_token = self._property_seed
+            self._token_source = 'property'
+        if self.logger:
+            self.logger.info(f"Twitch refresh token seeded from {self._token_source}")
 
         self._configure_triggers(context)
 
@@ -227,8 +254,17 @@ class TwitchChatListenerProcessor(FlowFileSource):
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=5)
+        # Join first, then flush: the thread can rotate the token one last time on its way
+        # out, and a clean stop is exactly the case where losing that rotation would force
+        # the manual re-auth this whole mechanism exists to remove.
+        self._flush_pending_token_write()
 
     def create(self, context):
+        # Runs on a NiFi task thread, so this is the safe place to touch the py4j state
+        # bridge - _refresh_access_token cannot, it runs on the daemon IRC thread. Ahead of
+        # the queue check because the common case is an empty queue and the pending write
+        # still has to land.
+        self._flush_pending_token_write()
         try:
             item = self._queue.get_nowait()
         except queue.Empty:
@@ -257,6 +293,26 @@ class TwitchChatListenerProcessor(FlowFileSource):
     # --- IRC connection handling (background thread) ---
 
     def _refresh_access_token(self, client_id, client_secret):
+        try:
+            return self._request_access_token(client_id, client_secret)
+        except urllib.error.HTTPError as e:
+            # 400 here means the refresh token itself is dead, not that Twitch is unreachable.
+            # If the dead one came out of component state, drop it and give the property seed
+            # exactly one chance - that makes re-seeding "paste a fresh token into the Parameter
+            # Context and restart" instead of a code change. Only once per run: retrying a seed
+            # that is itself spent just burns calls and muddies the log.
+            if e.code != 400 or self._token_source != 'state' or self._reseed_attempted:
+                raise
+            self._reseed_attempted = True
+            if self.logger:
+                self.logger.warn("Persisted Twitch refresh token was rejected (HTTP 400); "
+                                 "clearing component state and retrying once from the property seed")
+            self._pending_state_clear = True
+            self._refresh_token = self._property_seed
+            self._token_source = 'property'
+            return self._request_access_token(client_id, client_secret)
+
+    def _request_access_token(self, client_id, client_secret):
         body = urllib.parse.urlencode({
             "grant_type": "refresh_token",
             "refresh_token": self._refresh_token,
@@ -284,9 +340,65 @@ class TwitchChatListenerProcessor(FlowFileSource):
         rotated = payload.get("refresh_token")
         if rotated:
             self._refresh_token = rotated
+            self._token_source = 'state'
+            # Stashed, not written: this runs on the daemon IRC thread and the state manager is
+            # a py4j bridge into the JVM. create()/onStopped flush it from a NiFi task thread.
+            # Worst case on a crash between here and the flush is one lost rotation - exactly
+            # today's behaviour, so this fails no worse than the status quo.
+            self._pending_token_write = rotated
         elif self.logger:
             self.logger.warn("Twitch token refresh returned no refresh_token; keeping the previous one")
         return payload["access_token"]
+
+    # --- Component state: the rotated refresh token ---
+    #
+    # Imported lazily rather than at module scope: nifiapi.componentstate resolves
+    # Scope.LOCAL/CLUSTER through the py4j JVM bridge at import time.
+    # State is not encrypted the way a sensitive property is, and this pod's volumes are
+    # emptyDir - so this survives a processor or NiFi restart, but not a pod delete. A pod
+    # delete already destroys the entire flow, so that is no worse than the flow's own
+    # durability. Every one of these is best-effort: a state failure must never take down the
+    # IRC loop, since the in-memory token still works for the life of the process.
+
+    def _read_stored_refresh_token(self):
+        if self._state_manager is None:
+            return None
+        try:
+            from nifiapi.componentstate import Scope
+            return self._state_manager.getState(Scope.LOCAL).get(self.STATE_KEY_REFRESH_TOKEN)
+        except Exception as e:
+            if self.logger:
+                self.logger.warn(f"Could not read the persisted Twitch refresh token from state, "
+                                 f"falling back to the property seed: {e}")
+            return None
+
+    def _flush_pending_token_write(self):
+        """Drain whatever the IRC thread stashed. Main/task thread only."""
+        if self._state_manager is None:
+            return
+        if self._pending_state_clear:
+            self._pending_state_clear = False
+            try:
+                from nifiapi.componentstate import Scope
+                self._state_manager.clear(Scope.LOCAL)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warn(f"Could not clear the rejected Twitch refresh token from state: {e}")
+        token = self._pending_token_write
+        if not token:
+            return
+        # Cleared before the write, not after: a failing setState that left the value pending
+        # would retry on every create() call, which at a 0-sec schedule is a hot loop.
+        self._pending_token_write = None
+        try:
+            from nifiapi.componentstate import Scope
+            state = self._state_manager.getState(Scope.LOCAL).toMap()
+            state[self.STATE_KEY_REFRESH_TOKEN] = token
+            self._state_manager.setState(state, Scope.LOCAL)
+        except Exception as e:
+            if self.logger:
+                self.logger.warn(f"Could not persist the rotated Twitch refresh token; this run is "
+                                 f"fine but the next restart will need a re-seed: {e}")
 
     def _run_irc_loop(self, username, channel, client_id, client_secret):
         backoff = 5
