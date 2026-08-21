@@ -947,6 +947,25 @@ def _overlay_lock():
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+# The gif branch runs concurrently with the clip branch (ProcessClips forks the
+# FlowFile down both), so it gets its OWN lock. Sharing _overlay_lock would put
+# the gif cut back behind the clip's overlay burn and make the fork cosmetic —
+# the whole point is that neither path can gate the other. Still a flock, so
+# gif work stays serialized against itself and the pod runs at most two ffmpeg
+# jobs at once on its 1-CPU limit.
+_GIF_LOCK_PATH = Path("/tmp/.gif_ffmpeg.lock")
+
+
+@contextlib.contextmanager
+def _gif_lock():
+    with open(_GIF_LOCK_PATH, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def _probe_video_dims(path: Path) -> tuple[int, int] | None:
     try:
         result = subprocess.run(
@@ -993,7 +1012,9 @@ def _probe_video_duration(path: Path) -> float | None:
 
 _GIF_SECONDS = 5.0            # #173 round-3 recuts settled on ~5s arcs
 _GIF_FPS = 18
-_GIF_WIDTHS = (480, 360)      # retry narrower if the encode lands over the cap
+_GIF_WIDTHS = (480, 400, 320)  # retry narrower if the encode lands over the cap;
+                              # square crops carry ~2.4x the pixels of the old wide
+                              # ones, so the ladder needs a lower rung to stay under 14MB
 _GIF_MAX_BYTES = 14_000_000   # X's animated-GIF hard cap is 15MB; leave headroom
 _GIF_RMS_HOP_SECONDS = 0.25
 
@@ -1022,11 +1043,17 @@ def _face_refs_dir() -> Path:
     return Path(settings.CLIP_STORAGE_PATH) / ".face_refs"
 
 
-async def _fetch_streamer_avatar(client: httpx.AsyncClient, login: str) -> Path | None:
-    """Twitch profile avatar for a login, cached on the PVC — the identity
-    reference for picking the streamer's face out of a multi-person clip.
-    None for non-Twitch logins or any failure (the picker then only trusts
-    the single-dominant-face case)."""
+async def _fetch_streamer_avatar(
+    client: httpx.AsyncClient, login: str, source: str = "twitch",
+) -> Path | None:
+    """Profile avatar for a login, cached on the PVC — the identity reference
+    for picking the streamer's face out of a multi-person clip. None on any
+    failure (the picker then only trusts the single-dominant-face case).
+
+    Both platforms are covered: without a reference the picker skips every
+    multi-face clip, and Kick is over half the roster. Kick's avatars are
+    .webp; the cache keeps the .png name either way since cv2.imread sniffs
+    content rather than the extension."""
     login = login.strip().lower()
     if not login:
         return None
@@ -1034,14 +1061,23 @@ async def _fetch_streamer_avatar(client: httpx.AsyncClient, login: str) -> Path 
     if dest.exists() and dest.stat().st_size > 1_000:
         return dest
     try:
-        r = await client.post(
-            "https://gql.twitch.tv/gql",
-            json={"query": "query($l: String!) { user(login: $l) { profileImageURL(width: 300) } }",
-                  "variables": {"l": login}},
-            headers={"Client-ID": _TWITCH_WEB_CLIENT_ID},
-            timeout=10.0,
-        )
-        url = (r.json().get("data") or {}).get("user", {}).get("profileImageURL") if r.status_code == 200 else None
+        if source == "kick":
+            r = await client.get(
+                f"https://kick.com/api/v2/channels/{login}",
+                headers=_KICK_BROWSER_HEADERS,
+                timeout=15.0,
+            )
+            url = ((r.json().get("user") or {}).get("profile_pic")
+                   if r.status_code == 200 else None)
+        else:
+            r = await client.post(
+                "https://gql.twitch.tv/gql",
+                json={"query": "query($l: String!) { user(login: $l) { profileImageURL(width: 300) } }",
+                      "variables": {"l": login}},
+                headers={"Client-ID": _TWITCH_WEB_CLIENT_ID},
+                timeout=10.0,
+            )
+            url = (r.json().get("data") or {}).get("user", {}).get("profileImageURL") if r.status_code == 200 else None
         if not url:
             return None
         img = await client.get(url, timeout=15.0)
@@ -1348,18 +1384,39 @@ def _pick_face_crop(
         if y1 - y0 > _FACE_MAX_CROP * fh:
             mid = (y0 + y1) / 2
             y0, y1 = mid - _FACE_MAX_CROP * fh / 2, mid + _FACE_MAX_CROP * fh / 2
-        # Clamp into the content box, but never past the face itself — an
-        # over-eager cropdetect on a dark scene must not eat the subject.
+        # Clamp into the content box. The overlay bar is a HARD floor — never
+        # relaxed toward the face. It used to be min(bar_bottom, uy0), which let
+        # a high-sitting face pull the crop up into the burned-in bar and ship a
+        # gif with a sliver of cut-off overlay across the top (jynxzi, 2026-08-21
+        # — "the top above his cut off overlay looks dumb"). Losing a little
+        # headroom is always better than catching the bar; the #173 bar is no
+        # in-focus overlay text, and half a bar is the worst of both.
         cbx, cby, cbw, cbh = content
         lo_x, hi_x = min(cbx, ux0), max(cbx + cbw, ux1)
-        lo_y = min(max(bar_h + _BAR_GUARD_PX, cby), uy0)
+        lo_y = max(bar_h + _BAR_GUARD_PX, cby)
         hi_y = max(cby + cbh, uy1)
         x0 = max(lo_x, x0); x1 = min(hi_x, x1)
         y0 = max(lo_y, y0); y1 = min(hi_y, y1)
+
+        # Square it up. Reaction GIFs read as a square tile everywhere they get
+        # used (Giphy grid, X timeline, Slack picker); a ragged per-gif aspect
+        # is what made these look like arbitrary crops rather than a set.
+        # Centre on the padded face box, size to the largest square that fits
+        # between the hard bounds, then slide it inside them.
+        mid_x, mid_y = (x0 + x1) / 2, (y0 + y1) / 2
+        side = min(max(x1 - x0, y1 - y0), hi_x - lo_x, hi_y - lo_y)
+        x0, x1 = mid_x - side / 2, mid_x + side / 2
+        y0, y1 = mid_y - side / 2, mid_y + side / 2
+        if x0 < lo_x: x0, x1 = lo_x, lo_x + side
+        if x1 > hi_x: x0, x1 = hi_x - side, hi_x
+        if y0 < lo_y: y0, y1 = lo_y, lo_y + side
+        if y1 > hi_y: y0, y1 = hi_y - side, hi_y
+
         # Round the origin *up* and the size *down* to even — rounding the
         # origin down can push it a pixel back into the bar or the pillarbox.
         x0, y0 = -(-int(x0) // 2) * 2, -(-int(y0) // 2) * 2
         cw, ch = int(x1 - x0) // 2 * 2, int(y1 - y0) // 2 * 2
+        cw = ch = min(cw, ch)   # keep it exactly square after even-rounding
         if cw < 140 or ch < 140:
             return None, f"crop too small ({cw}x{ch})", 0.0, 0.0
         return (x0, y0, cw, ch), why, gif_start, gif_dur
@@ -1530,9 +1587,12 @@ def _cut_reaction_gif(
             "[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle"
         )
         try:
-            # Same serialization + thread cap as every other ffmpeg call here —
-            # this pod is 1 CPU / 1Gi and concurrent encodes get OOM-killed.
-            with _overlay_lock():
+            # Serialized on the GIF lock, not _overlay_lock: this runs on the
+            # forked gif branch and must not queue behind the clip branch's
+            # overlay burn, or the fork buys nothing. Still a flock, so gif
+            # encodes stay serialized against each other and the pod runs at
+            # most two ffmpeg jobs on its 1 CPU / 1Gi.
+            with _gif_lock():
                 r = subprocess.run(
                     ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-t", f"{duration:.2f}",
                      "-i", str(src), "-vf", filtergraph, "-loop", "0",
@@ -1908,6 +1968,96 @@ def _fetch_mode_path() -> Path:
     return Path(settings.CLIP_STORAGE_PATH) / ".fetch_mode.json"
 
 
+# ── Seen-clip dedupe (#174) ───────────────────────────────────────────────────
+# .seen_clips.json is the "already fetched this one" set every fetch path shares:
+# the batch fetch_clips(), the Inspector's queue_specific_clip(), and now the
+# on-demand fetch_clips_for_login() behind the in-chat !clip trigger. All three
+# do read → mutate → write, and _atomic_write_json only makes each individual
+# write atomic — it does nothing about a lost update, where two overlapping
+# fetches each read the same set and the second one's save silently drops the
+# first one's additions (the clip then gets re-fetched and can be re-posted).
+# The chat trigger fires whenever a viewer types the command, so that overlap
+# went from theoretical to likely; _seen_lock() closes it.
+#
+# The lock is held around the write (re-read → union → save), NOT across the
+# whole fetch: a fetch downloads and ffmpeg-burns clips between its read and its
+# write, and holding an exclusive flock for those minutes would make a chat
+# request block behind the batch cron instead of answering the viewer.
+
+def _seen_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".seen_clips.json"
+
+
+_SEEN_LOCK_PATH = Path("/tmp/.seen_clips.lock")
+
+
+@contextlib.contextmanager
+def _seen_lock():
+    with open(_SEEN_LOCK_PATH, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _load_seen() -> set[str]:
+    return _load_id_set(_seen_path())
+
+
+def _save_seen(seen: set[str]) -> None:
+    _save_id_set(_seen_path(), seen)
+
+
+# ── GIF library (#195) ────────────────────────────────────────────────────────
+# processed_clips carries 7-day Kafka retention, so the topic cannot BE the gif
+# library — it is the transport. The index on the PVC is the permanent record
+# the GIFs tab reads. Review verdicts live in their own file so re-cutting a
+# clip never clobbers a human's call on it.
+
+def _gif_index_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".gif_index.json"
+
+
+def _gif_review_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".gif_review.json"
+
+
+_GIF_INDEX_LOCK_PATH = Path("/tmp/.gif_index.lock")
+
+
+@contextlib.contextmanager
+def _gif_index_lock():
+    """Guards the read-modify-write on .gif_index.json / .gif_review.json.
+    _atomic_write_json makes each write atomic but does nothing about lost
+    updates, and the gif branch now runs concurrently with everything else."""
+    with open(_GIF_INDEX_LOCK_PATH, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _load_json_obj(path: Path) -> dict:
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _record_gif(entry: dict) -> None:
+    """Add/replace one gif in the index, keyed by clip_id. Only ever called
+    with a successful cut — a record in the index always has servable bytes."""
+    with _gif_index_lock():
+        index = _load_json_obj(_gif_index_path())
+        index[entry["clip_id"]] = entry
+        _atomic_write_json(_gif_index_path(), index)
+
+
 def get_fetch_mode() -> dict:
     p = _fetch_mode_path()
     if p.exists():
@@ -1953,20 +2103,28 @@ def get_x_handle(login: str) -> str:
     return _STREAMER_CATALOG.get(login.lower(), "")
 
 
-# Per-streamer posting paths — mirrors the Clip/GIF columns in
-# DesktopShare/streamers.md; keep both in sync when changing a streamer's path.
-# clip = caption the clip and post the MP4 (the original path);
-# gif  = cut a reaction GIF from the clip and post that instead (#173).
-# Streamers not listed here are clip-only.
+# Per-streamer paths — mirrors the Clip/GIF/GIF→X columns in
+# DesktopShare/streamers/streamers.md; keep both in sync when changing a streamer.
+#
+# clip     = caption the clip and post the MP4 to X (the original path).
+# gif      = cut a reaction GIF from the clip. Defaults ON for everyone (#195):
+#            every processed clip feeds the GIF library the review tab curates.
+#            Generating is NOT posting — see gif_post.
+# gif_post = auto-queue that GIF to X alongside the clip on approve. Stays
+#            opt-in; flipping `gif` on for everyone must not silently double
+#            what actually goes out to X. Everything else posts a GIF only when
+#            a human hits Post Now in the GIFs tab.
 _STREAMER_PATH_OVERRIDES: dict[str, dict[str, bool]] = {
-    "jasontheween": {"clip": False, "gif": True},
-    "extraemily":   {"clip": True,  "gif": True},
+    "jasontheween": {"clip": False, "gif": True, "gif_post": True},
+    "extraemily":   {"clip": True,  "gif": True, "gif_post": True},
 }
+
+_DEFAULT_PATHS: dict[str, bool] = {"clip": True, "gif": True, "gif_post": False}
 
 
 def streamer_paths(login: str) -> dict[str, bool]:
-    """Return {"clip": bool, "gif": bool} posting paths for a bare login."""
-    return dict(_STREAMER_PATH_OVERRIDES.get(login.lower(), {"clip": True, "gif": False}))
+    """Return {"clip", "gif", "gif_post"} paths for a bare login."""
+    return {**_DEFAULT_PATHS, **_STREAMER_PATH_OVERRIDES.get(login.lower(), {})}
 
 
 _PENDING_LOCK_PATH = Path("/tmp/.pending_publish.lock")
@@ -2156,7 +2314,14 @@ def approve_clip(
     """
     paths = streamer_paths(streamer)
     gif_path = Path(clip_path).with_suffix(".gif") if clip_path else None
-    queue_gif = paths["gif"] and gif_path is not None and gif_path.exists()
+    # gif_post, not gif: generation is on for every streamer now, but only the
+    # opt-in ones auto-queue their gif to X. A gif a human hid in the GIFs tab
+    # never goes out, whatever the flag says. If the gif isn't cut yet the two
+    # branches simply raced — process_gif queues it when it lands.
+    queue_gif = (
+        paths["gif_post"] and gif_path is not None and gif_path.exists()
+        and not gif_is_hidden(clip_id)
+    )
 
     entries: list[dict] = []
     base = {
@@ -2326,13 +2491,7 @@ async def fetch_clips() -> dict:
     logins = _next_fetch_batch(logins, _FETCH_BATCH_SIZE)
 
     clip_dir = Path(settings.CLIP_STORAGE_PATH)
-    seen_file = clip_dir / ".seen_clips.json"
-    seen: set[str] = set()
-    if seen_file.exists():
-        try:
-            seen = set(json.loads(seen_file.read_text()))
-        except Exception:
-            pass
+    seen = _load_seen()
 
     fm = get_fetch_mode()
     top_mode = fm.get("mode") == "top"
@@ -2393,7 +2552,13 @@ async def fetch_clips() -> dict:
 
     if fetched:
         await _publish_clips_to_kafka(fetched)
-        _atomic_write_json(seen_file, list(seen))
+        # Re-read under the lock and union rather than writing the set this run
+        # started from — another fetch (the chat trigger, the Inspector) may have
+        # added ids since. `seen` still carries every id the fetchers touched,
+        # including ones whose download failed, so those stay suppressed exactly
+        # as before.
+        with _seen_lock():
+            _save_seen(_load_seen() | seen)
 
     return {"fetched": len(fetched), "clips": [c["clip_id"] for c in fetched], "errors": errors}
 
@@ -2571,6 +2736,93 @@ async def _publish_clips_to_kafka(clips: list[dict]):
         await producer.flush()
     finally:
         await producer.stop()
+
+
+# ── Chat triggers (#174) ──────────────────────────────────────────────────────
+# Backing services for the in-chat bot commands the NiFi TwitchChatListener-
+# Processor routes to /api/streamers/chat-trigger/*. Nothing here is a new
+# pipeline: the on-demand fetch publishes to the same new_clips topic the batch
+# fetch does, so the clip flows through ProcessClips exactly as it always has.
+
+async def streamer_exists(client: httpx.AsyncClient, entry: str) -> bool:
+    """True if 'entry' (bare Twitch login or 'kick:slug') is a real channel.
+
+    The companion to is_streamer_live() for the chat triggers: a viewer typo
+    must never put a stranger's channel on the watch list, and "not live" is a
+    different answer to the chat than "no such channel". Same failure contract
+    as is_streamer_live — any lookup error returns False rather than raising."""
+    platform, name = _parse_watch_entry(entry)
+    try:
+        if platform == "kick":
+            token = await _kick_token_refresh(client)
+            return (await _get_kick_broadcaster_id(client, token, name)) is not None
+        token = await _twitch_token_refresh(client)
+        return bool(await _get_broadcaster_id(client, token, name))
+    except Exception:
+        return False
+
+
+async def fetch_clips_for_login(entry: str, clip_cap: int = 1) -> dict:
+    """Fetch, download and publish clips for ONE watch-list entry, right now.
+
+    fetch_clips() is batch-only over a rotating slice of the watch list, so a
+    viewer's !clip request would otherwise wait out a whole rotation. This is a
+    thin per-login wrapper over the same _fetch_twitch_clips/_fetch_kick_clips
+    the batch uses — no second discovery path, no second download path — and it
+    publishes to new_clips through _publish_clips_to_kafka just like the batch,
+    so the clip goes through ProcessClips (Whisper + vLLM) normally.
+
+    Deliberate divergence from fetch_clips(): top_mode/period are forced to
+    top-of-the-month instead of inheriting get_fetch_mode(). Someone asking in
+    chat means "show us a good one", not "show us the most recent one" — and in
+    recency mode the window is the last 6 hours, which is frequently empty even
+    for a channel with hundreds of clips, so inheriting the mode would answer a
+    perfectly good request with "no clips".
+
+    Returns {"fetched", "clips", "records", "errors"}: same shape as
+    fetch_clips() plus the full clip records, which the chat-trigger route feeds
+    straight into process_clip() rather than waiting for the Kafka round trip.
+    """
+    platform, login = _parse_watch_entry(entry)
+    clip_dir = Path(settings.CLIP_STORAGE_PATH)
+    seen = _load_seen()
+    errors: list[str] = []
+    fetched: list[dict] = []
+    # top_mode=True + period="month" — see the docstring. The 30-day `since`
+    # mirrors what fetch_clips() computes for that mode.
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        try:
+            if platform == "kick":
+                fetched = await _fetch_kick_clips(
+                    client, login, clip_dir, seen, errors,
+                    kick_token_getter=lambda: _kick_token_refresh(client),
+                    top_mode=True, period="month", clip_cap=clip_cap,
+                )
+            else:
+                token = await _twitch_token_refresh(client)
+                fetched = await _fetch_twitch_clips(
+                    client, token, login, clip_dir, seen, since, errors,
+                    top_mode=True, clip_cap=clip_cap,
+                )
+        except Exception as e:
+            errors.append(str(e))
+
+    if fetched:
+        await _publish_clips_to_kafka(fetched)
+        # Same union-under-lock as fetch_clips(): the fetchers already added
+        # every id they touched to `seen`, the comprehension mirrors the batch
+        # path's belt-and-braces pass over what actually came back.
+        with _seen_lock():
+            _save_seen(_load_seen() | seen | {c["clip_id"] for c in fetched})
+
+    return {
+        "fetched": len(fetched),
+        "clips": [c["clip_id"] for c in fetched],
+        "records": fetched,
+        "errors": errors,
+    }
 
 
 # ── ProcessClip — Whisper + vLLM ──────────────────────────────────────────────
@@ -3108,20 +3360,23 @@ async def process_clip(clip: dict) -> dict:
 
     title = clip.get("title", "").strip()
 
-    # Posting paths for this streamer (clip / gif — see _STREAMER_PATH_OVERRIDES).
-    # The gif cut itself happens at the end, only for clips that survive
-    # captioning; the peak-audio analysis has to happen here while the Whisper
-    # WAV still exists.
+    # Posting paths for this streamer — see _STREAMER_PATH_OVERRIDES. The gif
+    # cut is NOT done here: it runs on its own /process-gif branch off the same
+    # ConsumeKafka, so a slow or failed cut can't hold up captioning (#195).
     paths = streamer_paths(clip.get("streamer", ""))
-    gif_start: float | None = None
-    avatar_path: Path | None = None
 
+    # Note a gif-only streamer (clip=N) still gets captioned here: the gif post
+    # reuses this branch's tweet text and this branch's review card is how it
+    # gets approved. The fork removed the cut, not the caption.
+    #
     # Clip-only streamers post the MP4 as-is, so a source that is mostly dead
     # black canvas (phone-app layouts on a black stage — the KaiCenat post of
     # 2026-08-19) goes out looking like black bars. Cropping can't fix it (the
     # black is interior, not borders), so disqualify before spending Whisper/
-    # vLLM on it. Gif streamers are exempt — the gif crops to the face anyway.
-    if paths["clip"] and not paths["gif"]:
+    # vLLM on it. Streamers whose gif ALSO goes out are exempt — that post
+    # crops to the face anyway. Keyed on gif_post, not gif: gif generation is
+    # on for everyone now, and gating on it would disable this check entirely.
+    if paths["clip"] and not paths["gif_post"]:
         black_frac = await asyncio.to_thread(_static_black_fraction, Path(clip_path))
         if black_frac > _STATIC_BLACK_LIMIT:
             print(f"[process_clip] disqualified {clip.get('clip_id', clip_path)}: "
@@ -3130,8 +3385,6 @@ async def process_clip(clip: dict) -> dict:
                     "error": f"disqualified: {black_frac:.0%} of the frame is static black canvas"}
 
     async with httpx.AsyncClient(verify=False, timeout=300.0) as client:
-        if paths["gif"] and clip.get("source", "twitch") == "twitch":
-            avatar_path = await _fetch_streamer_avatar(client, clip.get("streamer", ""))
         # Extract 16kHz mono WAV — much smaller upload to Whisper than raw MP4
         transcript = ""
         wav_path = Path(clip_path).with_suffix(".wav")
@@ -3144,11 +3397,6 @@ async def process_clip(clip: dict) -> dict:
             )
             if proc.returncode != 0 or not wav_path.exists():
                 raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()[:200]}")
-            if paths["gif"]:
-                try:
-                    gif_start = await asyncio.to_thread(_peak_audio_window, wav_path)
-                except Exception:
-                    gif_start = None  # _cut_reaction_gif falls back to a centered cut
             with open(wav_path, "rb") as f:
                 r = await client.post(
                     f"{settings.WHISPER_URL}/transcribe",
@@ -3342,65 +3590,235 @@ async def process_clip(clip: dict) -> dict:
         if error and not caption:
             return {**clip, "title": title, "transcript": transcript, "caption": "", "error": error}
 
-    # Gif-flagged streamer and the clip survived captioning — pick the
-    # streamer's face crop and cut the reaction GIF now so it's on the PVC
-    # before the clip reaches the review queue (approve_clip queues whatever
-    # .gif sits next to the MP4). No confident face crop -> no gif at all
-    # (#173 bar: never a full-frame or wrong-person cut); the clip itself
-    # isn't disqualified, approve just won't have a gif to queue.
-    gif_path = ""
-    gif_error = ""
-    if paths["gif"]:
-        gif_dest = Path(clip_path).with_suffix(".gif")
-        crop, crop_why, cut_start, cut_dur = await asyncio.to_thread(
-            _pick_face_crop, Path(clip_path), gif_start, avatar_path
-        )
-        if crop is None and avatar_path is not None:
-            # The peak-audio window is deaf to where the streamer's face is —
-            # on IRL clips the loudest span is often a crowd shot with the
-            # streamer off-camera. Rescan the whole clip for windows where the
-            # identity match is confident and give the picker another shot.
-            for alt_start in await asyncio.to_thread(
-                _identity_face_windows, Path(clip_path), avatar_path
-            ):
-                crop, alt_why, cut_start, cut_dur = await asyncio.to_thread(
-                    _pick_face_crop, Path(clip_path), alt_start, avatar_path,
-                    _GIF_RESCAN_MIN_SPAN,
-                )
-                if crop is not None:
-                    crop_why = f"identity rescan @{alt_start:.1f}s: {alt_why}"
-                    break
-        if crop is None:
-            gif_error = f"skipped: {crop_why}"
-            # A stale .gif from an earlier cut (or recipe) must not survive a
-            # skip — approve_clip queues whatever .gif sits next to the MP4.
-            gif_dest.unlink(missing_ok=True)
-            print(f"[process_clip] gif skipped for {clip.get('clip_id', clip_path)}: {crop_why}")
-        else:
-            gif_error = await asyncio.to_thread(
-                _cut_reaction_gif, Path(clip_path), gif_dest, cut_start, crop, cut_dur
-            )
-            if gif_error:
-                print(f"[process_clip] gif cut failed for {clip.get('clip_id', clip_path)}: {gif_error}")
-            else:
-                gif_path = str(gif_dest)
-                print(f"[process_clip] gif cut ({crop_why}) for {clip.get('clip_id', clip_path)}")
-
-    if not paths["clip"] and not gif_path:
-        # Gif-only streamer with no gif has nothing publishable — disqualify
-        # instead of landing a card in review whose Post Now can only 409.
-        return {
-            **clip, "title": title, "transcript": transcript, "caption": "",
-            "caption_mode": caption_mode, "quote_reason": quote_reason,
-            "paths": paths, "gif_path": "", "gif_error": gif_error,
-            "error": f"disqualified: gif-only streamer, {gif_error or 'no gif cut'}",
-        }
-
     return {
         **clip, "title": title, "transcript": transcript, "caption": caption,
         "caption_mode": caption_mode, "quote_reason": quote_reason,
-        "paths": paths, "gif_path": gif_path, "gif_error": gif_error,
+        "paths": paths,
     }
+
+
+# ── GIF branch ────────────────────────────────────────────────────────────────
+
+async def process_gif(clip: dict) -> dict:
+    """Cut the reaction GIF for one clip and index it. The gif half of the
+    ProcessClips fork (#195) — ProcessClips clones each new_clips FlowFile down
+    two InvokeHTTPs, this one and /process-clip, so neither can gate the other.
+
+    Called by NiFi with a raw new_clips record. Deliberately independent of the
+    clip branch: it fetches its own avatar and extracts its own audio rather
+    than borrowing the Whisper WAV, so a captioning failure costs no gif and a
+    gif failure costs no caption. Runs under _gif_lock, not _overlay_lock.
+
+    Returns the gif record (published to processed_gifs). A skip is a normal
+    outcome, not an error — no confident face crop means no gif at all (#173
+    bar: never a full-frame or wrong-person cut)."""
+    clip_id = clip.get("clip_id", "")
+    clip_path = clip.get("clip_path", "")
+    streamer = clip.get("streamer", "")
+    source = clip.get("source", "twitch")
+    base = {
+        "clip_id": clip_id, "streamer": streamer, "source": source,
+        "title": clip.get("title", ""), "url": clip.get("url", ""),
+        "thumbnail_url": clip.get("thumbnail_url", ""),
+        "view_count": clip.get("view_count", 0),
+        "created_at": clip.get("created_at", ""),
+    }
+
+    paths = streamer_paths(streamer)
+    if not paths["gif"]:
+        return {**base, "gif_path": "", "gif_error": "skipped: gif path off for this streamer"}
+    if not clip_path or not Path(clip_path).exists():
+        return {**base, "gif_path": "", "gif_error": f"File not found: {clip_path}"}
+
+    src = Path(clip_path)
+    gif_dest = src.with_suffix(".gif")
+
+    # Own audio extraction — the clip branch's WAV is transient and on the far
+    # side of the fork. Cheap next to the face work that follows.
+    gif_start: float | None = None
+    wav_path = src.with_suffix(".gifaudio.wav")
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            ["ffmpeg", "-y", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", str(wav_path)],
+            capture_output=True, timeout=60,
+        )
+        if proc.returncode == 0 and wav_path.exists():
+            gif_start = await asyncio.to_thread(_peak_audio_window, wav_path)
+    except Exception:
+        gif_start = None  # _cut_reaction_gif falls back to a centered cut
+    finally:
+        wav_path.unlink(missing_ok=True)
+
+    async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
+        avatar_path = await _fetch_streamer_avatar(client, streamer, source)
+
+    crop, crop_why, cut_start, cut_dur = await asyncio.to_thread(
+        _pick_face_crop, src, gif_start, avatar_path
+    )
+    if crop is None and avatar_path is not None:
+        # The peak-audio window is deaf to where the streamer's face is — on IRL
+        # clips the loudest span is often a crowd shot with the streamer off
+        # camera. Rescan for windows where the identity match is confident.
+        for alt_start in await asyncio.to_thread(_identity_face_windows, src, avatar_path):
+            crop, alt_why, cut_start, cut_dur = await asyncio.to_thread(
+                _pick_face_crop, src, alt_start, avatar_path, _GIF_RESCAN_MIN_SPAN,
+            )
+            if crop is not None:
+                crop_why = f"identity rescan @{alt_start:.1f}s: {alt_why}"
+                break
+
+    if crop is None:
+        # A stale .gif from an earlier cut must not survive a skip — approve_clip
+        # queues whatever .gif sits next to the MP4.
+        gif_dest.unlink(missing_ok=True)
+        print(f"[process_gif] skipped {clip_id}: {crop_why}")
+        return {**base, "gif_path": "", "gif_error": f"skipped: {crop_why}", "crop_why": crop_why}
+
+    gif_error = await asyncio.to_thread(
+        _cut_reaction_gif, src, gif_dest, cut_start, crop, cut_dur
+    )
+    if gif_error:
+        print(f"[process_gif] cut failed for {clip_id}: {gif_error}")
+        return {**base, "gif_path": "", "gif_error": gif_error, "crop_why": crop_why}
+
+    entry = {
+        **base,
+        "x_handle": get_x_handle(streamer),
+        "gif_path": str(gif_dest),
+        "gif_bytes": gif_dest.stat().st_size,
+        "crop_why": crop_why,
+        "cut_start": round(cut_start, 2),
+        "cut_dur": round(cut_dur, 2),
+        "gif_error": "",
+        "indexed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _record_gif(entry)
+    print(f"[process_gif] cut ({crop_why}) for {clip_id}")
+
+    # The two branches race, so the gif may land after its clip was already
+    # approved. approve_clip queues the gif when it exists; this covers the
+    # other order. Dedupe-by-clip_id inside _pending_lock makes it idempotent.
+    if paths["gif_post"]:
+        _queue_gif_if_parent_approved(entry)
+
+    return entry
+
+
+def _queue_gif_if_parent_approved(entry: dict) -> None:
+    """Queue a just-cut gif if its parent clip is already pending or published.
+    Only for gif_post streamers — everything else posts a gif on demand."""
+    clip_id = entry["clip_id"]
+    gif_id = f"{clip_id}-gif"
+    try:
+        published = _load_id_set(_published_path())
+        with _pending_lock():
+            pending = _load_pending()
+            if any(p["clip_id"] == gif_id for p in pending):
+                return
+            parent = next((p for p in pending if p["clip_id"] == clip_id), None)
+            if parent is None and clip_id not in published:
+                return  # not approved yet — approve_clip will pick the gif up
+            tweet_text = (parent or {}).get("tweet_text") or _gif_tweet_text(entry)
+            pending.append({
+                "clip_id": gif_id, "clip_path": entry["gif_path"],
+                "tweet_text": tweet_text, "title": entry.get("title", ""),
+                "source": entry.get("source", ""), "streamer": entry.get("streamer", ""),
+                "url": entry.get("url", ""), "thumbnail_url": entry.get("thumbnail_url", ""),
+                "x_handle": entry.get("x_handle", ""), "view_count": entry.get("view_count", 0),
+                "duration": 0, "created_at": entry.get("created_at", ""),
+            })
+            _save_pending(pending)
+        print(f"[process_gif] late-queued {gif_id} (parent already approved)")
+    except Exception as e:
+        print(f"[process_gif] late-queue failed for {gif_id}: {e}")
+
+
+def _gif_tweet_text(entry: dict) -> str:
+    """Tweet text for a GIF posted on its own. The forked gif branch has no AI
+    caption — that lives on the clip branch — so build from the clip's own
+    title, which is the streamer's words about their own moment (#195: "tag the
+    streamer and reference the clip context")."""
+    title = (entry.get("title") or "").strip()
+    streamer = entry.get("streamer", "")
+    body = title if title and not _is_junk_title(title) else f"{streamer} moment of the day"
+    return _build_tweet(body, entry.get("source", "twitch"), streamer,
+                        entry.get("x_handle", ""))
+
+
+def list_gifs(include_hidden: bool = False) -> list[dict]:
+    """The GIF library for the tab. Newest first. ONLY a ❌ verdict drops a gif
+    out of the view — posting one deliberately does not. The library is the
+    archive of what we've made, so a posted gif stays on the shelf (carrying
+    its tweet_url so the tab can mark it posted) and can be posted again."""
+    with _gif_index_lock():
+        index = _load_json_obj(_gif_index_path())
+        reviews = _load_json_obj(_gif_review_path())
+    out = []
+    for clip_id, entry in index.items():
+        verdict = (reviews.get(clip_id) or {}).get("verdict")
+        if not include_hidden and verdict == "hidden":
+            continue
+        if not Path(entry.get("gif_path", "")).exists():
+            continue
+        out.append({**entry, "verdict": verdict})
+    out.sort(key=lambda e: e.get("indexed_at", ""), reverse=True)
+    return out
+
+
+def set_gif_verdict(clip_id: str, verdict: str) -> dict:
+    """✅/❌ from the GIFs tab. 'hidden' also blocks approve_clip from ever
+    queueing that gif to X."""
+    if verdict not in ("good", "hidden"):
+        raise ValueError(f"unknown verdict: {verdict}")
+    with _gif_index_lock():
+        reviews = _load_json_obj(_gif_review_path())
+        reviews[clip_id] = {"verdict": verdict,
+                            "at": datetime.now(timezone.utc).isoformat()}
+        _atomic_write_json(_gif_review_path(), reviews)
+    return {"ok": True, "clip_id": clip_id, "verdict": verdict}
+
+
+def gif_is_hidden(clip_id: str) -> bool:
+    reviews = _load_json_obj(_gif_review_path())
+    return (reviews.get(clip_id) or {}).get("verdict") == "hidden"
+
+
+def get_gif_entry(clip_id: str) -> dict | None:
+    return _load_json_obj(_gif_index_path()).get(clip_id)
+
+
+async def publish_gif_now(clip_id: str) -> dict:
+    """Post one library GIF to X on demand (the GIFs tab's Post Now).
+
+    Goes through publish_clip like every other post, so it picks up the live
+    "watching live"/"missed it" intro and lands in published history — this is
+    not a second posting path. Success stamps the tweet onto the index entry,
+    which is also what drops it out of the tab's default listing."""
+    entry = get_gif_entry(clip_id)
+    if not entry:
+        raise ValueError(f"No GIF indexed for {clip_id}")
+    gif_path = entry.get("gif_path", "")
+    if not Path(gif_path).exists():
+        raise ValueError(f"GIF file is gone: {gif_path}")
+
+    result = await publish_clip(
+        gif_path, _gif_tweet_text(entry), f"{clip_id}-gif", entry.get("title", ""),
+        entry.get("source", ""), entry.get("streamer", ""), entry.get("url", ""),
+        entry.get("thumbnail_url", ""), entry.get("x_handle", ""),
+    )
+    if result.get("ok"):
+        with _gif_index_lock():
+            index = _load_json_obj(_gif_index_path())
+            if clip_id in index:
+                index[clip_id]["tweet_url"] = result.get("url", "")
+                index[clip_id]["tweet_id"] = result.get("tweet_id", "")
+                index[clip_id]["posted_at"] = datetime.now(timezone.utc).isoformat()
+                _atomic_write_json(_gif_index_path(), index)
+        return {"ok": True, "published": True,
+                "tweet_id": result.get("tweet_id", ""), "url": result.get("url", "")}
+    return {"ok": False, "published": False,
+            "reason": result.get("reason") or result.get("error") or "publish failed"}
 
 
 # ── Clip queue ────────────────────────────────────────────────────────────────

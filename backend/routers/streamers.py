@@ -247,6 +247,72 @@ async def process_clip(request: Request):
     return result
 
 
+@router.post("/process-gif")
+async def process_gif(request: Request):
+    """Cut the reaction GIF for one clip and index it. Called by the SECOND
+    InvokeHTTP branch in the ProcessClips NiFi flow — same new_clips FlowFile
+    as /process-clip, cloned. Independent of it by design: a gif that can't be
+    cut never delays or disqualifies the clip, and vice versa (#195)."""
+    body = await request.body()
+    try:
+        clip = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON clip metadata")
+    return await streamers.process_gif(clip)
+
+
+# ── GIF library (the GIFs tab) ───────────────────────────────────────────────
+
+class GifReviewRequest(BaseModel):
+    verdict: str = ""
+
+
+@router.get("/gifs")
+async def list_gifs(include_hidden: bool = False):
+    """The reaction-GIF library for the GIFs panel. Newest first; hidden and
+    already-posted GIFs drop out unless include_hidden=1."""
+    return {"gifs": streamers.list_gifs(include_hidden)}
+
+
+@router.post("/gifs/{clip_id}/review")
+async def review_gif(clip_id: str, body: GifReviewRequest):
+    """✅ good / ❌ hidden from the GIFs panel. Hidden also blocks the GIF from
+    ever being auto-queued to X on approve."""
+    try:
+        return streamers.set_gif_verdict(clip_id, body.verdict)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/gifs/{clip_id}/post-now")
+async def post_gif_now(clip_id: str):
+    """Post one GIF to X immediately, tagging the streamer and referencing the
+    clip context. Called by the GIFs panel's Post Now button."""
+    entry = streamers.get_gif_entry(clip_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"No GIF indexed for {clip_id}")
+    if not os.path.exists(entry.get("gif_path", "")):
+        raise HTTPException(status_code=404, detail="GIF file is gone from the PVC")
+    try:
+        return await streamers.publish_gif_now(clip_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/gif/{clip_id}")
+async def serve_gif(clip_id: str):
+    """Stream the .gif for a clip. Mirrors /clip/{clip_id}, which only ever
+    serves .mp4 — without this the GIFs panel has nothing to render."""
+    if not re.match(r'^[A-Za-z0-9_\-]+$', clip_id):
+        raise HTTPException(status_code=400, detail="Invalid clip_id")
+    path = Path(settings.CLIP_STORAGE_PATH) / f"{clip_id}.gif"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="GIF not found on disk")
+    return FileResponse(path, media_type="image/gif")
+
+
 # ── Topic stats ──────────────────────────────────────────────────────────────
 
 @router.get("/topics")
@@ -429,6 +495,177 @@ async def queue_specific_clip(body: QueueClipRequest, request: Request):
         request.app.state.http, body.platform, body.streamer, body.clip_id,
         body.url, body.thumbnail_url, body.title, body.view_count, body.created_at,
     )
+
+
+# ── In-chat bot triggers (#174) ──────────────────────────────────────────────
+# Called by the NiFi TwitchChatListenerProcessor when a viewer types a command
+# in a watched channel — never by the UI. Two rules shape both routes:
+#
+# 1. A refusal is HTTP 200 with ok:false, not a 4xx. InvokeHTTP treats any
+#    non-2xx as a retryable failure and would sit there re-firing a request that
+#    can never succeed (a typo'd login, an offline streamer, a full watch list).
+#    A 4xx/5xx is reserved for genuinely transient/broken plumbing.
+# 2. `message` is the literal text the bot says in chat, and every one of them
+#    names the streamer. Twitch silently drops a bot's byte-identical repeat of
+#    its own message inside ~30s, so a fixed string ("they're not live") would
+#    go missing for the second viewer who asks — the login is the varying token
+#    that keeps each reply deliverable.
+
+# The watch list is round-robined one entry per FetchClips run
+# (_FETCH_BATCH_SIZE = 1), so its length IS every streamer's fetch cadence:
+# going from the usual 4 entries to 12 already makes each streamer's clips
+# arrive 3x less often. Uncapped, a busy chat could push the list to 50 and
+# starve the very pipeline this feature exists to feed.
+_CHAT_WATCHLIST_MAX = 12
+
+
+class ChatTriggerRequest(BaseModel):
+    login: str
+    platform: str = ""       # "twitch" (default) or "kick"
+    requested_by: str = ""   # chatter who typed the command
+    channel: str = ""        # channel the command was typed in
+
+
+@router.post("/chat-trigger/watchlist")
+async def chat_trigger_watchlist(body: ChatTriggerRequest, request: Request):
+    """!watch <login> from chat: pin one streamer onto the FetchClips watch list.
+    Called by TwitchChatListenerProcessor (StreamersApp NiFi flow).
+
+    The guards live here, not in streamers.add_to_watchlist() — that primitive is
+    shared with LiveStreamerAlert, which pins a streamer it already resolved and
+    already knows is live, and must keep its unconditional behaviour."""
+    login = body.login.strip().lstrip("@").lower()
+    if not login:
+        raise HTTPException(status_code=400, detail="login required")
+    platform = (body.platform or "twitch").strip().lower()
+    entry = f"kick:{login}" if platform == "kick" else login
+
+    current = streamers.get_watchlist()
+
+    # Idempotency first: someone already on the list is a success no matter what
+    # the cap or their live status says — re-asking must never be an error.
+    if entry in current:
+        return {"ok": True, "login": login, "added": False, "count": len(current),
+                "message": f"{login} is already on the watch list"}
+
+    http = request.app.state.http
+
+    # Guard 1 — the channel has to actually exist. A typo must never make the
+    # bot start watching (and clipping) a stranger.
+    if not await streamers.streamer_exists(http, entry):
+        return {"ok": False, "login": login, "added": False, "count": len(current),
+                "reason": "unknown_channel",
+                "message": f"can't find a {platform} channel called {login}"}
+
+    # Guard 2 — live only, matching the !load precedent. It also means
+    # WatchlistChatJoiner's existing offline auto-evict is what cleans these
+    # chat-added entries back out; nothing has to remember to unpin them.
+    if not await streamers.is_streamer_live(http, entry):
+        return {"ok": False, "login": login, "added": False, "count": len(current),
+                "reason": "not_live",
+                "message": f"{login} isn't live right now — ask again when they are"}
+
+    # Guard 3 — the cap. See _CHAT_WATCHLIST_MAX.
+    if len(current) >= _CHAT_WATCHLIST_MAX:
+        return {"ok": False, "login": login, "added": False, "count": len(current),
+                "reason": "watchlist_full",
+                "message": (f"watch list is full ({_CHAT_WATCHLIST_MAX}) — "
+                            f"can't add {login} until someone drops off")}
+
+    logins = streamers.add_to_watchlist(entry)
+    return {"ok": True, "login": login, "added": True, "count": len(logins),
+            "message": f"now watching {login} — clips are on the way"}
+
+
+@router.post("/chat-trigger/clip")
+async def chat_trigger_clip(body: ChatTriggerRequest, request: Request):
+    """!clip <login> from chat: fetch one clip for that streamer and post it to X
+    right now. Called by TwitchChatListenerProcessor, which enforces the mod-only
+    gate before it ever calls this.
+
+    This is the one trigger that posts straight to X with no human approval, so
+    it runs the normal pipeline end to end — fetch → process_clip (Whisper +
+    vLLM) → publish_clip — and honours every disqualification process_clip makes.
+    It skips the review queue, not the quality gates."""
+    login = body.login.strip().lstrip("@").lower()
+    if not login:
+        raise HTTPException(status_code=400, detail="login required")
+    platform = (body.platform or "twitch").strip().lower()
+    entry = f"kick:{login}" if platform == "kick" else login
+
+    # Only clip someone we're already watching: the fetch downloads and
+    # ffmpeg-burns a clip on the pod's 1-CPU limit, and !clip is not the way to
+    # put a new streamer into the pipeline — that's what /chat-trigger/watchlist
+    # is for, with its resolve/live/cap guards.
+    if entry not in streamers.get_watchlist():
+        return {"ok": False, "login": login, "reason": "not_watching",
+                "message": f"{login} isn't on the watch list — !watch {login} first"}
+
+    # Gif-only streamers (clip=N in streamer_paths) never post the MP4, and the
+    # .gif is cut by the separate ProcessClips gif branch that an on-demand
+    # fetch doesn't run. Refuse rather than post the file approve_clip would
+    # have refused to queue.
+    if not streamers.streamer_paths(login)["clip"]:
+        return {"ok": False, "login": login, "reason": "clip_posting_disabled",
+                "message": f"{login}'s clips only go out as reaction GIFs, not video"}
+
+    try:
+        fetch = await streamers.fetch_clips_for_login(entry, clip_cap=1)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    records = fetch.get("records", [])
+    if not records:
+        errors = fetch.get("errors", [])
+        failed = any("download" in e.lower() for e in errors)
+        return {"ok": False, "login": login,
+                "reason": "download_failed" if failed else "no_new_clips",
+                "message": (f"couldn't grab a clip for {login} just now"
+                            if failed else f"no new clips for {login} to post")}
+
+    clip = records[0]
+    try:
+        processed = await streamers.process_clip(clip)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # process_clip returns its rejections in `error` rather than raising — no
+    # transcript, a fabricated quote, a dead-black canvas. Posting anyway would
+    # put out exactly what the normal pipeline exists to keep off the timeline.
+    if processed.get("error"):
+        return {"ok": False, "login": login, "clip_id": clip.get("clip_id", ""),
+                "reason": processed["error"],
+                "message": f"skipped that {login} clip: {processed['error']}"}
+
+    # publish_clip raises on an X rejection rather than returning ok:false, and
+    # the usual rejections (duplicate content, media too long, credentials) are
+    # permanent — reported as ok:false/post_failed so InvokeHTTP doesn't retry a
+    # post that will fail identically every time.
+    try:
+        result = await streamers.publish_clip(
+            processed.get("clip_path", ""), processed.get("caption", ""),
+            processed.get("clip_id", ""), processed.get("title", ""),
+            processed.get("source", ""), processed.get("streamer", ""),
+            processed.get("url", ""), processed.get("thumbnail_url", ""),
+            streamers.get_x_handle(processed.get("streamer", "")),
+        )
+    except Exception as e:
+        result = {"ok": False, "error": str(e)}
+
+    if not result.get("ok"):
+        return {"ok": False, "login": login, "clip_id": clip.get("clip_id", ""),
+                "reason": "post_failed",
+                "message": f"X wouldn't take the {login} clip — nothing posted"}
+
+    return {
+        "ok": True,
+        "login": login,
+        "clip_id": processed.get("clip_id", ""),
+        "title": processed.get("title", ""),
+        "stage": "posted",
+        "tweet_url": result.get("url", ""),
+        "message": f"posted a {login} clip: {result.get('url', '')}",
+    }
 
 
 # ── Fetch mode ────────────────────────────────────────────────────────────────

@@ -20,6 +20,9 @@ import httpx
 from config import settings
 from services.streamers import (
     _atomic_write_json,
+    _load_seen,
+    _save_seen,
+    _seen_lock,
     _burn_glitch_intro,
     _burn_platform_overlay,
     _download_clip,
@@ -562,13 +565,7 @@ async def queue_specific_clip(
     manual pick (e.g. a viral clip that happens to run long). Downstream
     (ProcessClips → Whisper/vLLM → approve) is unchanged, same pipeline."""
     clip_dir = Path(settings.CLIP_STORAGE_PATH)
-    seen_file = clip_dir / ".seen_clips.json"
-    seen: set[str] = set()
-    if seen_file.exists():
-        try:
-            seen = set(json.loads(seen_file.read_text()))
-        except Exception:
-            pass
+    seen: set[str] = _load_seen()
 
     full_clip_id = f"kick_{clip_id.replace('-', '')}" if platform == "kick" else clip_id
     if full_clip_id in seen:
@@ -602,7 +599,10 @@ async def queue_specific_clip(
         "view_count": view_count,
     }
     await _publish_clips_to_kafka([clip])
-    seen.add(full_clip_id)
-    _atomic_write_json(seen_file, list(seen))
+    # Union under the lock rather than writing back the set we read minutes
+    # ago — a chat-trigger or cron fetch running concurrently would otherwise
+    # have its own additions silently dropped (#174).
+    with _seen_lock():
+        _save_seen(_load_seen() | {full_clip_id})
 
     return {"ok": True, "clip_id": full_clip_id, "duration": clip["duration"]}
