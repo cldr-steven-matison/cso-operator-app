@@ -15,7 +15,7 @@ class TwitchChatReplyProcessor(FlowFileTransform):
         implements = ['org.apache.nifi.python.processor.FlowFileTransform']
 
     class ProcessorDetails:
-        version = '0.0.3-SNAPSHOT'
+        version = '0.0.4-SNAPSHOT'
         description = (
             'Posts a one-off Twitch chat confirmation via the Helix "Send Chat Message" REST API '
             '(POST /helix/chat/messages) once a dispatch to an edge device has actually succeeded — '
@@ -25,8 +25,12 @@ class TwitchChatReplyProcessor(FlowFileTransform):
             'second independent refresh from the same seed would race it and can invalidate whichever '
             'one loses). Instead mints a stateless App Access Token via the Client Credentials grant '
             '(Client ID/Secret only, never rotates) and resolves broadcaster/sender IDs once via Helix '
-            '"Get Users", caching both in memory for the life of the processor. Dry Run property for '
-            'safe testing.'
+            '"Get Users", caching both in memory for the life of the processor. Message text comes '
+            'from a "chat_reply_text" flowfile attribute when one is present - posted verbatim, no '
+            'template and no substitution, which is how the backend answers a chat_trigger (watchlist '
+            'add / clip request) in its own words. With no such attribute it falls back to the original '
+            'command-keyed templates, so every pre-existing !load and !matrix reply behaves exactly as '
+            'before. Dry Run property for safe testing.'
         )
         tags = ['twitch', 'helix', 'chat', 'streamers', 'chat-bot']
         dependencies = []
@@ -116,17 +120,25 @@ class TwitchChatReplyProcessor(FlowFileTransform):
             command = attributes.get('command', 'load')
             dry_run = context.getProperty(self.DRY_RUN).asBoolean()
 
-            # NOT context.getProperty(...).evaluateAttributeExpressions(flowfile).getValue():
-            # confirmed live 2026-07-22 that this NiFi Python binding's EL evaluator only
-            # resolves the FIRST ${attr} token in a property and silently drops any literal
-            # text and additional tokens around it (a real "jynxzi is now showing on screen1."
-            # template evaluated to just "jynxzi"). Substitute manually instead.
-            template = context.getProperty(self.MATRIX_MESSAGE).getValue() if command == 'matrix' \
-                else context.getProperty(self.MESSAGE_TEMPLATE).getValue()
-            message = re.sub(r'\$\{(\w+)\}', lambda m: attributes.get(m.group(1), ''), template)
+            # An upstream that already knows what to say - the backend's own answer to a
+            # chat_trigger - puts it on chat_reply_text, and it is posted verbatim: no
+            # template, no substitution, so text carrying a literal ${...} survives intact.
+            # Anything without that attribute takes the original template path, unchanged.
+            verbatim = attributes.get('chat_reply_text')
+            if verbatim and verbatim.strip():
+                message = verbatim
+            else:
+                # NOT context.getProperty(...).evaluateAttributeExpressions(flowfile).getValue():
+                # confirmed live 2026-07-22 that this NiFi Python binding's EL evaluator only
+                # resolves the FIRST ${attr} token in a property and silently drops any literal
+                # text and additional tokens around it (a real "jynxzi is now showing on screen1."
+                # template evaluated to just "jynxzi"). Substitute manually instead.
+                template = context.getProperty(self.MATRIX_MESSAGE).getValue() if command == 'matrix' \
+                    else context.getProperty(self.MESSAGE_TEMPLATE).getValue()
+                message = re.sub(r'\$\{(\w+)\}', lambda m: attributes.get(m.group(1), ''), template)
 
             if not message or not message.strip():
-                raise ValueError("Message template evaluated to empty")
+                raise ValueError("Chat reply text evaluated to empty")
 
             if dry_run:
                 attributes['dry_run'] = 'true'
