@@ -1163,9 +1163,77 @@ def _static_black_fraction(src: Path) -> float:
         return -1.0
 
 
+# Facecam-window edges. Most gaming clips composite the streamer into a small
+# webcam box over the gameplay; that box has hard borders, and padding out of
+# it drags dark game footage and a slice of the box's own border into the gif
+# (jynxzi, 2026-08-21 — "the top above his cut off overlay looks dumb"). This
+# is a different boundary from the burned-in platform bar at frame top, and
+# _pick_face_crop has to respect both. Nothing here is a border in a full-frame
+# IRL clip, so a weak best edge means "no box" and the crop is left alone.
+_CAM_EDGE_MIN_ENERGY = 9.0     # mean |row-to-row luma step| that reads as a border
+_CAM_EDGE_GUARD_PX = 3
+
+
+def _facecam_edges(img, ux0, uy0, ux1, uy1, content) -> tuple[int, int, int]:
+    """Find the webcam box's top/left/right borders around a face at
+    (ux0,uy0)-(ux1,uy1). Returns (top, left, right) in source pixels, falling
+    back to the content box on any side with no convincing edge.
+    Sync + CPU-bound — already called from a worker thread."""
+    import cv2
+    cbx, cby, cbw, cbh = content
+    top, left, right = cby, cbx, cbx + cbw
+    try:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        fh = max(uy1 - uy0, 1)
+        fw = max(ux1 - ux0, 1)
+
+        # Top: strongest horizontal step from 2.5 face-heights above the face
+        # down to just INSIDE it. The band has to reach past the face's top edge:
+        # a streamer framed tight in their cam has hair/forehead breaking the
+        # border, so YuNet's box starts above it (jynxzi: face top y=777, cam
+        # border y=805). Searching only above the face found the platform bar at
+        # y=188 (energy 31) and missed the real border at y=805 (energy 86).
+        band_lo = int(max(cby, uy0 - 2.5 * fh))
+        band_hi = int(min(uy1, uy0 + 0.35 * fh))
+        xs, xe = int(max(cbx, ux0)), int(min(cbx + cbw, ux1))
+        if xe - xs > 8 and band_hi - band_lo > 6:
+            col = gray[band_lo:band_hi, xs:xe].astype("float32")
+            if col.shape[0] > 1:
+                rows = abs(col[1:] - col[:-1]).mean(axis=1)
+                idx = int(rows.argmax())
+                if float(rows[idx]) >= _CAM_EDGE_MIN_ENERGY:
+                    top = band_lo + idx + 1 + _CAM_EDGE_GUARD_PX
+
+        # Left/right: strongest vertical step within 2 face-widths either side.
+        ys, ye = int(max(top, uy0)), int(min(cby + cbh, uy1))
+        if ye - ys > 8:
+            for side in ("l", "r"):
+                if side == "l":
+                    a, b = int(max(cbx, ux0 - 2.0 * fw)), int(ux0)
+                else:
+                    a, b = int(ux1), int(min(cbx + cbw, ux1 + 2.0 * fw))
+                if b - a <= 6:
+                    continue
+                strip = gray[ys:ye, a:b].astype("float32")
+                if strip.shape[1] < 2:
+                    continue
+                cols = abs(strip[:, 1:] - strip[:, :-1]).mean(axis=0)
+                idx = int(cols.argmax())
+                if float(cols[idx]) >= _CAM_EDGE_MIN_ENERGY:
+                    if side == "l":
+                        left = a + idx + 1 + _CAM_EDGE_GUARD_PX
+                    else:
+                        right = a + idx - _CAM_EDGE_GUARD_PX
+    except Exception:
+        pass
+    return int(top), int(left), int(right)
+
+
 def _pick_face_crop(
     src: Path, start: float | None, avatar_path: Path | None,
     min_span: float = 2.5,
+    cam_prior: tuple[float, float, float, float] | None = None,
+    observed: dict | None = None,
 ) -> tuple[tuple[int, int, int, int] | None, str, float, float]:
     """Choose the streamer's face crop for the gif window. Returns
     (crop (x,y,w,h), reason, gif_start, gif_duration) — the start/duration are
@@ -1392,8 +1460,30 @@ def _pick_face_crop(
         # headroom is always better than catching the bar; the #173 bar is no
         # in-focus overlay text, and half a bar is the worst of both.
         cbx, cby, cbw, cbh = content
-        lo_x, hi_x = min(cbx, ux0), max(cbx + cbw, ux1)
-        lo_y = max(bar_h + _BAR_GUARD_PX, cby)
+        # The webcam box is the real boundary on a gaming clip — padding past it
+        # drags in gameplay and a slice of the box's own border. Detect it on the
+        # frame the chosen track actually appears in, and treat it as a floor
+        # alongside the platform bar.
+        cam_img = chosen[len(chosen) // 2][6]
+        cam_top, cam_left, cam_right = _facecam_edges(cam_img, ux0, uy0, ux1, uy1, content)
+        # Hand the observation back so the caller can add it to this streamer's
+        # profile — the box only gets more reliable the more clips we see.
+        if observed is not None and cam_right > cam_left:
+            observed["box_frac"] = (cam_left / W, cam_top / H,
+                                    (cam_right - cam_left) / W,
+                                    (cby + cbh - cam_top) / H)
+        # A single clip's edge detection is noisy (a dark scene hides the border,
+        # a bright HUD fakes one). Where we already know this streamer's scene,
+        # take the tighter of the two: the prior stops a missed edge from letting
+        # the crop escape the box, the live detection stops a stale prior from
+        # cutting into a face that moved.
+        if cam_prior:
+            px, py, pw, ph = cam_prior
+            cam_top = max(cam_top, int(py * H))
+            cam_left = max(cam_left, int(px * W))
+            cam_right = min(cam_right, int((px + pw) * W))
+        lo_x, hi_x = min(max(cbx, cam_left), ux0), max(min(cbx + cbw, cam_right), ux1)
+        lo_y = max(bar_h + _BAR_GUARD_PX, cby, cam_top)
         hi_y = max(cby + cbh, uy1)
         x0 = max(lo_x, x0); x1 = min(hi_x, x1)
         y0 = max(lo_y, y0); y1 = min(hi_y, y1)
@@ -2014,6 +2104,56 @@ def _save_seen(seen: set[str]) -> None:
 # library — it is the transport. The index on the PVC is the permanent record
 # the GIFs tab reads. Review verdicts live in their own file so re-cutting a
 # clip never clobbers a human's call on it.
+
+def _layout_path() -> Path:
+    return Path(settings.CLIP_STORAGE_PATH) / ".face_layout.json"
+
+
+# Per-streamer facecam layout, learned across clips. A streamer's scene is a
+# stable thing — jynxzi games with the same bottom-left webcam box for months —
+# so where his face lives is knowledge worth keeping rather than re-deriving,
+# badly, from one clip at a time. Boxes are stored as fractions of frame size so
+# a 1080p and a 720p capture of the same scene agree.
+_LAYOUT_MAX_SAMPLES = 15      # rolling window; a scene rebuild ages out
+_LAYOUT_MIN_CONFIDENT = 3     # samples before the prior is trusted on its own
+
+
+def _record_facecam(streamer: str, box_frac: tuple[float, float, float, float]) -> None:
+    """Log one observed facecam box for a streamer."""
+    streamer = (streamer or "").lower()
+    if not streamer:
+        return
+    try:
+        with _gif_index_lock():
+            data = _load_json_obj(_layout_path())
+            entry = data.get(streamer) or {"samples": []}
+            entry["samples"] = (entry["samples"] + [list(box_frac)])[-_LAYOUT_MAX_SAMPLES:]
+            xs = sorted(b[0] for b in entry["samples"])
+            ys = sorted(b[1] for b in entry["samples"])
+            ws = sorted(b[2] for b in entry["samples"])
+            hs = sorted(b[3] for b in entry["samples"])
+            m = len(xs) // 2
+            entry["box"] = [xs[m], ys[m], ws[m], hs[m]]
+            entry["n"] = len(entry["samples"])
+            entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+            data[streamer] = entry
+            _atomic_write_json(_layout_path(), data)
+    except Exception as e:
+        print(f"[layout] record failed for {streamer}: {e}")
+
+
+def _learned_facecam(streamer: str) -> tuple[tuple[float, float, float, float], int] | None:
+    """The streamer's median facecam box as fractions, plus its sample count."""
+    entry = _load_json_obj(_layout_path()).get((streamer or "").lower())
+    if not entry or not entry.get("box"):
+        return None
+    return tuple(entry["box"]), int(entry.get("n", 0))
+
+
+def get_face_layouts() -> dict:
+    """What we've learned about every streamer's scene, for the GIFs panel."""
+    return _load_json_obj(_layout_path())
+
 
 def _gif_index_path() -> Path:
     return Path(settings.CLIP_STORAGE_PATH) / ".gif_index.json"
@@ -3653,8 +3793,13 @@ async def process_gif(clip: dict) -> dict:
     async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
         avatar_path = await _fetch_streamer_avatar(client, streamer, source)
 
+    prior = _learned_facecam(streamer)
+    cam_prior = prior[0] if prior else None
+    observed: dict = {}
+    if prior:
+        print(f"[process_gif] {streamer}: facecam prior from {prior[1]} clip(s) {prior[0]}")
     crop, crop_why, cut_start, cut_dur = await asyncio.to_thread(
-        _pick_face_crop, src, gif_start, avatar_path
+        _pick_face_crop, src, gif_start, avatar_path, 2.5, cam_prior, observed
     )
     if crop is None and avatar_path is not None:
         # The peak-audio window is deaf to where the streamer's face is — on IRL
@@ -3663,6 +3808,7 @@ async def process_gif(clip: dict) -> dict:
         for alt_start in await asyncio.to_thread(_identity_face_windows, src, avatar_path):
             crop, alt_why, cut_start, cut_dur = await asyncio.to_thread(
                 _pick_face_crop, src, alt_start, avatar_path, _GIF_RESCAN_MIN_SPAN,
+                cam_prior, observed,
             )
             if crop is not None:
                 crop_why = f"identity rescan @{alt_start:.1f}s: {alt_why}"
@@ -3681,6 +3827,9 @@ async def process_gif(clip: dict) -> dict:
     if gif_error:
         print(f"[process_gif] cut failed for {clip_id}: {gif_error}")
         return {**base, "gif_path": "", "gif_error": gif_error, "crop_why": crop_why}
+
+    if observed.get("box_frac"):
+        _record_facecam(streamer, observed["box_frac"])
 
     entry = {
         **base,

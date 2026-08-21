@@ -301,6 +301,14 @@ async def post_gif_now(clip_id: str):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.get("/face-layouts")
+async def face_layouts():
+    """What we've learned about each streamer's scene — the median facecam box
+    (as frame fractions) and how many clips it's based on. Read-only view of
+    .face_layout.json, for tuning crops per streamer."""
+    return {"layouts": streamers.get_face_layouts()}
+
+
 @router.get("/gif/{clip_id}")
 async def serve_gif(clip_id: str):
     """Stream the .gif for a clip. Mirrors /clip/{clip_id}, which only ever
@@ -310,7 +318,12 @@ async def serve_gif(clip_id: str):
     path = Path(settings.CLIP_STORAGE_PATH) / f"{clip_id}.gif"
     if not path.exists():
         raise HTTPException(status_code=404, detail="GIF not found on disk")
-    return FileResponse(path, media_type="image/gif")
+    # no-cache, not no-store: the browser may keep the bytes but MUST revalidate
+    # against the ETag. A re-cut rewrites this exact path, and without this the
+    # heuristic freshness a bare Last-Modified earns keeps serving the old gif
+    # (the 2026-08-21 square recut looked like it hadn't shipped).
+    return FileResponse(path, media_type="image/gif",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 # ── Topic stats ──────────────────────────────────────────────────────────────

@@ -581,7 +581,9 @@ function GifsPanel({
             }`}
           >
             <img
-              src={`/api/streamers/gif/${encodeURIComponent(g.clip_id)}`}
+              /* indexed_at changes on every re-cut, so a recut gif gets a new
+                 URL instead of hiding behind a cached one. */
+              src={`/api/streamers/gif/${encodeURIComponent(g.clip_id)}?v=${encodeURIComponent(g.indexed_at || "")}`}
               alt={g.title || g.clip_id}
               loading="lazy"
               /* No forced aspect: the tile takes the gif's own shape, so what
