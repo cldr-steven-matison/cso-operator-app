@@ -24,11 +24,14 @@ spec:
                 name: cso-operator-app-config
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: "500m"
+              memory: "512Mi"
             limits:
-              cpu: "1"
-              memory: "1Gi"
+              # The clip/gif fork runs its ffmpeg burns under separate locks, so
+              # up to three ffmpeg processes are in flight at once (~800Mi) on top
+              # of the app and the OpenCV facecam model. 1Gi/1cpu OOM-looped.
+              cpu: "3"
+              memory: "3Gi"
           volumeMounts:
             - name: clips-storage
               mountPath: /clips
