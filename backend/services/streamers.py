@@ -4218,7 +4218,7 @@ async def publish_clip(
     is_live = False
     if streamer:
         entry = f"kick:{streamer}" if source == "kick" else streamer
-        async with httpx.AsyncClient(verify=settings.NIFI_VERIFY_TLS, timeout=15.0) as live_client:
+        async with httpx.AsyncClient(verify=settings.nifi_verify, timeout=15.0) as live_client:
             is_live = await is_streamer_live(live_client, entry)
     intro = _choose_intro(streamer or "them", is_live)
     final_text = _prepend_intro(intro, tweet_text)

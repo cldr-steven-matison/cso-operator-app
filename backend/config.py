@@ -20,6 +20,35 @@ class Settings(BaseSettings):
     NIFI_VERIFY_TLS: bool = False
     NIFI_USERNAME: str = ""
     NIFI_PASSWORD: str = ""
+    # mTLS client cert for a userCertAuth NiFi (prod on cso-prod-1). When both are set the
+    # httpx client presents the cert and the Bearer-token path is skipped entirely.
+    NIFI_CLIENT_CERT: str = ""
+    NIFI_CLIENT_KEY: str = ""
+
+    @property
+    def nifi_client_cert(self) -> tuple[str, str] | None:
+        if self.NIFI_CLIENT_CERT and self.NIFI_CLIENT_KEY:
+            return (self.NIFI_CLIENT_CERT, self.NIFI_CLIENT_KEY)
+        return None
+
+    @property
+    def nifi_verify(self):
+        """The `verify=` argument for an httpx client talking to NiFi.
+
+        httpx >= 0.28 removed the `cert=` parameter; the client cert has to ride on an
+        ssl.SSLContext passed as `verify=`. Without a client cert this is just the bool.
+        """
+        cert = self.nifi_client_cert
+        if cert is None:
+            return self.NIFI_VERIFY_TLS
+        import ssl
+
+        ctx = ssl.create_default_context()
+        if not self.NIFI_VERIFY_TLS:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        ctx.load_cert_chain(certfile=cert[0], keyfile=cert[1])
+        return ctx
 
     KAFKA_BOOTSTRAP: str = "my-cluster-kafka-bootstrap.cld-streaming.svc:9092"
     TOPIC_AUDIO: str = "new_audio"

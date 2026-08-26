@@ -20,7 +20,8 @@ _oauth_refresh_task: asyncio.Task | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _chat_activity_task, _oauth_refresh_task
-    app.state.http = httpx.AsyncClient(verify=settings.NIFI_VERIFY_TLS, timeout=30.0)
+    # verify carries the mTLS client cert as an SSLContext when NIFI_CLIENT_CERT/KEY are set
+    app.state.http = httpx.AsyncClient(verify=settings.nifi_verify, timeout=30.0)
     # Small pool — this is a read-only, low-frequency admin query (agent-classes/agents
     # polled every 15s by one page), not app traffic.
     app.state.efm_db = await asyncpg.create_pool(

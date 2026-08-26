@@ -22,6 +22,13 @@ spec:
           envFrom:
             - configMapRef:
                 name: cso-operator-app-config
+          env:
+            # mTLS to the userCertAuth prod NiFi (DesktopShare files/cso-prod-1/user-cso-operator-app.yaml
+            # mints the cert + declares the NiFi User). Unset on a singleUserAuth cluster.
+            - name: NIFI_CLIENT_CERT
+              value: /etc/nifi-client/tls.crt
+            - name: NIFI_CLIENT_KEY
+              value: /etc/nifi-client/tls.key
           resources:
             requests:
               cpu: "500m"
@@ -35,7 +42,14 @@ spec:
           volumeMounts:
             - name: clips-storage
               mountPath: /clips
+            - name: nifi-client-cert
+              mountPath: /etc/nifi-client
+              readOnly: true
       volumes:
         - name: clips-storage
           persistentVolumeClaim:
             claimName: clips-storage
+        - name: nifi-client-cert
+          secret:
+            secretName: cso-operator-app-cert
+            optional: true

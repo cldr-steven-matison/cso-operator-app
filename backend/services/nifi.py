@@ -19,6 +19,9 @@ _token_lock = asyncio.Lock()
 
 
 async def _fetch_token(client: httpx.AsyncClient) -> str:
+    # mTLS (userCertAuth NiFi): the client cert on the httpx client IS the identity — no token.
+    if settings.nifi_client_cert:
+        return ""
     if not (settings.NIFI_USERNAME and settings.NIFI_PASSWORD):
         return ""
     r = await client.post(
