@@ -3972,6 +3972,11 @@ async def publish_gif_now(clip_id: str) -> dict:
 
 # ── Clip queue ────────────────────────────────────────────────────────────────
 
+# Cached partition set for processed_clips — its partition count is fixed by the
+# KafkaTopic CR, so discover it once (a metadata fetch) and reuse on every poll.
+_processed_partitions: set[int] | None = None
+
+
 async def clip_queue(limit: int = 20) -> list[dict]:
     """Peek the last `limit` records from processed_clips.
 
@@ -4001,35 +4006,50 @@ async def clip_queue(limit: int = 20) -> list[dict]:
     )
     try:
         await asyncio.wait_for(consumer.start(), timeout=10.0)
-        tp = TopicPartition(topic, 0)
-        consumer.assign([tp])
+        # processed_clips has multiple partitions; reading only partition 0 silently
+        # hides every clip PublishKafka landed on the others (the empty-review bug).
+        # Assign ALL partitions, seek each back `limit` from its own end. The set is
+        # cached across calls: force_metadata_update() (the only call that actually
+        # populates per-topic partition info — topics()/partitions_for_topic() return
+        # None) costs ~0.5s, and clip_queue runs on every review poll.
+        global _processed_partitions
+        if not _processed_partitions:
+            await asyncio.wait_for(consumer._client.force_metadata_update(), timeout=10.0)
+            _processed_partitions = set(consumer.partitions_for_topic(topic) or {0})
+        part_ids = _processed_partitions
+        tps = [TopicPartition(topic, p) for p in sorted(part_ids)]
+        consumer.assign(tps)
 
-        end_map = await asyncio.wait_for(consumer.end_offsets([tp]), timeout=10.0)
-        end = end_map.get(tp, 0)
-        if end == 0:
+        end_map = await asyncio.wait_for(consumer.end_offsets(tps), timeout=10.0)
+        if not any(end_map.values()):
             return []
+        for tp in tps:
+            consumer.seek(tp, max(0, end_map.get(tp, 0) - limit))
 
-        start = max(0, end - limit)
-        consumer.seek(tp, start)
-
-        # Poll until caught up to `end` — a single getmany() isn't a
-        # guaranteed drain of the sought range, see docstring above.
-        messages: dict[int, object] = {}
+        # Poll until every partition catches up to its end — a single getmany()
+        # isn't a guaranteed drain of the sought range, see docstring above.
+        # Key by (partition, offset): offsets are only unique within a partition.
+        messages: dict[tuple, object] = {}
         for _ in range(8):
             batch = await asyncio.wait_for(
-                consumer.getmany(tp, timeout_ms=3000, max_records=limit),
+                consumer.getmany(*tps, timeout_ms=3000, max_records=limit * len(tps)),
                 timeout=10.0,
             )
-            for msg in batch.get(tp, []):
-                messages[msg.offset] = msg
-            if await consumer.position(tp) >= end:
+            for tp, msgs in batch.items():
+                for msg in msgs:
+                    messages[(msg.partition, msg.offset)] = msg
+            # List comp, not a genexp: `await` inside a generator expression makes
+            # an async-generator that all() can't consume (raises, then the outer
+            # except swallows it and the queue comes back empty).
+            if all([await consumer.position(tp) >= end_map.get(tp, 0) for tp in tps]):
                 break
 
         skipped = get_skipped()
         published = get_published()
         pending = {p["clip_id"] for p in _load_pending()}
-        for offset in sorted(messages):
-            msg = messages[offset]
+        # Order by broker timestamp — offsets don't order across partitions.
+        for key in sorted(messages, key=lambda k: messages[k].timestamp):
+            msg = messages[key]
             try:
                 record = json.loads(msg.value.decode("utf-8"))
                 clip_id = record.get("clip_id", "")
