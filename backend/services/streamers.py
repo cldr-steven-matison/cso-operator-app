@@ -3645,7 +3645,8 @@ async def process_clip(clip: dict) -> dict:
                     },
                 ]
 
-                # Gendered-pronoun violations get corrective retries before disqualifying —
+                # Gendered-pronoun violations get corrective retries before falling back
+                # to the quoted post —
                 # the LLM is told exactly what it did wrong and asked to redo it, rather than
                 # the clip just being thrown away on the first slip (2026-07-23, all streamers;
                 # bumped to 3 retries same day per Steven's ask).
@@ -3667,13 +3668,19 @@ async def process_clip(clip: dict) -> dict:
                             raw = r.json()["choices"][0]["message"]["content"]
                             cleaned = _clean_caption(raw)
                             if not cleaned:
-                                error = "disqualified: empty caption after cleaning"
+                                # AI produced nothing usable — post the streamer's own
+                                # words (quoted fallback below), never drop the clip.
+                                quote_reason = "empty caption"
                                 break
                             elif _has_degenerate_repetition(cleaned):
-                                error = "disqualified: degenerate repeated output"
+                                quote_reason = "degenerate output"
                                 break
                             elif _has_gendered_pronoun(cleaned):
-                                error = f"disqualified: gendered pronoun used for {streamer_name}"
+                                # Retries exhausted -> quoted fallback, NOT disqualification.
+                                # The clip is fine; only the AI reaction is untrustworthy, so
+                                # post the streamer's own words instead (2026-08-27, Steven:
+                                # "it's supposed to drop the caption to the quoted text").
+                                quote_reason = "gendered pronoun"
                                 if attempt < max_attempts - 1:
                                     messages.append({"role": "assistant", "content": raw})
                                     messages.append({
@@ -3702,6 +3709,7 @@ async def process_clip(clip: dict) -> dict:
                                     cleaned, clip.get("source", "twitch"), clip.get("streamer", ""), x_handle
                                 )
                                 caption_mode = "reaction"
+                                quote_reason = ""  # a pronoun slip on an earlier attempt was fixed
                                 error = ""
                                 break
                         else:
