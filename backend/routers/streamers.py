@@ -681,6 +681,83 @@ async def chat_trigger_clip(body: ChatTriggerRequest, request: Request):
     }
 
 
+@router.post("/chat-trigger/gif")
+async def chat_trigger_gif(body: ChatTriggerRequest, request: Request):
+    """🐟🐟🐟🖼️ <login> from chat: fetch one clip for that streamer, cut its
+    reaction GIF, and post the GIF to X right now. Called by
+    TwitchChatListenerProcessor, which enforces the mod-only gate before it ever
+    calls this.
+
+    The gif twin of /chat-trigger/clip — same fetch, but process_gif +
+    publish_gif_now instead of process_clip + publish_clip, so it posts the .gif
+    and never the MP4. A skipped gif (no confident face crop) is a normal
+    outcome, reported as ok:false, not an error."""
+    login = body.login.strip().lstrip("@").lower()
+    if not login:
+        raise HTTPException(status_code=400, detail="login required")
+    platform = (body.platform or "twitch").strip().lower()
+    entry = f"kick:{login}" if platform == "kick" else login
+
+    # Same rule as /chat-trigger/clip: only gif someone we're already watching.
+    # The trigger isn't the way to put a new streamer into the pipeline — that's
+    # /chat-trigger/watchlist, with its resolve/live/cap guards.
+    if entry not in streamers.get_watchlist():
+        return {"ok": False, "login": login, "reason": "not_watching",
+                "message": f"{login} isn't on the watch list — 🐟🐟🐟 {login} first"}
+
+    # gif=N in streamer_paths means this streamer never gets a reaction GIF cut.
+    if not streamers.streamer_paths(login)["gif"]:
+        return {"ok": False, "login": login, "reason": "gif_posting_disabled",
+                "message": f"{login} doesn't get reaction GIFs"}
+
+    try:
+        fetch = await streamers.fetch_clips_for_login(entry, clip_cap=1)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    records = fetch.get("records", [])
+    if not records:
+        errors = fetch.get("errors", [])
+        failed = any("download" in e.lower() for e in errors)
+        return {"ok": False, "login": login,
+                "reason": "download_failed" if failed else "no_new_clips",
+                "message": (f"couldn't grab a clip for {login} just now"
+                            if failed else f"no new clips for {login} to gif")}
+
+    clip = records[0]
+    try:
+        gif = await streamers.process_gif(clip)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # process_gif reports a skip/failure in gif_error and leaves gif_path empty —
+    # no confident face crop, a cut failure, or gif-off for this streamer.
+    if not gif.get("gif_path") or gif.get("gif_error"):
+        reason = gif.get("gif_error") or "no_gif"
+        return {"ok": False, "login": login, "clip_id": clip.get("clip_id", ""),
+                "reason": reason,
+                "message": f"no gif for {login} this time: {reason}"}
+
+    try:
+        result = await streamers.publish_gif_now(clip.get("clip_id", ""))
+    except Exception as e:
+        result = {"ok": False, "reason": str(e)}
+
+    if not result.get("ok"):
+        return {"ok": False, "login": login, "clip_id": clip.get("clip_id", ""),
+                "reason": result.get("reason") or "post_failed",
+                "message": f"X wouldn't take the {login} gif — nothing posted"}
+
+    return {
+        "ok": True,
+        "login": login,
+        "clip_id": clip.get("clip_id", ""),
+        "stage": "posted",
+        "tweet_url": result.get("url", ""),
+        "message": f"posted a {login} gif: {result.get('url', '')}",
+    }
+
+
 # ── Fetch mode ────────────────────────────────────────────────────────────────
 
 @router.get("/fetch-mode")

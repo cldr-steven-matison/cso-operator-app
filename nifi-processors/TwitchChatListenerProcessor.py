@@ -19,8 +19,8 @@ class TwitchChatListenerProcessor(FlowFileSource):
         implements = ['org.apache.nifi.python.processor.FlowFileSource']
 
     class ProcessorDetails:
-        version = '0.0.23-SNAPSHOT'
-        description = 'Holds a persistent connection to Twitch IRC chat and emits one FlowFile per detected "!load <streamer> [screen]" command (screen optional, defaults to screen1, "!l" accepted as a short alias) or "!matrix <screen1|screen2|screen3|screen4>" command (screen required, no default - unlike !load, a bare "!matrix" with no screen is not a recognized command; screen1 targets the Jetson, screen2 targets GamingPC, screen3/screen4 target TunaStarlink). Requests the twitch.tv/tags IRCv3 capability to read each message'"'"'s badges/mod tags. Mod-only short forms: "!m" for !matrix, "k:" in place of "kick:" on a streamer login, and "s1"/"s2"/"s3"/"s4" in place of screen1-4 - each is checked independently, and a non-broadcaster/non-moderator sender using any of them has the whole command silently ignored (same as an unrecognized command); the existing full-text forms (including the pre-existing "!l" alias) keep working for everyone, unchanged. Before dispatching a !load, checks the streamer'"'"'s live status via the Live Check API URL (cso-operator-app, covers both Twitch and Kick "kick:" logins) and replies "not live" instead of queuing if they'"'"'re offline - a lookup failure fails open (dispatches anyway) rather than silently blocking a real load. Also carries prefix-anchored chat triggers that need no "!" prefix, matched against a normalized copy of the message (Twitch'"'"'s invisible TAG-SELECTOR stripped, variation selectors stripped, NFKC, whitespace collapsed, lowercased) and evaluated most-specific-first: the Watchlist Trigger Command ("tuna tuna tuna" by default) or its three-fish-emoji equivalent, optionally followed by a streamer name, adds that streamer to the watchlist once Trigger Vote Count (default 3) occurrences land inside Trigger Vote Window Seconds (default 120) - every occurrence counts, including one person repeating themselves, and the tally is per (trigger, target) so three people naming three streamers is three separate tallies; it is open to everyone and posts a single progress reply one vote short of firing. The three-fish-plus-clapper form (or "<Watchlist Trigger Command> clip") is broadcaster/moderator-only, fires on one use with no vote, and requests a real clip post; a non-mod using it is ignored silently, exactly like the other mod-only short forms. It is gated behind Clip Trigger Enabled (default false - the feature ships dark and that property is the instant off-switch during a raid) and a rolling 24-hour Clip Daily Cap. A trigger with no streamer named targets whoever was last loaded by !load in this running process, and says so once (rate-limited) if nothing has been loaded yet. Rate limiting is one generic ladder: !load and !matrix share the single global Cooldown Seconds timer they always have, while each trigger must clear a global, a per-user and a per-target window before it fires - mods bypass the vote count, never the cooldowns, because the cost sits on the backend rather than on who asked. A fired trigger only enqueues a "chat_trigger" FlowFile and returns immediately; the listener never calls the backend itself, because blocking the IRC reader thread through a 30-90s clip job would blow past Twitch'"'"'s PING tolerance and force a reconnect, burning a refresh token every time. Announces itself once on join across two messages (a single PRIVMSG caps at 500 characters) with no auto-posted watchlist - reconnects happen often enough that repeating it every time reads as spam; responds to "!commands"/"!help" and "!watchlist" ("!w" alias accepted) on demand only. Mints a fresh access token from the refresh token before every (re)connect, so it never hits the ~4hr access-token expiry. Twitch rotates the refresh token on every one of those refreshes, so the rotated value is persisted to NiFi component state (Scope.LOCAL, key "refresh_token") and read back on the next onScheduled - a restart no longer needs a manual device-code re-auth. The write is deferred to create()/onStopped rather than done inline, because the refresh runs on the background IRC thread and the state manager is a py4j bridge into the JVM. Reconnects with backoff on disconnect.'
+        version = '0.0.24-SNAPSHOT'
+        description = 'Holds a persistent connection to Twitch IRC chat and emits one FlowFile per detected "!load <streamer> [screen]" command (screen optional, defaults to screen1, "!l" accepted as a short alias) or "!matrix <screen1|screen2|screen3|screen4>" command (screen required, no default - unlike !load, a bare "!matrix" with no screen is not a recognized command; screen1 targets the Jetson, screen2 targets GamingPC, screen3/screen4 target TunaStarlink). Requests the twitch.tv/tags IRCv3 capability to read each message'"'"'s badges/mod tags. Mod-only short forms: "!m" for !matrix, "k:" in place of "kick:" on a streamer login, and "s1"/"s2"/"s3"/"s4" in place of screen1-4 - each is checked independently, and a non-broadcaster/non-moderator sender using any of them has the whole command silently ignored (same as an unrecognized command); the existing full-text forms (including the pre-existing "!l" alias) keep working for everyone, unchanged. Before dispatching a !load, checks the streamer'"'"'s live status via the Live Check API URL (cso-operator-app, covers both Twitch and Kick "kick:" logins) and replies "not live" instead of queuing if they'"'"'re offline - a lookup failure fails open (dispatches anyway) rather than silently blocking a real load. Also carries prefix-anchored chat triggers that need no "!" prefix, matched against a normalized copy of the message (Twitch'"'"'s invisible TAG-SELECTOR stripped, variation selectors stripped, NFKC, whitespace collapsed, lowercased) and evaluated most-specific-first: the Watchlist Trigger Command ("tuna tuna tuna" by default) or its three-fish-emoji equivalent, optionally followed by a streamer name, adds that streamer to the watchlist once Trigger Vote Count (default 3) occurrences land inside Trigger Vote Window Seconds (default 120) - every occurrence counts, including one person repeating themselves, and the tally is per (trigger, target) so three people naming three streamers is three separate tallies; it is open to everyone and posts a single progress reply one vote short of firing. The three-fish-plus-clapper form (or "<Watchlist Trigger Command> clip") is broadcaster/moderator-only, fires on one use with no vote, and requests a real clip post; a non-mod using it is ignored silently, exactly like the other mod-only short forms. It is gated behind Clip Trigger Enabled (default false - the feature ships dark and that property is the instant off-switch during a raid) and a rolling 24-hour Clip Daily Cap. The three-fish-plus-picture form (or "<Watchlist Trigger Command> gif") is its exact twin for reaction GIFs - same mod-only gate, one use, no vote - gated behind its own Gif Trigger Enabled and Gif Daily Cap on a separate rate-limit budget. A trigger with no streamer named targets whoever was last loaded by !load in this running process, and says so once (rate-limited) if nothing has been loaded yet. Rate limiting is one generic ladder: !load and !matrix share the single global Cooldown Seconds timer they always have, while each trigger must clear a global, a per-user and a per-target window before it fires - mods bypass the vote count, never the cooldowns, because the cost sits on the backend rather than on who asked. A fired trigger only enqueues a "chat_trigger" FlowFile and returns immediately; the listener never calls the backend itself, because blocking the IRC reader thread through a 30-90s clip job would blow past Twitch'"'"'s PING tolerance and force a reconnect, burning a refresh token every time. Announces itself once on join across two messages (a single PRIVMSG caps at 500 characters) with no auto-posted watchlist - reconnects happen often enough that repeating it every time reads as spam; responds to "!commands"/"!help" and "!watchlist" ("!w" alias accepted) on demand only. Mints a fresh access token from the refresh token before every (re)connect, so it never hits the ~4hr access-token expiry. Twitch rotates the refresh token on every one of those refreshes, so the rotated value is persisted to NiFi component state (Scope.LOCAL, key "refresh_token") and read back on the next onScheduled - a restart no longer needs a manual device-code re-auth. The write is deferred to create()/onStopped rather than done inline, because the refresh runs on the background IRC thread and the state manager is a py4j bridge into the JVM. Reconnects with backoff on disconnect.'
         tags = ['twitch', 'irc', 'chat', 'streamers', 'chat-bot']
         dependencies = []
 
@@ -140,6 +140,32 @@ class TwitchChatListenerProcessor(FlowFileSource):
         default_value="4",
         validators=[StandardValidators.NUMBER_VALIDATOR],
     )
+    GIF_TRIGGER_ENABLED = PropertyDescriptor(
+        name="Gif Trigger Enabled",
+        description="Master switch for the mod-only gif trigger (🐟🐟🐟🖼️). Default false, same as the "
+                     "clip trigger: ships dark, turned on with a one-key edit, and flipping it back to "
+                     "false is the instant off-switch - a gif trigger from a mod is then ignored silently "
+                     "and dropped from the join/!commands help text.",
+        required=True,
+        default_value="false",
+        validators=[StandardValidators.BOOLEAN_VALIDATOR],
+    )
+    GIF_COOLDOWN_SECONDS = PropertyDescriptor(
+        name="Gif Cooldown Seconds",
+        description="Global cooldown between two gif triggers firing. A per-user (3600s) and a "
+                     "per-target (21600s) window apply on top of it, plus the rolling Gif Daily Cap - "
+                     "the gif twin of Clip Cooldown Seconds, on its own separate budget.",
+        required=True,
+        default_value="900",
+        validators=[StandardValidators.NUMBER_VALIDATOR],
+    )
+    GIF_DAILY_CAP = PropertyDescriptor(
+        name="Gif Daily Cap",
+        description="Maximum gif triggers in any rolling 24 hours, counted separately from clips.",
+        required=True,
+        default_value="4",
+        validators=[StandardValidators.NUMBER_VALIDATOR],
+    )
     TRIGGER_PROGRESS_REPLIES = PropertyDescriptor(
         name="Trigger Progress Replies",
         description="When true (default), posts one progress reply when a watchlist vote is exactly one "
@@ -185,9 +211,11 @@ class TwitchChatListenerProcessor(FlowFileSource):
         return [self.BOT_USERNAME, self.CHANNEL, self.CLIENT_ID, self.CLIENT_SECRET,
                 self.REFRESH_TOKEN, self.COMMAND_PREFIX, self.MATRIX_COMMAND,
                 self.WATCHLIST_COMMAND, self.WATCHLIST_TRIGGER_COMMAND,
-                self.CLIP_TRIGGER_ENABLED, self.TRIGGER_VOTE_COUNT,
+                self.CLIP_TRIGGER_ENABLED, self.GIF_TRIGGER_ENABLED,
+                self.TRIGGER_VOTE_COUNT,
                 self.TRIGGER_VOTE_WINDOW_SECONDS, self.WATCHLIST_COOLDOWN_SECONDS,
                 self.CLIP_COOLDOWN_SECONDS, self.CLIP_DAILY_CAP,
+                self.GIF_COOLDOWN_SECONDS, self.GIF_DAILY_CAP,
                 self.TRIGGER_PROGRESS_REPLIES, self.WATCHLIST_API_URL,
                 self.LIVE_CHECK_API_URL, self.COOLDOWN_SECONDS]
 
@@ -474,6 +502,9 @@ class TwitchChatListenerProcessor(FlowFileSource):
     # this file gets copied between hosts and into a container.
     _FISH = '\U0001f41f'      # 🐟
     _CLAPPER = '\U0001f3ac'   # 🎬
+    # 🖼️ is FRAME WITH PICTURE + VS-16; _normalize strips the selector, so the
+    # bare code point is what the registry matches, same as _CLAPPER.
+    _PICTURE = '\U0001f5bc'   # 🖼
     # Twitch clients append this invisible TAG-SELECTOR to dodge the duplicate-message
     # filter. Leave it in and the SECOND identical trigger message stops matching, which
     # means a 3-occurrence vote can never complete and nothing anywhere reports an error.
@@ -488,6 +519,7 @@ class TwitchChatListenerProcessor(FlowFileSource):
         'notarget': (('notarget', 'global'),),
         'watchlist': (('watchlist', 'global'), ('watchlist:user', 'user'), ('watchlist:target', 'target')),
         'clip': (('clip', 'global'), ('clip:user', 'user'), ('clip:target', 'target')),
+        'gif': (('gif', 'global'), ('gif:user', 'user'), ('gif:target', 'target')),
     }
     # The per-user/per-target windows aren't properties: they're the shape of the
     # protection, not a knob. The global window of each class is the property.
@@ -496,9 +528,12 @@ class TwitchChatListenerProcessor(FlowFileSource):
         'watchlist:target': 3600.0,
         'clip:user': 3600.0,
         'clip:target': 21600.0,
+        'gif:user': 3600.0,
+        'gif:target': 21600.0,
         'notarget': 60.0,
     }
-    _CLIP_CAP_WINDOW = 86400.0
+    # Both post-to-X triggers carry a rolling 24h cap on their own history deque.
+    _CAP_WINDOW = 86400.0
     # This thread stays up for weeks; the vote table is keyed by (trigger, target) and
     # anyone can invent a new target, so it needs a hard ceiling as well as expiry.
     _VOTE_KEY_CAP = 32
@@ -506,22 +541,28 @@ class TwitchChatListenerProcessor(FlowFileSource):
     def _configure_triggers(self, context):
         self._watchlist_trigger = context.getProperty(self.WATCHLIST_TRIGGER_COMMAND).getValue()
         self._clip_trigger_enabled = context.getProperty(self.CLIP_TRIGGER_ENABLED).asBoolean()
+        self._gif_trigger_enabled = context.getProperty(self.GIF_TRIGGER_ENABLED).asBoolean()
         self._vote_count = max(1, context.getProperty(self.TRIGGER_VOTE_COUNT).asInteger())
         self._vote_window_seconds = context.getProperty(self.TRIGGER_VOTE_WINDOW_SECONDS).asFloat()
-        self._clip_daily_cap = max(0, context.getProperty(self.CLIP_DAILY_CAP).asInteger())
+        self._daily_caps = {
+            'clip': max(0, context.getProperty(self.CLIP_DAILY_CAP).asInteger()),
+            'gif': max(0, context.getProperty(self.GIF_DAILY_CAP).asInteger()),
+        }
         self._progress_replies = context.getProperty(self.TRIGGER_PROGRESS_REPLIES).asBoolean()
 
         self._limit_windows = dict(self._LIMIT_SUBWINDOWS)
         self._limit_windows['device'] = self._cooldown_seconds
         self._limit_windows['watchlist'] = context.getProperty(self.WATCHLIST_COOLDOWN_SECONDS).asFloat()
         self._limit_windows['clip'] = context.getProperty(self.CLIP_COOLDOWN_SECONDS).asFloat()
+        self._limit_windows['gif'] = context.getProperty(self.GIF_COOLDOWN_SECONDS).asFloat()
         # (class, scope_key) -> last fire time, and one "already warned this window" flag
         # per trigger name so the warning itself can never become the spam.
         self._limits = {}
         self._limit_warned = {}
-        # Rolling 24h clip history - a deque of fire times, not a calendar-day counter,
-        # so the cap can't be re-armed in a burst at UTC midnight.
-        self._clip_history = collections.deque()
+        # Rolling 24h history per capped trigger - a deque of fire times, not a
+        # calendar-day counter, so the cap can't be re-armed in a burst at UTC
+        # midnight. clip and gif each get their own.
+        self._cap_history = {'clip': collections.deque(), 'gif': collections.deque()}
         # (trigger, target) -> {nick: [occurrence times]}. Keyed by nick as the state
         # shape says, but holding every occurrence rather than one timestamp: the rule
         # is 3 occurrences, and one person repeating themselves counts.
@@ -537,9 +578,11 @@ class TwitchChatListenerProcessor(FlowFileSource):
         settled before their plain-watchlist prefixes get a look at the same message."""
         fish = self._FISH * 3
         word = self._normalize(watchlist_trigger)
-        entries = [(fish + self._CLAPPER, 'clip'), (fish, 'watchlist')]
+        entries = [(fish + self._CLAPPER, 'clip'), (fish + self._PICTURE, 'gif'),
+                   (fish, 'watchlist')]
         if word:
             entries.append((word + ' clip', 'clip'))
+            entries.append((word + ' gif', 'gif'))
             entries.append((word, 'watchlist'))
         return sorted(entries, key=lambda entry: len(entry[0]), reverse=True)
 
@@ -649,13 +692,14 @@ class TwitchChatListenerProcessor(FlowFileSource):
                 blocked_for = remaining
 
         capped = False
-        if name == 'clip':
-            while self._clip_history and now - self._clip_history[0] >= self._CLIP_CAP_WINDOW:
-                self._clip_history.popleft()
-            if len(self._clip_history) >= self._clip_daily_cap:
+        history = self._cap_history.get(name)
+        if history is not None:
+            while history and now - history[0] >= self._CAP_WINDOW:
+                history.popleft()
+            if len(history) >= self._daily_caps.get(name, 0):
                 capped = True
-                if self._clip_history:
-                    remaining = self._CLIP_CAP_WINDOW - (now - self._clip_history[0])
+                if history:
+                    remaining = self._CAP_WINDOW - (now - history[0])
                     if remaining > blocked_for:
                         blocked_for = remaining
 
@@ -669,8 +713,8 @@ class TwitchChatListenerProcessor(FlowFileSource):
 
         for key in keys:
             self._limits[key] = now
-        if name == 'clip':
-            self._clip_history.append(now)
+        if history is not None:
+            history.append(now)
         self._limit_warned[name] = False
         return True
 
@@ -683,10 +727,11 @@ class TwitchChatListenerProcessor(FlowFileSource):
         if name == 'notarget':
             return None
         wait = self._format_wait(blocked_for)
-        if name == 'clip':
+        if name in ('clip', 'gif'):
+            label = "Clip" if name == 'clip' else "Gif"
             if capped:
-                return f"Clip budget is spent for now - next one in about {wait}."
-            return f"Clip trigger is cooling down - try again in about {wait}."
+                return f"{label} budget is spent for now - next one in about {wait}."
+            return f"{label} trigger is cooling down - try again in about {wait}."
         return f"Watchlist trigger is cooling down - try again in about {wait}."
 
     @staticmethod
@@ -708,15 +753,20 @@ class TwitchChatListenerProcessor(FlowFileSource):
         if self._clip_trigger_enabled:
             message += (f" Mods: {fish}{self._CLAPPER} (or \"{self._watchlist_trigger} clip\") "
                         f"[streamer] pulls a clip - one use, no vote.")
+        if self._gif_trigger_enabled:
+            message += (f" Mods: {fish}{self._PICTURE} (or \"{self._watchlist_trigger} gif\") "
+                        f"[streamer] posts a reaction gif - one use, no vote.")
         return message
 
     def _handle_trigger(self, sock, channel, trigger, nick, is_privileged):
         name, rest = trigger
 
-        if name == 'clip':
-            if not self._clip_trigger_enabled:
+        if name in ('clip', 'gif'):
+            enabled = self._clip_trigger_enabled if name == 'clip' else self._gif_trigger_enabled
+            if not enabled:
                 if self.logger:
-                    self.logger.info(f"Clip trigger from '{nick}' ignored: Clip Trigger Enabled is false")
+                    self.logger.info(f"{name.capitalize()} trigger from '{nick}' ignored: "
+                                     f"{name.capitalize()} Trigger Enabled is false")
                 return
             # Silent for a non-mod, exactly like the "!m"/"k:"/"s1" short forms.
             if not is_privileged:
@@ -733,14 +783,18 @@ class TwitchChatListenerProcessor(FlowFileSource):
 
         display = self._display_login(target)
 
-        if name == 'clip':
+        if name in ('clip', 'gif'):
             # A mod skips the vote, never the cooldowns.
-            if not self._check_limit(sock, channel, 'clip', user=nick, target=target):
+            if not self._check_limit(sock, channel, name, user=nick, target=target):
                 return
-            self._dispatch_trigger('clip_request', target, nick, channel)
-            # Queued first, acked second: a clip job is 30-90s on the backend, and this
-            # is the fast acknowledgement sitting in front of it.
-            self._send_chat(sock, channel, f"on it - pulling a clip from {display} {self._CLAPPER}")
+            if name == 'clip':
+                self._dispatch_trigger('clip_request', target, nick, channel)
+                # Queued first, acked second: a clip job is 30-90s on the backend,
+                # and this is the fast acknowledgement sitting in front of it.
+                self._send_chat(sock, channel, f"on it - pulling a clip from {display} {self._CLAPPER}")
+            else:
+                self._dispatch_trigger('gif_request', target, nick, channel)
+                self._send_chat(sock, channel, f"on it - cutting a gif from {display} {self._PICTURE}")
             return
 
         count = self._record_vote(name, target, nick, now=time.time())
