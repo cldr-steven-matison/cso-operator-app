@@ -606,13 +606,9 @@ async def chat_trigger_clip(body: ChatTriggerRequest, request: Request):
     platform = (body.platform or "twitch").strip().lower()
     entry = f"kick:{login}" if platform == "kick" else login
 
-    # Only clip someone we're already watching: the fetch downloads and
-    # ffmpeg-burns a clip on the pod's 1-CPU limit, and !clip is not the way to
-    # put a new streamer into the pipeline — that's what /chat-trigger/watchlist
-    # is for, with its resolve/live/cap guards.
-    if entry not in streamers.get_watchlist():
-        return {"ok": False, "login": login, "reason": "not_watching",
-                "message": f"{login} isn't on the watch list — !watch {login} first"}
+    # A mod naming any streamer gets a clip on demand — no watchlist or live gate.
+    # The watch list governs who the pipeline polls on its own, not who a mod may
+    # pull one clip for by hand.
 
     # Gif-only streamers (clip=N in streamer_paths) never post the MP4, and the
     # .gif is cut by the separate ProcessClips gif branch that an on-demand
@@ -698,12 +694,9 @@ async def chat_trigger_gif(body: ChatTriggerRequest, request: Request):
     platform = (body.platform or "twitch").strip().lower()
     entry = f"kick:{login}" if platform == "kick" else login
 
-    # Same rule as /chat-trigger/clip: only gif someone we're already watching.
-    # The trigger isn't the way to put a new streamer into the pipeline — that's
-    # /chat-trigger/watchlist, with its resolve/live/cap guards.
-    if entry not in streamers.get_watchlist():
-        return {"ok": False, "login": login, "reason": "not_watching",
-                "message": f"{login} isn't on the watch list — 🐟🐟🐟 {login} first"}
+    # A mod naming any streamer gets a gif on demand — no watchlist or live gate.
+    # Cutting a gif is just fetch → process, the same as a clip; the watch list is
+    # about who the pipeline polls on its own, not who a mod may pull once by hand.
 
     # gif=N in streamer_paths means this streamer never gets a reaction GIF cut.
     if not streamers.streamer_paths(login)["gif"]:
