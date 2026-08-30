@@ -19,8 +19,8 @@ class TwitchChatListenerProcessor(FlowFileSource):
         implements = ['org.apache.nifi.python.processor.FlowFileSource']
 
     class ProcessorDetails:
-        version = '0.0.25-SNAPSHOT'
-        description = 'Holds a persistent connection to Twitch IRC chat and emits one FlowFile per detected "!load <streamer> [screen]" command (screen optional, defaults to screen1, "!l" accepted as a short alias) or "!matrix <screen1|screen2|screen3|screen4>" command (screen required, no default - unlike !load, a bare "!matrix" with no screen is not a recognized command; screen1 targets the Jetson, screen2 targets GamingPC, screen3/screen4 target TunaStarlink). Requests the twitch.tv/tags IRCv3 capability to read each message'"'"'s badges/mod tags. Mod-only short forms: "!m" for !matrix, "k:" in place of "kick:" on a streamer login, and "s1"/"s2"/"s3"/"s4" in place of screen1-4 - each is checked independently, and a non-broadcaster/non-moderator sender using any of them has the whole command silently ignored (same as an unrecognized command); the existing full-text forms (including the pre-existing "!l" alias) keep working for everyone, unchanged. Before dispatching a !load, checks the streamer'"'"'s live status via the Live Check API URL (cso-operator-app, covers both Twitch and Kick "kick:" logins) and replies "not live" instead of queuing if they'"'"'re offline - a lookup failure fails open (dispatches anyway) rather than silently blocking a real load. Also carries prefix-anchored chat triggers that need no "!" prefix, matched against a normalized copy of the message (Twitch'"'"'s invisible TAG-SELECTOR stripped, variation selectors stripped, NFKC, whitespace collapsed, lowercased) and evaluated most-specific-first: the Watchlist Trigger Command ("tuna tuna tuna" by default) or its three-fish-emoji equivalent, optionally followed by a streamer name, adds that streamer to the watchlist once Trigger Vote Count (default 3) occurrences land inside Trigger Vote Window Seconds (default 120) - every occurrence counts, including one person repeating themselves, and the tally is per (trigger, target) so three people naming three streamers is three separate tallies; it is open to everyone and posts a single progress reply one vote short of firing. The three-fish-plus-clapper form (or "<Watchlist Trigger Command> clip") is broadcaster/moderator-only, fires on one use with no vote, and requests a real clip post; a non-mod using it is ignored silently, exactly like the other mod-only short forms. It is gated behind Clip Trigger Enabled (default false - the feature ships dark and that property is the instant off-switch during a raid) and a rolling 24-hour Clip Daily Cap. The three-fish-plus-picture form (or "<Watchlist Trigger Command> gif") is its exact twin for reaction GIFs - same mod-only gate, one use, no vote - gated behind its own Gif Trigger Enabled and Gif Daily Cap on a separate rate-limit budget. A trigger with no streamer named targets whoever was last loaded by !load in this running process, and says so once (rate-limited) if nothing has been loaded yet. Rate limiting is one generic ladder: !load and !matrix share the single global Cooldown Seconds timer they always have, while each trigger must clear a global, a per-user and a per-target window before it fires - mods bypass the vote count, never the cooldowns, because the cost sits on the backend rather than on who asked. A fired trigger only enqueues a "chat_trigger" FlowFile and returns immediately; the listener never calls the backend itself, because blocking the IRC reader thread through a 30-90s clip job would blow past Twitch'"'"'s PING tolerance and force a reconnect, burning a refresh token every time. Announces itself once on join across two messages (a single PRIVMSG caps at 500 characters) with no auto-posted watchlist - reconnects happen often enough that repeating it every time reads as spam; responds to "!commands"/"!help" and "!watchlist" ("!w" alias accepted) on demand only. Mints a fresh access token from the refresh token before every (re)connect, so it never hits the ~4hr access-token expiry. Twitch rotates the refresh token on every one of those refreshes, so the rotated value is persisted to NiFi component state (Scope.LOCAL, key "refresh_token") and read back on the next onScheduled - a restart no longer needs a manual device-code re-auth. The write is deferred to create()/onStopped rather than done inline, because the refresh runs on the background IRC thread and the state manager is a py4j bridge into the JVM. Reconnects with backoff on disconnect.'
+        version = '0.0.26-SNAPSHOT'
+        description = 'Holds a persistent connection to Twitch IRC chat and emits one FlowFile per detected "!load <streamer> [screen]" command (screen optional, defaults to screen1, "!l" accepted as a short alias) or "!matrix <screen1|screen2|screen3|screen4>" command (screen required, no default - unlike !load, a bare "!matrix" with no screen is not a recognized command; screen1 targets the Jetson, screen2 targets GamingPC, screen3/screen4 target TunaStarlink). Requests the twitch.tv/tags IRCv3 capability to read each message'"'"'s badges/mod tags. Mod-only short forms: "!m" for !matrix, "k:" in place of "kick:" on a streamer login, and "s1"/"s2"/"s3"/"s4" in place of screen1-4 - each is checked independently, and a non-broadcaster/non-moderator sender using any of them has the whole command silently ignored (same as an unrecognized command); the existing full-text forms (including the pre-existing "!l" alias) keep working for everyone, unchanged. Before dispatching a !load, checks the streamer'"'"'s live status via the Live Check API URL (cso-operator-app, covers both Twitch and Kick "kick:" logins) and replies "not live" instead of queuing if they'"'"'re offline - a lookup failure fails open (dispatches anyway) rather than silently blocking a real load. Also carries prefix-anchored chat triggers that need no "!" prefix, matched against a normalized copy of the message (Twitch'"'"'s invisible TAG-SELECTOR stripped, variation selectors stripped, NFKC, whitespace collapsed, lowercased) and evaluated most-specific-first: the Watchlist Trigger Command ("tuna tuna tuna" by default) or its three-fish-emoji equivalent, optionally followed by a streamer name, adds that streamer to the watchlist once Trigger Vote Count (default 3) occurrences land inside Trigger Vote Window Seconds (default 120) - every occurrence counts, including one person repeating themselves, and the tally is per (trigger, target) so three people naming three streamers is three separate tallies; it is open to everyone and posts a single progress reply one vote short of firing. The three-fish-plus-clapper form (or "<Watchlist Trigger Command> clip") is broadcaster/moderator-only, fires on one use with no vote, and requests a real clip post; a non-mod using it is ignored silently, exactly like the other mod-only short forms. It is gated behind Clip Trigger Enabled (default false - the feature ships dark and that property is the instant off-switch during a raid) and a rolling 24-hour Clip Daily Cap. The three-fish-plus-picture form (or "<Watchlist Trigger Command> gif") is its exact twin for reaction GIFs - same mod-only gate, one use, no vote - gated behind its own Gif Trigger Enabled and Gif Daily Cap on a separate rate-limit budget. A trigger with no streamer named targets whoever was last loaded by !load in this running process, and says so once (rate-limited) if nothing has been loaded yet. Rate limiting is one generic ladder: !load and !matrix share the single global Cooldown Seconds timer they always have, while each trigger must clear a global, a per-user and a per-target window (plus a rolling daily cap, for clip/gif) before it fires - a moderator/broadcaster bypasses all of them, the daily cap included, since every one of these gates only ever applied to mods (the clip/gif triggers are mod-only) and was purely slowing the operator down (#174). A fired trigger only enqueues a "chat_trigger" FlowFile and returns immediately; the listener never calls the backend itself, because blocking the IRC reader thread through a 30-90s clip job would blow past Twitch'"'"'s PING tolerance and force a reconnect, burning a refresh token every time. Announces itself once on join across two messages (a single PRIVMSG caps at 500 characters) with no auto-posted watchlist - reconnects happen often enough that repeating it every time reads as spam; responds to "!commands"/"!help" and "!watchlist" ("!w" alias accepted) on demand only. Mints a fresh access token from the refresh token before every (re)connect, so it never hits the ~4hr access-token expiry. Twitch rotates the refresh token on every one of those refreshes, so the rotated value is persisted to NiFi component state (Scope.LOCAL, key "refresh_token") and read back on the next onScheduled - a restart no longer needs a manual device-code re-auth. The write is deferred to create()/onStopped rather than done inline, because the refresh runs on the background IRC thread and the state manager is a py4j bridge into the JVM. Reconnects with backoff on disconnect.'
         tags = ['twitch', 'irc', 'chat', 'streamers', 'chat-bot']
         dependencies = []
 
@@ -126,15 +126,16 @@ class TwitchChatListenerProcessor(FlowFileSource):
         name="Clip Cooldown Seconds",
         description="Global cooldown between two clip triggers firing. A per-user (3600s) and a "
                      "per-target (21600s) window apply on top of it, plus the rolling Clip Daily Cap. "
-                     "Moderators bypass the vote count, never these - the cost is on the backend, not "
-                     "on who asked.",
+                     "Moderators bypass all of these (and the cap) - every gate here is mod-only anyway, "
+                     "so it was only ever slowing the operator down (#174).",
         required=True,
         default_value="900",
         validators=[StandardValidators.NUMBER_VALIDATOR],
     )
     CLIP_DAILY_CAP = PropertyDescriptor(
         name="Clip Daily Cap",
-        description="Maximum clip triggers in any rolling 24 hours. Rolling rather than calendar-day on "
+        description="Maximum clip triggers in any rolling 24 hours, applied to non-privileged callers "
+                     "only - moderators/broadcaster bypass it (#174). Rolling rather than calendar-day on "
                      "purpose, so the budget can't be burned in a burst the moment UTC midnight ticks over.",
         required=True,
         default_value="4",
@@ -161,7 +162,8 @@ class TwitchChatListenerProcessor(FlowFileSource):
     )
     GIF_DAILY_CAP = PropertyDescriptor(
         name="Gif Daily Cap",
-        description="Maximum gif triggers in any rolling 24 hours, counted separately from clips.",
+        description="Maximum gif triggers in any rolling 24 hours, counted separately from clips. "
+                     "Applied to non-privileged callers only - moderators/broadcaster bypass it (#174).",
         required=True,
         default_value="4",
         validators=[StandardValidators.NUMBER_VALIDATOR],
@@ -675,10 +677,9 @@ class TwitchChatListenerProcessor(FlowFileSource):
         that window is silent.
 
         A privileged caller (broadcaster/moderator) bypasses every cooldown window and
-        stamps none of them - mods are trusted operators, and the cooldowns were getting
-        in the way of them driving the bot. The rolling daily cap on clip/gif is the one
-        gate they still clear, since that protects the backend from runaway cost, not
-        just against chat spam."""
+        the rolling daily cap, and stamps none of them - mods are trusted operators and
+        every gate here only ever applied to them (the clip/gif triggers are mod-only),
+        so the gating was purely getting in the way of them driving the bot (#174)."""
         now = time.time()
         self._prune_limits(now)
 
@@ -699,7 +700,13 @@ class TwitchChatListenerProcessor(FlowFileSource):
                     blocked_for = remaining
 
         capped = False
-        history = self._cap_history.get(name)
+        # A privileged caller bypasses the rolling daily cap along with the
+        # cooldowns (Steven's call, #174): the cap only ever gated mods to begin
+        # with, since the clip/gif triggers are mod-only, and it was locking a
+        # trusted operator out for ~23h - part of it on posts that failed at X
+        # and never went out. Prune-and-append is skipped too, so a mod's fires
+        # leave no cap history to charge a later non-privileged caller against.
+        history = None if privileged else self._cap_history.get(name)
         if history is not None:
             while history and now - history[0] >= self._CAP_WINDOW:
                 history.popleft()
