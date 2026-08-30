@@ -3671,6 +3671,7 @@ async def process_clip(clip: dict) -> dict:
             return {**clip, "title": title, "transcript": "", "caption": "",
                     "error": f"disqualified: {black_frac:.0%} of the frame is static black canvas"}
 
+    brain: dict = {}   # shadow-mode fields (#277); empty unless BRAIN_DOOR_URL is set
     async with httpx.AsyncClient(verify=False, timeout=300.0) as client:
         # Extract 16kHz mono WAV — much smaller upload to Whisper than raw MP4
         transcript = ""
@@ -3885,11 +3886,51 @@ async def process_clip(clip: dict) -> dict:
         if error and not caption:
             return {**clip, "title": title, "transcript": transcript, "caption": "", "error": error}
 
+        # Shadow mode (#277): the Spark brain sees the same clip; its caption
+        # lands beside the 3B one for review and is never posted. Must stay
+        # inside this `async with` — `client` is closed once the block ends.
+        if settings.BRAIN_DOOR_URL:
+            brain = await _shadow_brain_caption(client, clip, title, transcript)
+
     return {
         **clip, "title": title, "transcript": transcript, "caption": caption,
         "caption_mode": caption_mode, "quote_reason": quote_reason,
-        "paths": paths,
+        "paths": paths, **brain,
     }
+
+
+async def _shadow_brain_caption(client: httpx.AsyncClient, clip: dict, title: str,
+                                transcript: str) -> dict:
+    """POST the clip to the DGX Spark brain door (#277) and return
+    ``{"brain_caption": str, "brain": <door JSON or {"error": ...}>}``. Every
+    failure — timeout, non-200, unparsable body — becomes an error field; this
+    never raises and never touches the 3B `caption`. Shape mirrors
+    services/vllm.py's defensive call."""
+    payload = {
+        "clip_id": clip.get("clip_id", ""), "streamer": clip.get("streamer", ""),
+        "source": clip.get("source", "twitch"), "title": title or "",
+        "description": clip.get("description", "") or "", "transcript": transcript or "",
+    }
+    tag = f"[process_clip] brain {payload['clip_id'] or '?'}"
+    try:
+        r = await client.post(settings.BRAIN_DOOR_URL, json=payload,
+                              timeout=settings.BRAIN_DOOR_TIMEOUT)
+    except Exception as e:  # network / DNS / timeout — shadow only, carry on
+        print(f"{tag}: request failed: {e!r}")
+        return {"brain_caption": "", "brain": {"error": f"request failed: {e!r}"}}
+    if r.status_code != 200:
+        print(f"{tag}: door {r.status_code}")
+        return {"brain_caption": "", "brain": {"error": f"door {r.status_code}", "body": r.text[:500]}}
+    try:
+        body = r.json()
+        if not isinstance(body, dict):
+            raise ValueError("not a JSON object")
+    except Exception as e:
+        print(f"{tag}: bad reply: {e!r}")
+        return {"brain_caption": "", "brain": {"error": f"bad reply: {e!r}", "body": r.text[:500]}}
+    caption = str(body.get("caption") or body.get("brain_caption") or "").strip()
+    print(f"{tag}: {'ok' if caption else 'empty caption'}")
+    return {"brain_caption": caption, "brain": body}
 
 
 # ── GIF branch ────────────────────────────────────────────────────────────────
