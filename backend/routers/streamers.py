@@ -539,6 +539,56 @@ class ChatTriggerRequest(BaseModel):
     channel: str = ""        # channel the command was typed in
 
 
+# ── Chat-trigger X-post retry (#274) ──────────────────────────────────────────
+# The bam/extraemily gif failures were transient (a 429 or media-processing lag),
+# not content: the identical publish path posted fine by hand seconds later, yet
+# the one hiccup read as "nothing posted" and burned a mod's slot. A single
+# wait-then-retry turns that transient hiccup back into a post. It fires only on
+# a transient signal — the permanent rejections publish_clip already reports as
+# ok:false (duplicate content, media too long, bad credentials) would just fail
+# identically a second time, so they're not retried.
+_TRANSIENT_X_MARKERS = (
+    "429", "rate limit", "too many requests", "timeout", "timed out",
+    "connection", "reset by peer", "processing", "try again", "temporarily",
+    "500", "502", "503", "504", "internal server error", "service unavailable",
+)
+_PERMANENT_X_MARKERS = (
+    "duplicate", "already posted", "too long", "duration", "credential",
+    "unauthorized", "forbidden", "401", "403",
+)
+
+
+def _is_transient_x_error(reason) -> bool:
+    """True only when the captured X error looks retryable. Permanent markers win
+    over transient ones (a '403 rate limit' oddity stays permanent)."""
+    text = " ".join(str(reason or "").split()).lower()
+    if not text:
+        return False
+    if any(m in text for m in _PERMANENT_X_MARKERS):
+        return False
+    return any(m in text for m in _TRANSIENT_X_MARKERS)
+
+
+async def _publish_with_retry(publish, *, wait_seconds: float = 4.0):
+    """Run an X-publish once and, on a transient failure only, wait briefly and
+    retry exactly once. `publish` is a zero-arg coroutine factory returning the
+    usual {"ok": bool, "error"/"reason": ...}; publish_clip raises on an X
+    rejection, so an exception is caught and classified the same as ok:false."""
+    try:
+        result = await publish()
+    except Exception as e:
+        result = {"ok": False, "error": str(e)}
+    if result.get("ok"):
+        return result
+    if not _is_transient_x_error(result.get("error") or result.get("reason")):
+        return result
+    await asyncio.sleep(wait_seconds)
+    try:
+        return await publish()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @router.post("/chat-trigger/watchlist")
 async def chat_trigger_watchlist(body: ChatTriggerRequest, request: Request):
     """!watch <login> from chat: pin one streamer onto the FetchClips watch list.
@@ -650,16 +700,15 @@ async def chat_trigger_clip(body: ChatTriggerRequest, request: Request):
     # the usual rejections (duplicate content, media too long, credentials) are
     # permanent — reported as ok:false/post_failed so InvokeHTTP doesn't retry a
     # post that will fail identically every time.
-    try:
-        result = await streamers.publish_clip(
-            processed.get("clip_path", ""), processed.get("caption", ""),
-            processed.get("clip_id", ""), processed.get("title", ""),
-            processed.get("source", ""), processed.get("streamer", ""),
-            processed.get("url", ""), processed.get("thumbnail_url", ""),
-            streamers.get_x_handle(processed.get("streamer", "")),
-        )
-    except Exception as e:
-        result = {"ok": False, "error": str(e)}
+    # One-shot retry on a transient X failure (#274) — the already-processed clip
+    # is reused, only the post is re-attempted, never the fetch/process.
+    result = await _publish_with_retry(lambda: streamers.publish_clip(
+        processed.get("clip_path", ""), processed.get("caption", ""),
+        processed.get("clip_id", ""), processed.get("title", ""),
+        processed.get("source", ""), processed.get("streamer", ""),
+        processed.get("url", ""), processed.get("thumbnail_url", ""),
+        streamers.get_x_handle(processed.get("streamer", "")),
+    ))
 
     if not result.get("ok"):
         # Surface X's actual objection (#174) rather than a hardcoded
@@ -736,10 +785,10 @@ async def chat_trigger_gif(body: ChatTriggerRequest, request: Request):
                 "reason": reason,
                 "message": f"no gif for {login} this time: {reason}"}
 
-    try:
-        result = await streamers.publish_gif_now(clip.get("clip_id", ""))
-    except Exception as e:
-        result = {"ok": False, "reason": str(e)}
+    # One-shot retry on a transient X failure (#274) — the already-cut gif is
+    # reused, only the post is re-attempted, never the fetch/process.
+    result = await _publish_with_retry(
+        lambda: streamers.publish_gif_now(clip.get("clip_id", "")))
 
     if not result.get("ok"):
         # Surface X's actual objection (#174) - a generic "nothing posted" hid
