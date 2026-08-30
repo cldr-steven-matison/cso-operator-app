@@ -2251,7 +2251,7 @@ _STREAMER_CATALOG: dict[str, str] = {
     "lacy":           "LacyHimself",
     "kaicenat":       "KaiCenat",
     # Kick
-    "roshtein":       "roshtein",
+    "roshtein":       "roshteins",   # Kick profile's declared X handle (#273 probe, 2026-08-30)
     "ac7ionman":      "Ac7ionMann",
     "adinross":       "adinross",
     "n3on":           "n3ononyt",
