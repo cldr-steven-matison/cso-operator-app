@@ -56,6 +56,37 @@ CREATE TABLE IF NOT EXISTS streamer (
 );
 """
 
+# Identity columns for the DGX Spark caption brain (#276) — additive, idempotent,
+# re-run at every startup. Pronouns are typed by a human in the app's Watchlist
+# tab (#279) and never inferred; the brain reads only confirmed ones, through the
+# ``streamer_brain`` view below, which is the whole contract the Spark consumes.
+_MIGRATIONS = """
+ALTER TABLE streamer ADD COLUMN IF NOT EXISTS display_name    text;
+ALTER TABLE streamer ADD COLUMN IF NOT EXISTS aliases         text[] NOT NULL DEFAULT '{}';
+ALTER TABLE streamer ADD COLUMN IF NOT EXISTS pronouns        text;
+ALTER TABLE streamer ADD COLUMN IF NOT EXISTS pronouns_status text
+    CHECK (pronouns_status IN ('confirmed', 'needs_review'));
+ALTER TABLE streamer ADD COLUMN IF NOT EXISTS notes           text;
+CREATE OR REPLACE VIEW streamer_brain AS
+SELECT CASE WHEN platform = 'kick' THEN 'kick:' || login ELSE login END AS streamer_key,
+       platform, login,
+       COALESCE(display_name, login)                       AS display_name,
+       aliases, x_handle,
+       (x_handle_status = 'confirmed')                     AS x_handle_confirmed,
+       CASE WHEN pronouns_status = 'confirmed' THEN pronouns END AS pronouns,
+       (pronouns_status = 'confirmed')                     AS pronouns_confirmed,
+       notes, active
+FROM streamer;
+"""
+
+PRONOUNS_CONFIRMED = "confirmed"
+PRONOUNS_NEEDS_REVIEW = "needs_review"
+
+_COLUMNS = ("platform", "login", "x_handle", "x_handle_status", "clip_enabled",
+            "gif_enabled", "gif_post_enabled", "active", "added_by", "added_at",
+            "updated_at", "source", "display_name", "aliases", "pronouns",
+            "pronouns_status", "notes")
+
 
 @dataclass(frozen=True)
 class Streamer:
@@ -67,11 +98,34 @@ class Streamer:
     gif: bool
     gif_post: bool
     active: bool
+    # Bookkeeping + the #276 identity columns (all "" / () when unset).
+    added_by: str = ""
+    added_at: str = ""          # ISO-8601, "" when unknown
+    updated_at: str = ""
+    source: str = "seed"
+    display_name: str = ""
+    aliases: tuple[str, ...] = ()
+    pronouns: str = ""
+    pronouns_status: str = ""   # "confirmed" | "needs_review" | ""
+    notes: str = ""
 
     @property
     def entry(self) -> str:
         """The ``login`` / ``kick:login`` shape the rest of the module uses."""
         return f"kick:{self.login}" if self.platform == "kick" else self.login
+
+    def as_dict(self) -> dict:
+        """JSON-ready row for the app's roster endpoints (#279)."""
+        return {
+            "platform": self.platform, "login": self.login, "entry": self.entry,
+            "x_handle": self.x_handle, "x_handle_status": self.x_handle_status,
+            "clip_enabled": self.clip, "gif_enabled": self.gif, "gif_post_enabled": self.gif_post,
+            "active": self.active, "added_by": self.added_by, "added_at": self.added_at,
+            "updated_at": self.updated_at, "source": self.source,
+            "display_name": self.display_name, "aliases": list(self.aliases),
+            "pronouns": self.pronouns, "pronouns_status": self.pronouns_status,
+            "notes": self.notes,
+        }
 
 
 _pool: asyncpg.Pool | None = None
@@ -135,6 +189,7 @@ async def ensure_schema_and_seed(seed: dict) -> int:
                          p.get("clip", True), p.get("gif", True), p.get("gif_post", False)))
     async with _pool.acquire() as conn:
         await conn.execute(_SCHEMA)
+        await conn.execute(_MIGRATIONS)
         inserted = 0
         for row in rows:
             status = await conn.execute(
@@ -156,14 +211,20 @@ async def reload() -> None:
     assert _pool is not None
     async with _pool.acquire() as conn:
         records = await conn.fetch(
-            "SELECT platform, login, x_handle, x_handle_status, clip_enabled, "
-            "gif_enabled, gif_post_enabled, active FROM streamer ORDER BY seq")
+            f"SELECT {', '.join(_COLUMNS)} FROM streamer ORDER BY seq")
     _cache = {
         (r["platform"], r["login"]): Streamer(
             platform=r["platform"], login=r["login"],
             x_handle=r["x_handle"] or "", x_handle_status=r["x_handle_status"] or "",
             clip=r["clip_enabled"], gif=r["gif_enabled"], gif_post=r["gif_post_enabled"],
-            active=r["active"])
+            active=r["active"],
+            added_by=r["added_by"] or "",
+            added_at=r["added_at"].isoformat() if r["added_at"] else "",
+            updated_at=r["updated_at"].isoformat() if r["updated_at"] else "",
+            source=r["source"] or "seed",
+            display_name=r["display_name"] or "", aliases=tuple(r["aliases"] or ()),
+            pronouns=r["pronouns"] or "", pronouns_status=r["pronouns_status"] or "",
+            notes=r["notes"] or "")
         for r in records
     }
 
@@ -176,6 +237,13 @@ def logins(platform: str) -> list[str] | None:
     if _cache is None:
         return None
     return [s.login for s in _cache.values() if s.platform == platform and s.active]
+
+
+def list_all() -> list[Streamer] | None:
+    """Every row, inactive included, in ``seq`` order — the Watchlist grid (#279)."""
+    if _cache is None:
+        return None
+    return list(_cache.values())
 
 
 def get(login: str, platform: str | None = None, *,
@@ -229,6 +297,55 @@ async def remove(platform: str, login: str) -> bool:
                 "WHERE platform = $1 AND login = $2 AND active", platform, login)
         await reload()
     return status.endswith(" 1")
+
+
+async def hard_delete(platform: str, login: str) -> bool:
+    """Really delete the row (test rows only — #279). Returns False when absent."""
+    assert _pool is not None
+    login = login.lower().lstrip("@")
+    async with _lock:
+        async with _pool.acquire() as conn:
+            status = await conn.execute(
+                "DELETE FROM streamer WHERE platform = $1 AND login = $2", platform, login)
+        await reload()
+    return status.endswith(" 1")
+
+
+# Columns the Watchlist grid may edit (#279). Everything else (login, platform,
+# seq, added_*) is identity/bookkeeping and stays read-only from the UI.
+_UPDATABLE = {"x_handle", "x_handle_status", "clip_enabled", "gif_enabled",
+              "gif_post_enabled", "active", "display_name", "aliases", "pronouns",
+              "pronouns_status", "notes"}
+
+
+async def update(platform: str, login: str, **fields) -> Streamer | None:
+    """Partial update of one row from the Watchlist grid. Unknown keys raise
+    ``ValueError`` (a coding error, not user input); ``None`` for a nullable
+    text column clears it. Returns the refreshed row, or None when absent."""
+    assert _pool is not None
+    bad = set(fields) - _UPDATABLE
+    if bad:
+        raise ValueError(f"not updatable: {sorted(bad)}")
+    login = login.lower().lstrip("@")
+    sets, args = [], [platform, login]
+    for col, val in fields.items():
+        if col == "x_handle" and isinstance(val, str):
+            val = val.lstrip("@") or None
+        elif col == "aliases":
+            val = [a.strip().lstrip("@") for a in (val or []) if a and a.strip()]
+        elif col in ("x_handle_status", "pronouns_status", "pronouns", "display_name", "notes"):
+            val = (val.strip() if isinstance(val, str) else val) or None
+        args.append(val)
+        sets.append(f"{col} = ${len(args)}")
+    if not sets:
+        return get(login, platform, include_inactive=True)
+    async with _lock:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                f"UPDATE streamer SET {', '.join(sets)}, updated_at = now() "
+                "WHERE platform = $1 AND login = $2", *args)
+        await reload()
+    return get(login, platform, include_inactive=True)
 
 
 async def set_x_handle(platform: str, login: str, x_handle: str,
