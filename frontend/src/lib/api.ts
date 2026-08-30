@@ -105,6 +105,10 @@ export type StreamerClip = {
   paths?: { clip: boolean; gif: boolean; gif_post?: boolean };
   transcript?: string;
   caption?: string;
+  // Shadow mode (#277): the DGX Spark brain's caption + its self-check JSON.
+  // Review-only — never what gets approved/posted.
+  brain_caption?: string;
+  brain?: Record<string, unknown>;
   _offset?: number;
   _partition?: number;
   _ts?: number;
@@ -112,6 +116,36 @@ export type StreamerClip = {
 
 export type StreamerPublishResult = { ok: boolean; tweet_id: string; url: string };
 export type WatchlistResponse = { logins: string[] };
+
+// One row of the Postgres `streamer` table (roster_store.Streamer.as_dict) — #279.
+export type RosterRow = {
+  platform: "twitch" | "kick";
+  login: string;
+  entry: string; // login | kick:login
+  x_handle: string;
+  x_handle_status: "" | "confirmed" | "needs_review";
+  clip_enabled: boolean;
+  gif_enabled: boolean;
+  gif_post_enabled: boolean;
+  active: boolean;
+  added_by: string;
+  added_at: string;
+  updated_at: string;
+  source: string;
+  display_name: string;
+  aliases: string[];
+  pronouns: string;
+  pronouns_status: "" | "confirmed" | "needs_review";
+  notes: string;
+};
+export type RosterPatch = Partial<
+  Pick<
+    RosterRow,
+    | "x_handle" | "x_handle_status" | "clip_enabled" | "gif_enabled" | "gif_post_enabled"
+    | "active" | "display_name" | "aliases" | "pronouns" | "pronouns_status" | "notes"
+  >
+>;
+export type RosterResult = { ok: boolean; login?: string; reason?: string; message?: string; row?: RosterRow };
 
 export type PendingClip = {
   clip_id: string;
@@ -357,6 +391,34 @@ export const api = {
     jpost<WatchlistResponse>("/api/streamers/watchlist", { logins }),
   streamersRotateWatchlist: () =>
     jpost<WatchlistResponse>("/api/streamers/watchlist/rotate", {}),
+  streamersWatchlistAdd: (login: string, platform: "twitch" | "kick") =>
+    jpost<WatchlistResponse>("/api/streamers/watchlist/add", { login, platform }),
+  streamersWatchlistRemove: (login: string, platform: "twitch" | "kick") =>
+    jpost<WatchlistResponse>("/api/streamers/watchlist/remove", { login, platform }),
+  // Roster grid (#279)
+  streamersRosterRows: () =>
+    jget<{ ok: boolean; reason?: string; rows: RosterRow[]; watchlist: string[] }>(
+      "/api/streamers/roster/rows",
+    ),
+  streamersRosterAdd: (login: string, platform: "twitch" | "kick") =>
+    jpost<RosterResult>("/api/streamers/roster/add", { login, platform }),
+  streamersRosterUpdate: (platform: string, login: string, patch: RosterPatch) =>
+    fetch(`/api/streamers/roster/${encodeURIComponent(platform)}/${encodeURIComponent(login)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json() as Promise<RosterResult>;
+    }),
+  streamersRosterDelete: (platform: string, login: string, hard = false) =>
+    fetch(
+      `/api/streamers/roster/${encodeURIComponent(platform)}/${encodeURIComponent(login)}${hard ? "?hard=true" : ""}`,
+      { method: "DELETE" },
+    ).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json() as Promise<{ ok: boolean; login: string; removed: boolean; hard: boolean }>;
+    }),
   streamersTopics: () => jget<StreamerTopics>("/api/streamers/topics"),
   streamersReset: () => jpost<KafkaResetResult>("/api/streamers/reset"),
   streamersFetchMode: () => jget<{ mode: string; period: string }>("/api/streamers/fetch-mode"),

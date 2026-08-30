@@ -13,6 +13,8 @@ import {
   type InspectorResult,
   type PendingClip,
   type PostedClip,
+  type RosterPatch,
+  type RosterRow,
   type StreamerClip,
   type StreamerFlows,
   type StreamerGif,
@@ -231,14 +233,31 @@ function ClipCard({
         )}
       </div>
 
-      {/* Caption (editable) */}
-      <div className="space-y-1">
-        <textarea
-          rows={4}
-          value={caption}
-          onChange={(e) => setCaption(e.target.value)}
-          className="w-full bg-bg border border-border rounded px-2 py-1 text-xs font-mono text-text resize-y"
-        />
+      {/* Caption (editable) — left; brain caption (shadow, #277) — right */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted">caption (3B) — what gets posted</p>
+          <textarea
+            rows={4}
+            value={caption}
+            onChange={(e) => setCaption(e.target.value)}
+            className="w-full bg-bg border border-border rounded px-2 py-1 text-xs font-mono text-text resize-y"
+          />
+        </div>
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted">brain (Spark) — shadow, not posted</p>
+          <p className="text-xs font-mono border border-border rounded p-2 bg-panel min-h-[5.5rem] whitespace-pre-wrap">
+            {clip.brain_caption?.trim() ? (
+              <span className="text-text">{clip.brain_caption}</span>
+            ) : (
+              <span className="text-muted">
+                {typeof clip.brain?.error === "string"
+                  ? `no brain caption — ${clip.brain.error}`
+                  : "no brain caption"}
+              </span>
+            )}
+          </p>
+        </div>
       </div>
 
       {/* Tweet preview */}
@@ -679,6 +698,304 @@ function PlatformBadge({ platform }: { platform: "twitch" | "kick" }) {
     }`}>
       {platform}
     </span>
+  );
+}
+
+// ── Roster grid — the "Watchlist" sub-tab (#279) ───────────────────────────
+// The whole Postgres `streamer` table (roster_store), one row per streamer,
+// inline edit / soft-delete / hard-delete / add / pin-to-feed. Not to be
+// confused with `WatchList` below, the 4-entry FetchClips pin list.
+
+type RosterDraft = {
+  x_handle: string;
+  display_name: string;
+  aliases: string; // comma-separated while editing
+  pronouns: string;
+  notes: string;
+  clip_enabled: boolean;
+  gif_enabled: boolean;
+  gif_post_enabled: boolean;
+};
+
+function draftFrom(r: RosterRow): RosterDraft {
+  return {
+    x_handle: r.x_handle, display_name: r.display_name, aliases: r.aliases.join(", "),
+    pronouns: r.pronouns, notes: r.notes, clip_enabled: r.clip_enabled,
+    gif_enabled: r.gif_enabled, gif_post_enabled: r.gif_post_enabled,
+  };
+}
+
+function fmtTs(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+}
+
+function FlagPill({ on, label, editing, onToggle }: { on: boolean; label: string; editing: boolean; onToggle: () => void }) {
+  const cls = on ? "bg-accent/20 text-accent border-accent/40" : "bg-bg text-muted border-border";
+  return (
+    <button
+      type="button"
+      disabled={!editing}
+      onClick={onToggle}
+      title={label}
+      className={`text-[10px] px-1.5 py-0.5 rounded border ${cls} ${editing ? "cursor-pointer hover:text-text" : "cursor-default"}`}
+    >
+      {on ? "on" : "off"}
+    </button>
+  );
+}
+
+function RosterGrid() {
+  const [rows, setRows] = useState<RosterRow[]>([]);
+  const [watchlist, setWatchlist] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [unavailable, setUnavailable] = useState(false);
+  const [showInactive, setShowInactive] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null); // `${platform}/${login}`
+  const [draft, setDraft] = useState<RosterDraft | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [addLogin, setAddLogin] = useState("");
+  const [addPlatform, setAddPlatform] = useState<"twitch" | "kick">("twitch");
+
+  const refresh = async () => {
+    try {
+      const r = await api.streamersRosterRows();
+      setRows(r.rows);
+      setWatchlist(r.watchlist);
+      setUnavailable(!r.ok);
+    } catch (e) {
+      setMsg(`load failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  const key = (r: RosterRow) => `${r.platform}/${r.login}`;
+
+  async function run(label: string, k: string, fn: () => Promise<{ ok: boolean; message?: string; reason?: string }>) {
+    setBusy(k);
+    setMsg(null);
+    try {
+      const res = await fn();
+      setMsg(res.message ?? (res.ok ? `${label}: ok` : `${label}: ${res.reason ?? "failed"}`));
+      await refresh();
+    } catch (e) {
+      setMsg(`${label} failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function startEdit(r: RosterRow) {
+    setEditing(key(r));
+    setDraft(draftFrom(r));
+  }
+
+  async function saveEdit(r: RosterRow) {
+    if (!draft) return;
+    const patch: RosterPatch = {
+      display_name: draft.display_name.trim(),
+      aliases: draft.aliases.split(",").map((a) => a.trim()).filter(Boolean),
+      notes: draft.notes.trim(),
+      clip_enabled: draft.clip_enabled,
+      gif_enabled: draft.gif_enabled,
+      gif_post_enabled: draft.gif_post_enabled,
+    };
+    const newHandle = draft.x_handle.trim().replace(/^@/, "");
+    if (newHandle !== r.x_handle) {
+      // A human typed a handle — that is the confirmation the chat path couldn't get.
+      patch.x_handle = newHandle;
+      patch.x_handle_status = newHandle ? "confirmed" : "";
+    }
+    const newPronouns = draft.pronouns.trim();
+    if (newPronouns !== r.pronouns) {
+      // Typing pronouns stores them as needs_review; the explicit Confirm button
+      // flips them to confirmed — only confirmed values reach the Spark brain.
+      patch.pronouns = newPronouns;
+      patch.pronouns_status = newPronouns ? "needs_review" : "";
+    }
+    await run("save", key(r), () => api.streamersRosterUpdate(r.platform, r.login, patch));
+    setEditing(null);
+    setDraft(null);
+  }
+
+  async function add() {
+    const login = addLogin.trim().replace(/^@/, "").toLowerCase();
+    if (!login) return;
+    await run("add", `add/${login}`, () => api.streamersRosterAdd(login, addPlatform));
+    setAddLogin("");
+  }
+
+  const visible = rows.filter((r) => showInactive || r.active);
+  const needsReview = rows.filter((r) => r.active && r.x_handle_status === "needs_review").length;
+  const cell = "px-2 py-1 align-top whitespace-nowrap";
+  const input = "bg-bg border border-border rounded px-1 py-0.5 text-xs font-mono text-text w-full min-w-[6rem]";
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+        <CardTitle>Watchlist — roster ({rows.filter((r) => r.active).length} active / {rows.length} rows)</CardTitle>
+        <div className="flex items-center gap-2 flex-wrap">
+          {needsReview > 0 && <Badge tone="warn">{needsReview} needs review</Badge>}
+          <label className="text-xs text-muted flex items-center gap-1">
+            <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />
+            show inactive
+          </label>
+          <Button variant="ghost" onClick={refresh} disabled={loading}>Refresh</Button>
+        </div>
+      </div>
+
+      <p className="text-xs text-muted mb-2">
+        Source of truth is the Postgres <code>streamer</code> table (#275). Edit → fields become inputs; Save writes
+        the row and reloads the app's cache. A typed X handle counts as confirmed. Pronouns are typed as{" "}
+        <em>needs review</em> and only reach the Spark brain once you press Confirm — nothing is ever inferred.
+        Deactivate = the chat ➖ soft-delete; Delete really drops the row (test rows only). Pin/Unpin is the
+        FetchClips feed list (the Overview watch list).
+      </p>
+
+      {/* Add row — the chat ➕ path's guards apply (channel must exist; handle confirmed-or-needs_review) */}
+      <div className="flex items-center gap-2 flex-wrap mb-3">
+        <input
+          value={addLogin}
+          onChange={(e) => setAddLogin(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+          placeholder="login"
+          className="bg-bg border border-border rounded px-2 py-1 text-xs font-mono text-text w-48"
+        />
+        <PlatformToggle platform={addPlatform} onChange={setAddPlatform} />
+        <Button onClick={add} disabled={busy !== null || !addLogin.trim() || unavailable}>Add</Button>
+        {msg && <span className="text-xs text-muted">{msg}</span>}
+      </div>
+
+      {unavailable && (
+        <p className="text-xs text-bad mb-2">roster store unreachable — showing nothing; the app is on its hardcoded fallback roster.</p>
+      )}
+      {loading ? (
+        <p className="text-xs text-muted">Loading…</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="text-xs w-full border-collapse">
+            <thead>
+              <tr className="text-muted text-left border-b border-border">
+                {["platform", "login", "display name", "aliases", "x handle", "pronouns", "notes", "clip", "gif", "gif post", "active", "feed", "added by", "source", "added", "updated", ""].map((h) => (
+                  <th key={h} className={`${cell} font-semibold`}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((r) => {
+                const k = key(r);
+                const isEditing = editing === k && draft !== null;
+                const pinned = watchlist.includes(r.entry);
+                const review = r.x_handle_status === "needs_review";
+                const rowCls = [
+                  "border-b border-border/60",
+                  review ? "border-warn/40 bg-warn/5" : "",
+                  r.active ? "" : "opacity-50",
+                ].join(" ");
+                return (
+                  <tr key={k} className={rowCls}>
+                    <td className={cell}><PlatformBadge platform={r.platform} /></td>
+                    <td className={`${cell} font-mono text-text`}>{r.login}</td>
+                    <td className={cell}>
+                      {isEditing ? <input className={input} value={draft.display_name} onChange={(e) => setDraft({ ...draft, display_name: e.target.value })} /> : (r.display_name || <span className="text-muted">—</span>)}
+                    </td>
+                    <td className={cell}>
+                      {isEditing ? <input className={input} value={draft.aliases} placeholder="a, b" onChange={(e) => setDraft({ ...draft, aliases: e.target.value })} /> : (r.aliases.length ? r.aliases.join(", ") : <span className="text-muted">—</span>)}
+                    </td>
+                    <td className={cell}>
+                      {isEditing ? (
+                        <input className={input} value={draft.x_handle} onChange={(e) => setDraft({ ...draft, x_handle: e.target.value })} />
+                      ) : (
+                        <span className="flex items-center gap-1">
+                          <span className="font-mono">{r.x_handle ? `@${r.x_handle}` : "—"}</span>
+                          {review && <Badge tone="warn">needs review</Badge>}
+                          {review && r.x_handle && (
+                            <Button variant="ghost" disabled={busy !== null} onClick={() => run("confirm handle", k, () => api.streamersRosterUpdate(r.platform, r.login, { x_handle_status: "confirmed" }))}>Confirm</Button>
+                          )}
+                        </span>
+                      )}
+                    </td>
+                    <td className={cell}>
+                      {isEditing ? (
+                        <input className={input} value={draft.pronouns} placeholder="she/her" onChange={(e) => setDraft({ ...draft, pronouns: e.target.value })} />
+                      ) : (
+                        <span className="flex items-center gap-1">
+                          <span className="font-mono">{r.pronouns || "—"}</span>
+                          {r.pronouns && r.pronouns_status === "confirmed" && <Badge tone="ok">confirmed</Badge>}
+                          {r.pronouns && r.pronouns_status !== "confirmed" && (
+                            <>
+                              <Badge tone="warn">needs review</Badge>
+                              <Button variant="ghost" disabled={busy !== null} onClick={() => run("confirm pronouns", k, () => api.streamersRosterUpdate(r.platform, r.login, { pronouns_status: "confirmed" }))}>Confirm</Button>
+                            </>
+                          )}
+                        </span>
+                      )}
+                    </td>
+                    <td className={`${cell} max-w-[16rem] whitespace-normal`}>
+                      {isEditing ? <input className={input} value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} /> : (r.notes || <span className="text-muted">—</span>)}
+                    </td>
+                    <td className={cell}><FlagPill label="clip_enabled" on={isEditing ? draft.clip_enabled : r.clip_enabled} editing={isEditing} onToggle={() => draft && setDraft({ ...draft, clip_enabled: !draft.clip_enabled })} /></td>
+                    <td className={cell}><FlagPill label="gif_enabled" on={isEditing ? draft.gif_enabled : r.gif_enabled} editing={isEditing} onToggle={() => draft && setDraft({ ...draft, gif_enabled: !draft.gif_enabled })} /></td>
+                    <td className={cell}><FlagPill label="gif_post_enabled" on={isEditing ? draft.gif_post_enabled : r.gif_post_enabled} editing={isEditing} onToggle={() => draft && setDraft({ ...draft, gif_post_enabled: !draft.gif_post_enabled })} /></td>
+                    <td className={cell}>{r.active ? <Badge tone="ok">active</Badge> : <Badge tone="neutral">inactive</Badge>}</td>
+                    <td className={cell}>
+                      {pinned ? <Badge tone="ok">pinned</Badge> : <span className="text-muted">—</span>}
+                    </td>
+                    <td className={`${cell} text-muted`}>{r.added_by || "—"}</td>
+                    <td className={`${cell} text-muted`}>{r.source}</td>
+                    <td className={`${cell} text-muted`}>{fmtTs(r.added_at)}</td>
+                    <td className={`${cell} text-muted`}>{fmtTs(r.updated_at)}</td>
+                    <td className={cell}>
+                      <div className="flex items-center gap-1 flex-wrap">
+                        {isEditing ? (
+                          <>
+                            <Button disabled={busy !== null} onClick={() => saveEdit(r)}>Save</Button>
+                            <Button variant="ghost" disabled={busy !== null} onClick={() => { setEditing(null); setDraft(null); }}>Cancel</Button>
+                          </>
+                        ) : (
+                          <>
+                            <Button variant="ghost" disabled={busy !== null || !r.active} onClick={() => startEdit(r)}>Edit</Button>
+                            {pinned ? (
+                              <Button variant="ghost" disabled={busy !== null} onClick={() => run("unpin", k, async () => { await api.streamersWatchlistRemove(r.login, r.platform); return { ok: true, message: `${r.entry} unpinned from the feed list` }; })}>Unpin</Button>
+                            ) : (
+                              <Button variant="ghost" disabled={busy !== null || !r.active} onClick={() => run("pin", k, async () => { await api.streamersWatchlistAdd(r.login, r.platform); return { ok: true, message: `${r.entry} pinned to the feed list` }; })}>Pin</Button>
+                            )}
+                            {r.active ? (
+                              <Button variant="ghost" disabled={busy !== null} onClick={() => run("deactivate", k, () => api.streamersRosterDelete(r.platform, r.login, false).then((x) => ({ ok: x.ok, message: x.removed ? `${r.entry} deactivated (soft-delete)` : `${r.entry} was not active` })))}>Deactivate</Button>
+                            ) : (
+                              <Button variant="ghost" disabled={busy !== null} onClick={() => run("reactivate", k, () => api.streamersRosterUpdate(r.platform, r.login, { active: true }))}>Reactivate</Button>
+                            )}
+                            <Button
+                              variant="danger"
+                              disabled={busy !== null}
+                              onClick={() => {
+                                if (window.confirm(`Really DELETE the row for ${r.entry}? This is the hard delete — history is gone. Use Deactivate for a normal remove.`)) {
+                                  run("delete", k, () => api.streamersRosterDelete(r.platform, r.login, true).then((x) => ({ ok: x.ok, message: x.removed ? `${r.entry} deleted` : `${r.entry} not found` })));
+                                }
+                              }}
+                            >
+                              Delete
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+              {visible.length === 0 && (
+                <tr><td className={`${cell} text-muted`} colSpan={17}>No rows{showInactive ? "" : " (inactive hidden)"}.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -1479,7 +1796,7 @@ export function StreamersPage() {
   const [gifs, setGifs] = useState<StreamerGif[]>([]);
   const [gifsLoading, setGifsLoading] = useState(true);
   const [gifsIncludeHidden, setGifsIncludeHidden] = useState(false);
-  const [view, setView] = useState<"main" | "posted" | "inspector" | "usersbots" | "gifs">("main");
+  const [view, setView] = useState<"main" | "posted" | "inspector" | "usersbots" | "gifs" | "roster">("main");
   const [usersBotsTarget, setUsersBotsTarget] = useState<UsersBotsTarget | null>(null);
   const [approvingAll, setApprovingAll] = useState(false);
   const [approveAllResult, setApproveAllResult] = useState<string | null>(null);
@@ -1725,6 +2042,12 @@ export function StreamersPage() {
         >
           GIFs{gifs.length > 0 ? ` (${gifs.length})` : ""}
         </button>
+        <button
+          onClick={() => setView("roster")}
+          className={`px-3 py-1 border-l border-border transition-colors ${view === "roster" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+        >
+          Watchlist
+        </button>
       </div>
 
       {view === "main" && (
@@ -1940,6 +2263,8 @@ export function StreamersPage() {
         />
       </Card>
       )}
+
+      {view === "roster" && <RosterGrid />}
 
     </div>
   );
