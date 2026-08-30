@@ -24,6 +24,28 @@ import { TopicPeek } from "./TopicPeek";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+// Posting paths (#280). Mirrors approve_clip's fan-out: clip=Y queues the MP4,
+// gif_post=Y also queues "{clip_id}-gif"; a clip=N streamer queues only the GIF.
+type Paths = { clip: boolean; gif: boolean; gif_post?: boolean };
+
+function approveLabel(p: Paths): string {
+  if (p.clip && p.gif_post) return "Clip + GIF";
+  if (!p.clip && p.gif_post) return "GIF only";
+  if (p.clip) return "Clip";
+  return "nothing — no path on";
+}
+
+function PathPill({ on, label, title }: { on: boolean; label: string; title: string }) {
+  return (
+    <span
+      title={title}
+      className={`px-1.5 py-0.5 rounded border ${on ? "bg-accent/20 text-accent border-accent/40" : "bg-bg text-muted border-border line-through"}`}
+    >
+      {label}
+    </span>
+  );
+}
+
 function stateTone(state: string): "ok" | "bad" | "warn" | "neutral" {
   if (state === "RUNNING") return "ok";
   if (state === "NOT_INSTALLED") return "bad";
@@ -197,6 +219,15 @@ function ClipCard({
               <span>· {new Date(clip.created_at).toLocaleDateString()}</span>
             )}
           </div>
+          {/* Posting paths (#280): what Approve will queue for this streamer */}
+          {clip.paths && (
+            <div className="flex items-center gap-1 flex-wrap text-[10px]">
+              <PathPill on={clip.paths.clip} label="Clip" title="clip_enabled — Approve queues the MP4" />
+              <PathPill on={clip.paths.gif} label="GIF" title="gif_enabled — a reaction GIF is cut" />
+              <PathPill on={!!clip.paths.gif_post} label="GIF→X" title="gif_post_enabled — Approve also queues the GIF to X" />
+              <span className="text-muted ml-1">Approve → {approveLabel(clip.paths)}</span>
+            </div>
+          )}
         </div>
         {clip.thumbnail_url && (
           <img
@@ -277,14 +308,15 @@ function ClipCard({
           onClick={doPublish}
           disabled={publishing || postingNow || !tweetText.trim() || !clip.clip_path}
         >
-          {publishing ? "Queuing…" : "Approve"}
+          {publishing ? "Queuing…" : clip.paths ? `Approve (${approveLabel(clip.paths)})` : "Approve"}
         </Button>
         <Button
           onClick={doPostNow}
           disabled={publishing || postingNow || !tweetText.trim() || !clip.clip_path}
           className="opacity-90"
+          title="Posts the MP4 to X right now, bypassing the queue"
         >
-          {postingNow ? "Posting…" : "Post Now"}
+          {postingNow ? "Posting…" : "Post Clip"}
         </Button>
         <Button
           onClick={doSkip}
@@ -413,12 +445,23 @@ function PendingPanel({
     <div className="space-y-2">
       {pending.map((p, i) => {
         const result = postResult[p.clip_id];
+        // A gif-path entry (#280): approve_clip queues it as "{clip_id}-gif" → .gif,
+        // so show the GIF itself, not the clip's video thumbnail.
+        const isGif = p.clip_id.endsWith("-gif") || (p.clip_path ?? "").endsWith(".gif");
+        const baseId = isGif && p.clip_id.endsWith("-gif") ? p.clip_id.slice(0, -4) : p.clip_id;
         return (
           <div
             key={p.clip_id || i}
             className="flex items-start justify-between gap-3 border border-border rounded p-3 bg-bg"
           >
-            {p.thumbnail_url && (
+            {isGif ? (
+              <img
+                src={`/api/streamers/gif/${encodeURIComponent(baseId)}`}
+                alt="gif"
+                loading="lazy"
+                className="w-20 h-12 object-cover rounded border border-border shrink-0"
+              />
+            ) : p.thumbnail_url && (
               <img
                 src={p.thumbnail_url}
                 alt="thumbnail"
@@ -429,6 +472,7 @@ function PendingPanel({
             <div className="min-w-0 flex-1 space-y-1">
               <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
                 <span className="font-semibold text-text">#{i + 1}</span>
+                {isGif ? <Badge tone="warn">GIF</Badge> : <Badge tone="neutral">CLIP</Badge>}
                 {p.source && <PlatformBadge platform={p.source as "twitch" | "kick"} />}
                 {p.streamer && (
                   <a
@@ -483,7 +527,7 @@ function PendingPanel({
                 disabled={postingId === p.clip_id || cancelingId === p.clip_id}
                 className="text-xs opacity-90"
               >
-                {postingId === p.clip_id ? "Posting…" : "Post Now"}
+                {postingId === p.clip_id ? "Posting…" : isGif ? "Post GIF" : "Post Clip"}
               </Button>
               <Button
                 onClick={() => doCancel(p.clip_id)}
@@ -664,7 +708,7 @@ function GifsPanel({
                   disabled={busy}
                   className="text-[11px] px-2 py-1"
                 >
-                  {postingId === g.clip_id ? "Posting…" : g.tweet_url ? "post again" : "post now"}
+                  {postingId === g.clip_id ? "Posting…" : g.tweet_url ? "Post GIF again" : "Post GIF"}
                 </Button>
               </div>
               {result && (
