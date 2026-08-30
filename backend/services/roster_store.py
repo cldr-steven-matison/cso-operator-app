@@ -178,15 +178,17 @@ def logins(platform: str) -> list[str] | None:
     return [s.login for s in _cache.values() if s.platform == platform and s.active]
 
 
-def get(login: str) -> Streamer | None:
-    """Active row for a bare login on either platform (a login is unique per
-    platform; the catalog conventions key handles/paths on the bare login)."""
+def get(login: str, platform: str | None = None, *,
+        include_inactive: bool = False) -> Streamer | None:
+    """Row for a bare login — on the given platform, or the first platform that
+    has it (a login is unique per platform; the catalog conventions key handles
+    and paths on the bare login). Active rows only unless ``include_inactive``."""
     if _cache is None:
         return None
     login = login.lower()
-    for platform in ("twitch", "kick"):
-        s = _cache.get((platform, login))
-        if s is not None and s.active:
+    for p in ((platform,) if platform else ("twitch", "kick")):
+        s = _cache.get((p, login))
+        if s is not None and (s.active or include_inactive):
             return s
     return None
 

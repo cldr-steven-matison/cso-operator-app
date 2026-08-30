@@ -2274,6 +2274,116 @@ def get_x_handle(login: str) -> str:
     return _STREAMER_CATALOG.get(login.lower(), "")
 
 
+# ── X-handle resolution for chat-added streamers (#273) ─────────────────────
+# A wrong handle mis-tags a real X account in a live post, so this only ever
+# CONFIRMS a handle from a source the streamer controls, and otherwise records
+# the login as a needs_review placeholder for a human to check:
+#   1. Kick's channel JSON carries the X handle the streamer declared on their
+#      own profile (`user.twitter`) — confirmed.
+#   2. A Twitch bio (helix/users `description`) that links x.com/twitter.com —
+#      confirmed, same reasoning.
+#   3. Else look the login up on X: confirmed only if that X profile itself
+#      points back at the streamer (a twitch.tv/kick.com link, or the login
+#      alongside twitch/kick/stream in the bio). A mere username collision is
+#      NOT enough — that's exactly the wrong-account case.
+_X_LINK_RE = re.compile(
+    r"(?:https?://)?(?:www\.|mobile\.)?(?:x|twitter)\.com/@?([A-Za-z0-9_]{1,15})\b", re.I)
+_X_HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+_X_RESERVED_PATHS = {"i", "home", "search", "intent", "share", "hashtag", "explore",
+                     "settings", "messages", "notifications", "login", "signup"}
+
+
+def _x_handle_from_text(text: str) -> str:
+    """First x.com/twitter.com profile link in free text, as a bare handle."""
+    for m in _X_LINK_RE.finditer(text or ""):
+        handle = m.group(1)
+        if handle.lower() not in _X_RESERVED_PATHS:
+            return handle
+    return ""
+
+
+def _clean_x_handle(value: str) -> str:
+    """A declared handle may arrive bare, @-prefixed, or as a full profile URL."""
+    value = (value or "").strip()
+    if "/" in value or "." in value:
+        return _x_handle_from_text(value)
+    value = value.lstrip("@")
+    return value if _X_HANDLE_RE.match(value) else ""
+
+
+async def _kick_declared_x_handle(client: httpx.AsyncClient, slug: str) -> str:
+    r = await client.get(f"https://kick.com/api/v2/channels/{slug}",
+                         headers=_KICK_BROWSER_HEADERS, timeout=10.0)
+    if r.status_code != 200:
+        return ""
+    return _clean_x_handle((r.json().get("user") or {}).get("twitter") or "")
+
+
+async def _twitch_bio_x_handle(client: httpx.AsyncClient, login: str) -> str:
+    token = await _twitch_token_refresh(client)
+    r = await client.get("https://api.twitch.tv/helix/users", params={"login": login},
+                         headers=_twitch_headers(token), timeout=10.0)
+    if r.status_code != 200:
+        return ""
+    data = r.json().get("data", [])
+    return _x_handle_from_text(data[0].get("description", "")) if data else ""
+
+
+def _x_lookup_user_sync(username: str) -> dict | None:
+    """X v2 users/by/username with the posting account's OAuth1 context (same
+    creds _publish_sync uses). None when the account doesn't exist or creds
+    aren't configured. Sync (tweepy) — call via asyncio.to_thread."""
+    import tweepy
+    if not all([settings.X_API_KEY, settings.X_API_SECRET,
+                settings.X_ACCESS_TOKEN, settings.X_ACCESS_TOKEN_SECRET]):
+        return None
+    client = tweepy.Client(
+        consumer_key=settings.X_API_KEY, consumer_secret=settings.X_API_SECRET,
+        access_token=settings.X_ACCESS_TOKEN, access_token_secret=settings.X_ACCESS_TOKEN_SECRET,
+    )
+    resp = client.get_user(username=username, user_auth=True,
+                           user_fields=["description", "url", "name", "entities"])
+    if not resp or not resp.data:
+        return None
+    u = resp.data
+    links = []
+    for group in ((u.entities or {}).get("url", {}), (u.entities or {}).get("description", {})):
+        for item in group.get("urls", []):
+            links.append(item.get("expanded_url") or item.get("url") or "")
+    return {"username": u.username, "name": u.name or "",
+            "description": u.description or "", "url": u.url or "",
+            "links": " ".join(links)}
+
+
+def _x_profile_vouches(profile: dict, platform: str, login: str) -> bool:
+    """Does this X profile point back at the streamer's channel?"""
+    blob = " ".join(str(profile.get(k, "")) for k in ("name", "description", "url", "links")).lower()
+    login = login.lower()
+    if f"twitch.tv/{login}" in blob or f"kick.com/{login}" in blob:
+        return True
+    return login in blob and any(w in blob for w in ("twitch", "kick", "stream"))
+
+
+async def resolve_x_handle(client: httpx.AsyncClient, platform: str, login: str) -> tuple[str, str]:
+    """(x_handle, status) for a streamer being added from chat. Never raises —
+    every lookup failure degrades to the needs_review placeholder."""
+    login = login.lower().lstrip("@")
+    try:
+        declared = await (_kick_declared_x_handle(client, login) if platform == "kick"
+                          else _twitch_bio_x_handle(client, login))
+    except Exception:
+        declared = ""
+    if declared:
+        return declared, roster_store.X_HANDLE_CONFIRMED
+    try:
+        profile = await asyncio.to_thread(_x_lookup_user_sync, login)
+    except Exception:
+        profile = None
+    if profile and _x_profile_vouches(profile, platform, login):
+        return profile["username"], roster_store.X_HANDLE_CONFIRMED
+    return login, roster_store.X_HANDLE_NEEDS_REVIEW
+
+
 # Per-streamer paths — mirrors the Clip/GIF/GIF→X columns in
 # DesktopShare/streamers/streamers.md; keep both in sync when changing a streamer.
 #

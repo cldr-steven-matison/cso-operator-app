@@ -19,8 +19,8 @@ class TwitchChatListenerProcessor(FlowFileSource):
         implements = ['org.apache.nifi.python.processor.FlowFileSource']
 
     class ProcessorDetails:
-        version = '0.0.26-SNAPSHOT'
-        description = 'Holds a persistent connection to Twitch IRC chat and emits one FlowFile per detected "!load <streamer> [screen]" command (screen optional, defaults to screen1, "!l" accepted as a short alias) or "!matrix <screen1|screen2|screen3|screen4>" command (screen required, no default - unlike !load, a bare "!matrix" with no screen is not a recognized command; screen1 targets the Jetson, screen2 targets GamingPC, screen3/screen4 target TunaStarlink). Requests the twitch.tv/tags IRCv3 capability to read each message'"'"'s badges/mod tags. Mod-only short forms: "!m" for !matrix, "k:" in place of "kick:" on a streamer login, and "s1"/"s2"/"s3"/"s4" in place of screen1-4 - each is checked independently, and a non-broadcaster/non-moderator sender using any of them has the whole command silently ignored (same as an unrecognized command); the existing full-text forms (including the pre-existing "!l" alias) keep working for everyone, unchanged. Before dispatching a !load, checks the streamer'"'"'s live status via the Live Check API URL (cso-operator-app, covers both Twitch and Kick "kick:" logins) and replies "not live" instead of queuing if they'"'"'re offline - a lookup failure fails open (dispatches anyway) rather than silently blocking a real load. Also carries prefix-anchored chat triggers that need no "!" prefix, matched against a normalized copy of the message (Twitch'"'"'s invisible TAG-SELECTOR stripped, variation selectors stripped, NFKC, whitespace collapsed, lowercased) and evaluated most-specific-first: the Watchlist Trigger Command ("tuna tuna tuna" by default) or its three-fish-emoji equivalent, optionally followed by a streamer name, adds that streamer to the watchlist once Trigger Vote Count (default 3) occurrences land inside Trigger Vote Window Seconds (default 120) - every occurrence counts, including one person repeating themselves, and the tally is per (trigger, target) so three people naming three streamers is three separate tallies; it is open to everyone and posts a single progress reply one vote short of firing. The three-fish-plus-clapper form (or "<Watchlist Trigger Command> clip") is broadcaster/moderator-only, fires on one use with no vote, and requests a real clip post; a non-mod using it is ignored silently, exactly like the other mod-only short forms. It is gated behind Clip Trigger Enabled (default false - the feature ships dark and that property is the instant off-switch during a raid) and a rolling 24-hour Clip Daily Cap. The three-fish-plus-picture form (or "<Watchlist Trigger Command> gif") is its exact twin for reaction GIFs - same mod-only gate, one use, no vote - gated behind its own Gif Trigger Enabled and Gif Daily Cap on a separate rate-limit budget. A trigger with no streamer named targets whoever was last loaded by !load in this running process, and says so once (rate-limited) if nothing has been loaded yet. Rate limiting is one generic ladder: !load and !matrix share the single global Cooldown Seconds timer they always have, while each trigger must clear a global, a per-user and a per-target window (plus a rolling daily cap, for clip/gif) before it fires - a moderator/broadcaster bypasses all of them, the daily cap included, since every one of these gates only ever applied to mods (the clip/gif triggers are mod-only) and was purely slowing the operator down (#174). A fired trigger only enqueues a "chat_trigger" FlowFile and returns immediately; the listener never calls the backend itself, because blocking the IRC reader thread through a 30-90s clip job would blow past Twitch'"'"'s PING tolerance and force a reconnect, burning a refresh token every time. Announces itself once on join across two messages (a single PRIVMSG caps at 500 characters) with no auto-posted watchlist - reconnects happen often enough that repeating it every time reads as spam; responds to "!commands"/"!help" and "!watchlist" ("!w" alias accepted) on demand only. Mints a fresh access token from the refresh token before every (re)connect, so it never hits the ~4hr access-token expiry. Twitch rotates the refresh token on every one of those refreshes, so the rotated value is persisted to NiFi component state (Scope.LOCAL, key "refresh_token") and read back on the next onScheduled - a restart no longer needs a manual device-code re-auth. The write is deferred to create()/onStopped rather than done inline, because the refresh runs on the background IRC thread and the state manager is a py4j bridge into the JVM. Reconnects with backoff on disconnect.'
+        version = '0.0.27-SNAPSHOT'
+        description = 'Holds a persistent connection to Twitch IRC chat and emits one FlowFile per detected "!load <streamer> [screen]" command (screen optional, defaults to screen1, "!l" accepted as a short alias) or "!matrix <screen1|screen2|screen3|screen4>" command (screen required, no default - unlike !load, a bare "!matrix" with no screen is not a recognized command; screen1 targets the Jetson, screen2 targets GamingPC, screen3/screen4 target TunaStarlink). Requests the twitch.tv/tags IRCv3 capability to read each message'"'"'s badges/mod tags. Mod-only short forms: "!m" for !matrix, "k:" in place of "kick:" on a streamer login, and "s1"/"s2"/"s3"/"s4" in place of screen1-4 - each is checked independently, and a non-broadcaster/non-moderator sender using any of them has the whole command silently ignored (same as an unrecognized command); the existing full-text forms (including the pre-existing "!l" alias) keep working for everyone, unchanged. Before dispatching a !load, checks the streamer'"'"'s live status via the Live Check API URL (cso-operator-app, covers both Twitch and Kick "kick:" logins) and replies "not live" instead of queuing if they'"'"'re offline - a lookup failure fails open (dispatches anyway) rather than silently blocking a real load. Also carries prefix-anchored chat triggers that need no "!" prefix, matched against a normalized copy of the message (Twitch'"'"'s invisible TAG-SELECTOR stripped, variation selectors stripped, NFKC, whitespace collapsed, lowercased) and evaluated most-specific-first: the Watchlist Trigger Command ("tuna tuna tuna" by default) or its three-fish-emoji equivalent, optionally followed by a streamer name, adds that streamer to the watchlist once Trigger Vote Count (default 3) occurrences land inside Trigger Vote Window Seconds (default 120) - every occurrence counts, including one person repeating themselves, and the tally is per (trigger, target) so three people naming three streamers is three separate tallies; it is open to everyone and posts a single progress reply one vote short of firing. The three-fish-plus-clapper form (or "<Watchlist Trigger Command> clip") is broadcaster/moderator-only, fires on one use with no vote, and requests a real clip post; a non-mod using it is ignored silently, exactly like the other mod-only short forms. It is gated behind Clip Trigger Enabled (default false - the feature ships dark and that property is the instant off-switch during a raid) and a rolling 24-hour Clip Daily Cap. The three-fish-plus-picture form (or "<Watchlist Trigger Command> gif") is its exact twin for reaction GIFs - same mod-only gate, one use, no vote - gated behind its own Gif Trigger Enabled and Gif Daily Cap on a separate rate-limit budget. A trigger with no streamer named targets whoever was last loaded by !load in this running process, and says so once (rate-limited) if nothing has been loaded yet. Rate limiting is one generic ladder: !load and !matrix share the single global Cooldown Seconds timer they always have, while each trigger must clear a global, a per-user and a per-target window (plus a rolling daily cap, for clip/gif) before it fires - a moderator/broadcaster bypasses all of them, the daily cap included, since every one of these gates only ever applied to mods (the clip/gif triggers are mod-only) and was purely slowing the operator down (#174). A fired trigger only enqueues a "chat_trigger" FlowFile and returns immediately; the listener never calls the backend itself, because blocking the IRC reader thread through a 30-90s clip job would blow past Twitch'"'"'s PING tolerance and force a reconnect, burning a refresh token every time. Announces itself once on join across two messages (a single PRIVMSG caps at 500 characters) with no auto-posted watchlist - reconnects happen often enough that repeating it every time reads as spam; responds to "!commands"/"!help" and "!watchlist" ("!w" alias accepted) on demand only. Mints a fresh access token from the refresh token before every (re)connect, so it never hits the ~4hr access-token expiry. Twitch rotates the refresh token on every one of those refreshes, so the rotated value is persisted to NiFi component state (Scope.LOCAL, key "refresh_token") and read back on the next onScheduled - a restart no longer needs a manual device-code re-auth. The write is deferred to create()/onStopped rather than done inline, because the refresh runs on the background IRC thread and the state manager is a py4j bridge into the JVM. Reconnects with backoff on disconnect. The three-fish-plus-➕ and three-fish-plus-➖ forms (#273) are broadcaster/moderator-only roster edits: "<fish>➕ <streamer>" adds that streamer to the app'"'"'s streamer roster (the catalog, not the watchlist) and "<fish>➖ <streamer>" removes them, "kick:"/"k:" prefixes accepted; a non-mod using either is ignored silently, a bare form with no name is refused with a nudge (a roster edit has to name who, there is no on-screen fallback), and like every trigger they only enqueue a "chat_trigger" FlowFile (chat_action roster_add/roster_remove) - the backend does the channel-exists check and the X-handle research and posts the real outcome through the reply processor.'
         tags = ['twitch', 'irc', 'chat', 'streamers', 'chat-bot']
         dependencies = []
 
@@ -507,6 +507,11 @@ class TwitchChatListenerProcessor(FlowFileSource):
     # 🖼️ is FRAME WITH PICTURE + VS-16; _normalize strips the selector, so the
     # bare code point is what the registry matches, same as _CLAPPER.
     _PICTURE = '\U0001f5bc'   # 🖼
+    # ➕ / ➖ (HEAVY PLUS/MINUS SIGN) - the mod-only roster add/remove triggers
+    # (#273). Single code points, unchanged by NFKC, and any VS-16 a client
+    # appends is stripped by _normalize, same as the two above.
+    _PLUS = '\u2795'      # ➕
+    _MINUS = '\u2796'     # ➖
     # Twitch clients append this invisible TAG-SELECTOR to dodge the duplicate-message
     # filter. Leave it in and the SECOND identical trigger message stops matching, which
     # means a 3-occurrence vote can never complete and nothing anywhere reports an error.
@@ -581,6 +586,7 @@ class TwitchChatListenerProcessor(FlowFileSource):
         fish = self._FISH * 3
         word = self._normalize(watchlist_trigger)
         entries = [(fish + self._CLAPPER, 'clip'), (fish + self._PICTURE, 'gif'),
+                   (fish + self._PLUS, 'roster_add'), (fish + self._MINUS, 'roster_remove'),
                    (fish, 'watchlist')]
         if word:
             entries.append((word + ' clip', 'clip'))
@@ -770,10 +776,37 @@ class TwitchChatListenerProcessor(FlowFileSource):
         if self._gif_trigger_enabled:
             message += (f" Mods: {fish}{self._PICTURE} (or \"{self._watchlist_trigger} gif\") "
                         f"[streamer] posts a reaction gif - one use, no vote.")
+        message += (f" Mods: {fish}{self._PLUS} / {fish}{self._MINUS} <streamer> adds/removes "
+                    f"them from the roster (k:<name> for Kick).")
         return message
 
     def _handle_trigger(self, sock, channel, trigger, nick, is_privileged):
         name, rest = trigger
+
+        if name in ('roster_add', 'roster_remove'):
+            # Mod-only and silent for everyone else, like clip/gif. No enable
+            # switch and no rate limit: it only ever fires for a mod, and it
+            # posts nothing to X - the backend decides what actually changes.
+            if not is_privileged:
+                return
+            fish = self._FISH * 3
+            if not rest:
+                # No bare form. A clip can reasonably mean "whoever's on screen";
+                # editing the roster has to name who.
+                self._send_chat(sock, channel,
+                                 f"Name a streamer with that - e.g. \"{fish}{self._PLUS} xqc\" "
+                                 f"or \"{fish}{self._PLUS} k:roshtein\".")
+                return
+            target, allowed = self._resolve_trigger_target(rest, is_privileged)
+            if not allowed or not target:
+                return
+            display = self._display_login(target)
+            self._dispatch_trigger(name, target, nick, channel)
+            if name == 'roster_add':
+                self._send_chat(sock, channel, f"on it - adding {display} to the roster {self._PLUS}")
+            else:
+                self._send_chat(sock, channel, f"on it - removing {display} from the roster {self._MINUS}")
+            return
 
         if name in ('clip', 'gif'):
             enabled = self._clip_trigger_enabled if name == 'clip' else self._gif_trigger_enabled

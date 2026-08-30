@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config import settings
-from services import chat_activity, inspector, streamers
+from services import chat_activity, inspector, roster_store, streamers
 
 router = APIRouter(prefix="/streamers")
 
@@ -537,6 +537,7 @@ class ChatTriggerRequest(BaseModel):
     platform: str = ""       # "twitch" (default) or "kick"
     requested_by: str = ""   # chatter who typed the command
     channel: str = ""        # channel the command was typed in
+    chat_action: str = ""    # the processor's dispatch action (roster_add / roster_remove)
 
 
 # ── Chat-trigger X-post retry (#274) ──────────────────────────────────────────
@@ -808,6 +809,72 @@ async def chat_trigger_gif(body: ChatTriggerRequest, request: Request):
         "tweet_url": result.get("url", ""),
         "message": f"posted a {login} gif: {result.get('url', '')}",
     }
+
+
+@router.post("/chat-trigger/roster")
+async def chat_trigger_roster(body: ChatTriggerRequest, request: Request):
+    """🐟🐟🐟➕ <login> / 🐟🐟🐟➖ <login> from chat (#273): add a streamer to, or
+    remove one from, the streamer roster (the catalog LiveStreamerAlert polls and
+    the clip/gif triggers draw handles from — not the 4-entry watch list). Called
+    by TwitchChatListenerProcessor, which enforces the mod-only gate before it
+    ever calls this; `chat_action` says which of the two it was.
+
+    Backed by services.roster_store (#275). Guards live here, same as the
+    watchlist trigger: a typo must never add a stranger, and a new streamer's X
+    handle is only ever confirmed from a source they control — otherwise it's
+    stored as a needs_review placeholder and the reply says so."""
+    login = body.login.strip().lstrip("@").lower()
+    if not login:
+        raise HTTPException(status_code=400, detail="login required")
+    platform = (body.platform or "twitch").strip().lower()
+    entry = f"kick:{login}" if platform == "kick" else login
+    action = (body.chat_action or "").strip().lower()
+    if action not in ("roster_add", "roster_remove"):
+        raise HTTPException(status_code=400, detail="chat_action must be roster_add or roster_remove")
+    label = f"{login} ({platform})"
+
+    # The store is the only durable home for a roster edit; with it down, the
+    # fallback constants can't be changed — say so rather than pretend.
+    if not roster_store.loaded():
+        return {"ok": False, "login": login, "reason": "roster_store_unavailable",
+                "message": f"the roster store isn't reachable right now — {label} unchanged"}
+
+    if action == "roster_remove":
+        if not await roster_store.remove(platform, login):
+            return {"ok": True, "login": login, "removed": False,
+                    "message": f"{label} isn't on the roster"}
+        return {"ok": True, "login": login, "removed": True,
+                "message": f"removed {label} from the roster"}
+
+    existing = roster_store.get(login, platform, include_inactive=True)
+    if existing is not None and existing.active:
+        handle = f" — X @{existing.x_handle}" if existing.x_handle else ""
+        return {"ok": True, "login": login, "added": False,
+                "message": f"{label} is already on the roster{handle}"}
+
+    # Re-adding a soft-deleted row (a seeded streamer someone ➖'d, say) keeps its
+    # curated handle and paths — no re-resolution that could downgrade them.
+    if existing is not None:
+        s = await roster_store.add(platform, login, added_by=body.requested_by)
+        handle = f" — X @{s.x_handle}" if s.x_handle else ""
+        return {"ok": True, "login": login, "added": True, "x_handle": s.x_handle,
+                "message": f"{label} is back on the roster{handle}"}
+
+    http = request.app.state.http
+    if not await streamers.streamer_exists(http, entry):
+        return {"ok": False, "login": login, "added": False, "reason": "unknown_channel",
+                "message": f"can't find a {platform} channel called {login}"}
+
+    handle, status = await streamers.resolve_x_handle(http, platform, login)
+    s = await roster_store.add(platform, login, x_handle=handle, x_handle_status=status,
+                               added_by=body.requested_by)
+    if status == roster_store.X_HANDLE_CONFIRMED:
+        message = f"added {label} to the roster — X @{s.x_handle}"
+    else:
+        message = (f"added {label} to the roster — couldn't confirm their X, "
+                   f"using @{s.x_handle} for now, please verify")
+    return {"ok": True, "login": login, "added": True, "x_handle": s.x_handle,
+            "x_handle_status": status, "message": message}
 
 
 # ── Fetch mode ────────────────────────────────────────────────────────────────
