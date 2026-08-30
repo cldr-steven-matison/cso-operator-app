@@ -102,9 +102,9 @@ function ClipCard({
   onSkip,
 }: {
   clip: StreamerClip;
-  onPublished: (offset: number) => void;
-  onPostNow: (offset: number) => void;
-  onSkip: (offset: number) => void;
+  onPublished: (clipId: string) => void;
+  onPostNow: (clipId: string) => void;
+  onSkip: (clipId: string) => void;
 }) {
   const [caption, setCaption] = useState(clip.caption?.trim() || fallbackCaption());
   const [publishing, setPublishing] = useState(false);
@@ -126,7 +126,7 @@ function ClipCard({
         clip.view_count, clip.duration, clip.created_at,
       );
       setResult({ ok: true, position: r.position });
-      setTimeout(() => onPublished(clip._offset ?? -1), 1200);
+      setTimeout(() => onPublished(clip.clip_id ?? ""), 1200);
     } catch (e) {
       setResult({ ok: false, error: String(e) });
     } finally {
@@ -144,7 +144,7 @@ function ClipCard({
         clip.source, clip.streamer, clip.url, clip.thumbnail_url, clip.x_handle,
       );
       setPostNowResult({ ok: true, url: r.url });
-      setTimeout(() => onPostNow(clip._offset ?? -1), 6000);
+      setTimeout(() => onPostNow(clip.clip_id ?? ""), 6000);
     } catch (e) {
       setPostNowResult({ ok: false, error: String(e) });
     } finally {
@@ -156,7 +156,7 @@ function ClipCard({
     if (clip.clip_id) {
       try { await api.streamersSkip(clip.clip_id); } catch {}
     }
-    onSkip(clip._offset ?? -1);
+    onSkip(clip.clip_id ?? "");
   }
 
   return (
@@ -1466,7 +1466,7 @@ export function StreamersPage() {
   const [flows, setFlows] = useState<StreamerFlows>({});
   const [clips, setClips] = useState<StreamerClip[]>([]);
   const [clipsLoading, setClipsLoading] = useState(true);
-  const [dismissed, setDismissed] = useState<Set<number>>(new Set());
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [topics, setTopics] = useState<StreamerTopics | null>(null);
   const [topicsLoading, setTopicsLoading] = useState(false);
   const [peekOpen, setPeekOpen] = useState<Record<string, boolean>>({});
@@ -1585,8 +1585,8 @@ export function StreamersPage() {
     }
   };
 
-  const dismiss = (offset: number) =>
-    setDismissed((prev) => new Set(prev).add(offset));
+  const dismiss = (clipId: string) =>
+    setDismissed((prev) => new Set(prev).add(clipId));
 
   const doTrigger = async (name: "FetchClips" | "PublishClip") => {
     setTriggering(name);
@@ -1621,7 +1621,7 @@ export function StreamersPage() {
           clip.view_count, clip.duration, clip.created_at,
         );
         approved++;
-        dismiss(clip._offset ?? -1);
+        dismiss(clip.clip_id ?? "");
       } catch {
         failed++;
       }
@@ -1631,13 +1631,13 @@ export function StreamersPage() {
     setApprovingAll(false);
   };
 
-  const onApproved = (offset: number) => {
-    dismiss(offset);
+  const onApproved = (clipId: string) => {
+    dismiss(clipId);
     refreshPending();
   };
 
-  const onReviewPostNow = (offset: number) => {
-    dismiss(offset);
+  const onReviewPostNow = (clipId: string) => {
+    dismiss(clipId);
     refreshPosted();
   };
 
@@ -1689,7 +1689,7 @@ export function StreamersPage() {
   }, []);
 
   const flowNames = ["FetchClips", "ProcessClips", "PublishClipOffPeakDay", "PublishClipPeakTimeCron"] as const;
-  const visibleClips = clips.filter((c) => !dismissed.has(c._offset ?? -1));
+  const visibleClips = clips.filter((c) => !dismissed.has(c.clip_id ?? ""));
 
   return (
     <div className="space-y-4">
@@ -1851,7 +1851,7 @@ export function StreamersPage() {
           <div className="space-y-4">
             {visibleClips.map((clip, i) => (
               <ClipCard
-                key={clip._offset ?? i}
+                key={clip.clip_id ?? i}
                 clip={clip}
                 onPublished={onApproved}
                 onPostNow={onReviewPostNow}
