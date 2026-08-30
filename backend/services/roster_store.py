@@ -72,9 +72,9 @@ SELECT CASE WHEN platform = 'kick' THEN 'kick:' || login ELSE login END AS strea
        platform, login,
        COALESCE(display_name, login)                       AS display_name,
        aliases, x_handle,
-       (x_handle_status = 'confirmed')                     AS x_handle_confirmed,
+       COALESCE(x_handle_status = 'confirmed', false)      AS x_handle_confirmed,
        CASE WHEN pronouns_status = 'confirmed' THEN pronouns END AS pronouns,
-       (pronouns_status = 'confirmed')                     AS pronouns_confirmed,
+       COALESCE(pronouns_status = 'confirmed', false)      AS pronouns_confirmed,
        notes, active
 FROM streamer;
 """
