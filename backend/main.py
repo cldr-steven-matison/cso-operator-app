@@ -34,7 +34,11 @@ async def lifespan(app: FastAPI):
         max_size=2,
     )
     if "streamers" in _enabled_modules:
-        from services import chat_activity, streamers as streamers_service
+        from services import chat_activity, roster_store, streamers as streamers_service
+        # Roster/catalog from Postgres (#275): opens its pool, seeds a fresh DB from
+        # the hardcoded constants, loads the in-process cache. Degrades to the
+        # constants on any failure rather than blocking startup.
+        await roster_store.start(streamers_service.roster_seed())
         _chat_activity_task = asyncio.create_task(chat_activity.start_aggregator())
         _oauth_refresh_task = asyncio.create_task(streamers_service.start_oauth_refresh_scheduler(app.state.http))
     yield
@@ -44,6 +48,9 @@ async def lifespan(app: FastAPI):
     if _oauth_refresh_task is not None:
         from services import streamers as streamers_service
         await streamers_service.stop_oauth_refresh_scheduler()
+    if "streamers" in _enabled_modules:
+        from services import roster_store
+        await roster_store.stop()
     await app.state.efm_db.close()
     await app.state.http.aclose()
 

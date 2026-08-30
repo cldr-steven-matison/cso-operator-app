@@ -78,6 +78,18 @@ class Settings(BaseSettings):
     EFM_DB_USER: str = ""
     EFM_DB_PASSWORD: str = ""
 
+    # Streamers roster/catalog store (#275) — a dedicated `streamers` database on
+    # the same ssb-postgresql server, its own role. Replaces the hardcoded
+    # _TWITCH_LOGINS/_KICK_LOGINS/_STREAMER_CATALOG/_STREAMER_PATH_OVERRIDES in
+    # services/streamers.py as the source of truth; those constants remain the
+    # seed and the fallback when this DB is unreachable. Creds arrive via
+    # `kubectl set env`, never YAML. An empty user disables the store entirely.
+    STREAMERS_DB_HOST: str = "ssb-postgresql.cld-streaming.svc.cluster.local"
+    STREAMERS_DB_PORT: int = 5432
+    STREAMERS_DB_NAME: str = "streamers"
+    STREAMERS_DB_USER: str = ""
+    STREAMERS_DB_PASSWORD: str = ""
+
     # URL for "Use sample audio" — proxied through the backend to dodge CORS.
     SAMPLE_AUDIO_URL: str = (
         "https://www.voiptroubleshooter.com/open_speech/american/OSR_us_000_0010_8k.wav"

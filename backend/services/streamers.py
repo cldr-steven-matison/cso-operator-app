@@ -28,6 +28,7 @@ from aiokafka.admin import AIOKafkaAdminClient
 from PIL import Image, ImageFont
 
 from config import settings
+from services import roster_store
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,10 @@ def _clip_duration_range(login: str, default: tuple[float, float]) -> tuple[floa
     return _CLIP_DURATION_OVERRIDES.get(login.lower(), default)
 
 
+# Roster source of truth is Postgres via services.roster_store (#275). These two
+# lists are now the SEED for a fresh DB and the FALLBACK when the store is
+# disabled/unreachable — every reader goes through _twitch_logins()/_kick_logins()
+# below, never these names directly.
 _TWITCH_LOGINS: list[str] = [
     "xqc", "stableronaldo", "jynxzi",
     "extraemily", "theburntpeanut",
@@ -83,6 +88,23 @@ _KICK_LOGINS: list[str] = [
     "bbjess", "whiz", "rampagejackson",
     "bam",
 ]
+
+
+def _twitch_logins() -> list[str]:
+    stored = roster_store.logins("twitch")
+    return list(_TWITCH_LOGINS) if stored is None else stored
+
+
+def _kick_logins() -> list[str]:
+    stored = roster_store.logins("kick")
+    return list(_KICK_LOGINS) if stored is None else stored
+
+
+def roster_seed() -> dict:
+    """The hardcoded constants in the shape roster_store.ensure_schema_and_seed
+    takes — what a fresh `streamers` DB is populated with."""
+    return {"twitch": list(_TWITCH_LOGINS), "kick": list(_KICK_LOGINS),
+            "x_handles": dict(_STREAMER_CATALOG), "paths": dict(_STREAMER_PATH_OVERRIDES)}
 
 _watchlist: list[str] = []
 _twitch_token: str = ""
@@ -144,8 +166,9 @@ def _init_watchlist():
             return
         except Exception:
             pass
-    twitch_picks = random.sample(_TWITCH_LOGINS, min(2, len(_TWITCH_LOGINS)))
-    kick_picks = [f"kick:{l}" for l in random.sample(_KICK_LOGINS, min(2, len(_KICK_LOGINS)))]
+    twitch, kick = _twitch_logins(), _kick_logins()
+    twitch_picks = random.sample(twitch, min(2, len(twitch)))
+    kick_picks = [f"kick:{l}" for l in random.sample(kick, min(2, len(kick)))]
     _watchlist = twitch_picks + kick_picks
     _save_watchlist()
 
@@ -163,7 +186,7 @@ def get_roster() -> list[str]:
     For LiveStreamerAlert to poll the whole roster for live status instead of
     just the 4-entry watch list -- the watch list still drives FetchClips.
     """
-    return _TWITCH_LOGINS + [f"kick:{l}" for l in _KICK_LOGINS]
+    return _twitch_logins() + [f"kick:{l}" for l in _kick_logins()]
 
 
 def set_watchlist(logins: list[str]):
@@ -209,8 +232,8 @@ def rotate_watchlist() -> list[str]:
     """
     global _watchlist
     current = set(_watchlist)
-    twitch_pool = [l for l in _TWITCH_LOGINS if l not in current]
-    kick_pool = [l for l in _KICK_LOGINS if f"kick:{l}" not in current]
+    twitch_pool = [l for l in _twitch_logins() if l not in current]
+    kick_pool = [l for l in _kick_logins() if f"kick:{l}" not in current]
     twitch_picks = random.sample(twitch_pool, min(2, len(twitch_pool)))
     kick_picks = [f"kick:{l}" for l in random.sample(kick_pool, min(2, len(kick_pool)))]
     _watchlist = twitch_picks + kick_picks
@@ -2241,7 +2264,13 @@ _STREAMER_CATALOG: dict[str, str] = {
 }
 
 def get_x_handle(login: str) -> str:
-    """Return X handle (no @) for a bare login, or empty string if not in catalog."""
+    """Return X handle (no @) for a bare login, or empty string if not in catalog.
+    Postgres-backed via roster_store (#275); the dict above is seed + fallback."""
+    stored = roster_store.get(login)
+    if stored is not None:
+        return stored.x_handle
+    if roster_store.loaded():
+        return ""   # loaded store, login not in it — real answer, not a fallback
     return _STREAMER_CATALOG.get(login.lower(), "")
 
 
@@ -2265,7 +2294,13 @@ _DEFAULT_PATHS: dict[str, bool] = {"clip": True, "gif": True, "gif_post": False}
 
 
 def streamer_paths(login: str) -> dict[str, bool]:
-    """Return {"clip", "gif", "gif_post"} paths for a bare login."""
+    """Return {"clip", "gif", "gif_post"} paths for a bare login.
+    Postgres-backed via roster_store (#275); the overrides dict is seed + fallback."""
+    stored = roster_store.get(login)
+    if stored is not None:
+        return {"clip": stored.clip, "gif": stored.gif, "gif_post": stored.gif_post}
+    if roster_store.loaded():
+        return dict(_DEFAULT_PATHS)
     return {**_DEFAULT_PATHS, **_STREAMER_PATH_OVERRIDES.get(login.lower(), {})}
 
 
