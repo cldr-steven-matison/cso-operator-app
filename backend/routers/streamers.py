@@ -662,9 +662,14 @@ async def chat_trigger_clip(body: ChatTriggerRequest, request: Request):
         result = {"ok": False, "error": str(e)}
 
     if not result.get("ok"):
+        # Surface X's actual objection (#174) rather than a hardcoded
+        # "post_failed" that discarded the captured error. Same clamp as the gif
+        # path so a long tweepy/urllib3 error stays a single chat line.
+        reason = result.get("error") or result.get("reason") or "post_failed"
+        short = " ".join(str(reason).split())[:200]
         return {"ok": False, "login": login, "clip_id": clip.get("clip_id", ""),
-                "reason": "post_failed",
-                "message": f"X wouldn't take the {login} clip — nothing posted"}
+                "reason": reason,
+                "message": f"X wouldn't take the {login} clip — {short}"}
 
     return {
         "ok": True,
@@ -737,9 +742,14 @@ async def chat_trigger_gif(body: ChatTriggerRequest, request: Request):
         result = {"ok": False, "reason": str(e)}
 
     if not result.get("ok"):
+        # Surface X's actual objection (#174) - a generic "nothing posted" hid
+        # why the extraemily gif failed and left it undiagnosable. Collapse
+        # whitespace and clamp so a long tweepy/urllib3 error stays one chat line.
+        reason = result.get("reason") or result.get("error") or "post_failed"
+        short = " ".join(str(reason).split())[:200]
         return {"ok": False, "login": login, "clip_id": clip.get("clip_id", ""),
-                "reason": result.get("reason") or "post_failed",
-                "message": f"X wouldn't take the {login} gif — nothing posted"}
+                "reason": reason,
+                "message": f"X wouldn't take the {login} gif — {short}"}
 
     return {
         "ok": True,
