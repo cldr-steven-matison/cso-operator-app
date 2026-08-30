@@ -827,7 +827,6 @@ async def chat_trigger_roster(body: ChatTriggerRequest, request: Request):
     if not login:
         raise HTTPException(status_code=400, detail="login required")
     platform = (body.platform or "twitch").strip().lower()
-    entry = f"kick:{login}" if platform == "kick" else login
     action = (body.chat_action or "").strip().lower()
     if action not in ("roster_add", "roster_remove"):
         raise HTTPException(status_code=400, detail="chat_action must be roster_add or roster_remove")
@@ -846,6 +845,20 @@ async def chat_trigger_roster(body: ChatTriggerRequest, request: Request):
         return {"ok": True, "login": login, "removed": True,
                 "message": f"removed {label} from the roster"}
 
+    return await _roster_add(request.app.state.http, platform, login,
+                             added_by=body.requested_by, source="chat")
+
+
+async def _roster_add(http, platform: str, login: str, *, added_by: str,
+                      source: str) -> dict:
+    """The guarded roster-add shared by the chat ➕ trigger and the Watchlist
+    grid (#279): already active → no-op; soft-deleted → re-activate keeping the
+    curated handle/paths; otherwise `streamer_exists` (a typo never adds a
+    stranger) then `resolve_x_handle` (confirmed from a source the streamer
+    controls, else a `needs_review` placeholder). Returns the chat-reply dict."""
+    entry = f"kick:{login}" if platform == "kick" else login
+    label = f"{login} ({platform})"
+
     existing = roster_store.get(login, platform, include_inactive=True)
     if existing is not None and existing.active:
         handle = f" — X @{existing.x_handle}" if existing.x_handle else ""
@@ -855,19 +868,18 @@ async def chat_trigger_roster(body: ChatTriggerRequest, request: Request):
     # Re-adding a soft-deleted row (a seeded streamer someone ➖'d, say) keeps its
     # curated handle and paths — no re-resolution that could downgrade them.
     if existing is not None:
-        s = await roster_store.add(platform, login, added_by=body.requested_by)
+        s = await roster_store.add(platform, login, added_by=added_by, source=source)
         handle = f" — X @{s.x_handle}" if s.x_handle else ""
         return {"ok": True, "login": login, "added": True, "x_handle": s.x_handle,
                 "message": f"{label} is back on the roster{handle}"}
 
-    http = request.app.state.http
     if not await streamers.streamer_exists(http, entry):
         return {"ok": False, "login": login, "added": False, "reason": "unknown_channel",
                 "message": f"can't find a {platform} channel called {login}"}
 
     handle, status = await streamers.resolve_x_handle(http, platform, login)
     s = await roster_store.add(platform, login, x_handle=handle, x_handle_status=status,
-                               added_by=body.requested_by)
+                               added_by=added_by, source=source)
     if status == roster_store.X_HANDLE_CONFIRMED:
         message = f"added {label} to the roster — X @{s.x_handle}"
     else:
@@ -875,6 +887,97 @@ async def chat_trigger_roster(body: ChatTriggerRequest, request: Request):
                    f"using @{s.x_handle} for now, please verify")
     return {"ok": True, "login": login, "added": True, "x_handle": s.x_handle,
             "x_handle_status": status, "message": message}
+
+
+# ── Roster grid (#279) — the Watchlist sub-tab ────────────────────────────────
+
+class RosterAdd(BaseModel):
+    login: str
+    platform: str = "twitch"
+
+
+class RosterPatch(BaseModel):
+    """Partial edit of one roster row; only the given fields change."""
+    x_handle: str | None = None
+    x_handle_status: str | None = None     # "confirmed" | "needs_review"
+    clip_enabled: bool | None = None
+    gif_enabled: bool | None = None
+    gif_post_enabled: bool | None = None
+    active: bool | None = None
+    display_name: str | None = None
+    aliases: list[str] | None = None
+    pronouns: str | None = None
+    pronouns_status: str | None = None     # "confirmed" | "needs_review"
+    notes: str | None = None
+
+
+def _roster_unavailable(login: str) -> dict:
+    return {"ok": False, "login": login, "reason": "roster_store_unavailable",
+            "message": "the roster store isn't reachable right now"}
+
+
+def _norm_login_platform(login: str, platform: str) -> tuple[str, str]:
+    login = login.strip().lstrip("@").lower()
+    platform = (platform or "twitch").strip().lower()
+    if not login:
+        raise HTTPException(status_code=400, detail="login required")
+    if platform not in ("twitch", "kick"):
+        raise HTTPException(status_code=400, detail="platform must be twitch or kick")
+    return login, platform
+
+
+@router.get("/roster/rows")
+async def roster_rows():
+    """Every roster row (inactive included) plus the current feed watch list, so
+    the grid can flag which logins are pinned for FetchClips."""
+    rows = roster_store.list_all()
+    if rows is None:
+        return {"ok": False, "reason": "roster_store_unavailable", "rows": [],
+                "watchlist": streamers.get_watchlist()}
+    return {"ok": True, "rows": [s.as_dict() for s in rows],
+            "watchlist": streamers.get_watchlist()}
+
+
+@router.post("/roster/add")
+async def roster_add(body: RosterAdd, request: Request):
+    login, platform = _norm_login_platform(body.login, body.platform)
+    if not roster_store.loaded():
+        return _roster_unavailable(login)
+    result = await _roster_add(request.app.state.http, platform, login,
+                               added_by="app", source="ui")
+    s = roster_store.get(login, platform, include_inactive=True)
+    if s is not None:
+        result["row"] = s.as_dict()
+    return result
+
+
+@router.patch("/roster/{platform}/{login}")
+async def roster_patch(platform: str, login: str, body: RosterPatch):
+    login, platform = _norm_login_platform(login, platform)
+    if not roster_store.loaded():
+        return _roster_unavailable(login)
+    fields = body.model_dump(exclude_unset=True)
+    for key in ("x_handle_status", "pronouns_status"):
+        if fields.get(key) not in (None, "", "confirmed", "needs_review"):
+            raise HTTPException(status_code=400, detail=f"{key} must be confirmed or needs_review")
+    if roster_store.get(login, platform, include_inactive=True) is None:
+        return {"ok": False, "login": login, "reason": "not_found"}
+    s = await roster_store.update(platform, login, **fields)
+    return {"ok": True, "login": login, "row": s.as_dict() if s else None}
+
+
+@router.delete("/roster/{platform}/{login}")
+async def roster_delete(platform: str, login: str, hard: bool = False):
+    """Soft-delete (active=false, the chat ➖ behaviour) by default; ``hard=true``
+    really drops the row — for test rows only."""
+    login, platform = _norm_login_platform(login, platform)
+    if not roster_store.loaded():
+        return _roster_unavailable(login)
+    if hard:
+        removed = await roster_store.hard_delete(platform, login)
+    else:
+        removed = await roster_store.remove(platform, login)
+    return {"ok": True, "login": login, "removed": removed, "hard": hard}
 
 
 # ── Fetch mode ────────────────────────────────────────────────────────────────
