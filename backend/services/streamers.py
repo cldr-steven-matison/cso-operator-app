@@ -3890,7 +3890,7 @@ async def process_clip(clip: dict) -> dict:
         # lands beside the 3B one for review and is never posted. Must stay
         # inside this `async with` — `client` is closed once the block ends.
         if settings.BRAIN_DOOR_URL:
-            brain = await _shadow_brain_caption(client, clip, title, transcript)
+            brain = await _shadow_brain_caption(client, clip, title)
 
     return {
         **clip, "title": title, "transcript": transcript, "caption": caption,
@@ -3899,22 +3899,30 @@ async def process_clip(clip: dict) -> dict:
     }
 
 
-async def _shadow_brain_caption(client: httpx.AsyncClient, clip: dict, title: str,
-                                transcript: str) -> dict:
-    """POST the clip to the DGX Spark brain door (#277) and return
-    ``{"brain_caption": str, "brain": <door JSON or {"error": ...}>}``. Every
-    failure — timeout, non-200, unparsable body — becomes an error field; this
-    never raises and never touches the 3B `caption`. Shape mirrors
-    services/vllm.py's defensive call."""
-    payload = {
-        "clip_id": clip.get("clip_id", ""), "streamer": clip.get("streamer", ""),
-        "source": clip.get("source", "twitch"), "title": title or "",
-        "description": clip.get("description", "") or "", "transcript": transcript or "",
+async def _shadow_brain_caption(client: httpx.AsyncClient, clip: dict, title: str) -> dict:
+    """POST the clip's MP4 to the DGX Spark brain door (#277, contract v2) and
+    return ``{"brain_caption": str, "brain": <door JSON or {"error": ...}>}``.
+    The door transcribes and samples frames itself: raw ``video/mp4`` body,
+    identity in ``X-*`` headers, no transcript/description in the request.
+    Every failure — missing file, timeout, non-200, unparsable body — becomes
+    an error field; this never raises and never touches the 3B `caption`."""
+    clip_id = clip.get("clip_id", "")
+    tag = f"[process_clip] brain {clip_id or '?'}"
+    clip_path = clip.get("clip_path", "")
+    if not clip_path or not Path(clip_path).exists():
+        print(f"{tag}: no clip file at {clip_path!r}")
+        return {"brain_caption": "", "brain": {"error": f"no clip file: {clip_path!r}"}}
+    headers = {
+        "Content-Type": "video/mp4",
+        "X-Clip-Id": clip_id,
+        "X-Streamer": clip.get("streamer", ""),
+        "X-Source": clip.get("source", "twitch"),
+        # httpx headers must be latin-1; titles can carry emoji — strip to ascii
+        "X-Title": " ".join((title or "").split()).encode("ascii", "ignore").decode("ascii"),
     }
-    tag = f"[process_clip] brain {payload['clip_id'] or '?'}"
     try:
-        r = await client.post(settings.BRAIN_DOOR_URL, json=payload,
-                              timeout=settings.BRAIN_DOOR_TIMEOUT)
+        r = await client.post(settings.BRAIN_DOOR_URL, content=Path(clip_path).read_bytes(),
+                              headers=headers, timeout=settings.BRAIN_DOOR_TIMEOUT)
     except Exception as e:  # network / DNS / timeout — shadow only, carry on
         print(f"{tag}: request failed: {e!r}")
         return {"brain_caption": "", "brain": {"error": f"request failed: {e!r}"}}
