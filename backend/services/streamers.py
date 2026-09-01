@@ -3711,6 +3711,31 @@ async def process_clip(clip: dict) -> dict:
         if _is_junk_title(title) and has_transcript:
             title = await _generate_title(client, transcript, clip.get("streamer", "unknown")) or title
 
+        # The Spark brain is the caption source (#272 B5, 2026-09-01): the 35B
+        # hears the clip, sees the frames, knows the streamer (Postgres identity
+        # + streamer-kb) and self-checks its own answer — so a good brain answer
+        # short-circuits everything below. The 3B path with its full guard
+        # scaffold survives ONLY as the fallback when the door is down or the
+        # brain's self-check rejects the answer. Note this runs BEFORE the junk
+        # title / no-transcript disqualifications: both exist because the 3B
+        # depended on those signals; the brain judges the clip itself.
+        if settings.BRAIN_DOOR_URL:
+            brain = await _shadow_brain_caption(client, clip, title)
+            promoted = _promote_brain_caption(
+                brain.get("brain_caption", ""), brain.get("brain") or {})
+            if promoted:
+                if not has_transcript:
+                    # Our whisper came up empty — the door transcribed it anyway.
+                    transcript = str((brain.get("brain") or {}).get("transcript")
+                                     or transcript)
+                x_handle = get_x_handle(clip.get("streamer", ""))
+                caption = _build_tweet(promoted, clip.get("source", "twitch"),
+                                       clip.get("streamer", ""), x_handle)
+                print(f"[process_clip] brain caption promoted for {clip.get('clip_id', clip_path)}")
+                return {**clip, "title": title, "transcript": transcript,
+                        "caption": caption, "caption_mode": "brain",
+                        "quote_reason": "", "paths": paths, **brain}
+
         if _is_junk_title(title):
             return {**clip, "title": title, "transcript": transcript, "caption": "", "error": "disqualified: no title"}
 
@@ -3884,19 +3909,49 @@ async def process_clip(clip: dict) -> dict:
             error = "disqualified: no transcript"
 
         if error and not caption:
-            return {**clip, "title": title, "transcript": transcript, "caption": "", "error": error}
-
-        # Shadow mode (#277): the Spark brain sees the same clip; its caption
-        # lands beside the 3B one for review and is never posted. Must stay
-        # inside this `async with` — `client` is closed once the block ends.
-        if settings.BRAIN_DOOR_URL:
-            brain = await _shadow_brain_caption(client, clip, title)
+            # `brain` still rides along so review shows why the door path
+            # didn't rescue this clip (it was already called above).
+            return {**clip, "title": title, "transcript": transcript, "caption": "",
+                    "error": error, **brain}
 
     return {
         **clip, "title": title, "transcript": transcript, "caption": caption,
         "caption_mode": caption_mode, "quote_reason": quote_reason,
         "paths": paths, **brain,
     }
+
+
+def _promote_brain_caption(raw: str, reply: dict) -> str:
+    """The thin last line between the brain's caption and the posted tweet
+    (#272 B5). The 3B-era guard scaffold (comprehension gate, retry loop,
+    pronoun regex, emoji cap, degenerate check) existed because that model was
+    weak; the 35B self-checks grounded/quote_verbatim/pronouns_ok itself, so
+    only the X-mechanical rules remain here:
+
+    - respect the brain's own self-check — any of those three false → "" (the
+      caller falls back to the 3B path);
+    - strip URL-like tokens (X 400s the whole tweet on a hallucinated link)
+      and @mentions (the only real handle is appended by _build_tweet);
+    - Steven's emoji rule: at least one emoji, and leading when the caption
+      opens lowercase (a lowercase first word reads fine behind an emoji).
+
+    Returns the caption body ready for _build_tweet, or "" when not postable."""
+    checks = reply.get("brain") or {}
+    if any(checks.get(k) is False for k in ("grounded", "quote_verbatim", "pronouns_ok")):
+        return ""
+    text = html.unescape(str(raw)).strip()
+    text = _URL_RE.sub("", text)
+    text = re.sub(r"\s*@\w+", "", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    if not text:
+        return ""
+    m = _EMOJI_RE.search(text)
+    if m is None:
+        return f"🔥 {text}"
+    if text[0].islower() and m.start() > 0:
+        rest = re.sub(r"\s{2,}", " ", (text[:m.start()] + text[m.end():]).strip())
+        return f"{m.group(0)} {rest.rstrip(',')}"
+    return text
 
 
 async def _shadow_brain_caption(client: httpx.AsyncClient, clip: dict, title: str) -> dict:

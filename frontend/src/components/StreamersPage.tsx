@@ -264,10 +264,12 @@ function ClipCard({
         )}
       </div>
 
-      {/* Caption (editable) — left; brain caption (shadow, #277) — right */}
+      {/* Caption (editable) — left; the brain's raw door answer — right */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
         <div className="space-y-1">
-          <p className="text-[10px] uppercase tracking-wide text-muted">caption (3B) — what gets posted</p>
+          <p className="text-[10px] uppercase tracking-wide text-muted">
+            caption ({clip.caption_mode === "brain" ? "brain, Spark" : clip.caption_mode || "3B"}) — what gets posted
+          </p>
           <textarea
             rows={4}
             value={caption}
@@ -276,7 +278,9 @@ function ClipCard({
           />
         </div>
         <div className="space-y-1">
-          <p className="text-[10px] uppercase tracking-wide text-muted">brain (Spark) — shadow, not posted</p>
+          <p className="text-[10px] uppercase tracking-wide text-muted">
+            brain (Spark) — {clip.caption_mode === "brain" ? "raw answer, promoted into the caption" : "not promoted for this clip"}
+          </p>
           <p className="text-xs font-mono border border-border rounded p-2 bg-panel min-h-[5.5rem] whitespace-pre-wrap">
             {clip.brain_caption?.trim() ? (
               <span className="text-text">{clip.brain_caption}</span>

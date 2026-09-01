@@ -105,8 +105,11 @@ export type StreamerClip = {
   paths?: { clip: boolean; gif: boolean; gif_post?: boolean };
   transcript?: string;
   caption?: string;
-  // Shadow mode (#277): the DGX Spark brain's caption + its self-check JSON.
-  // Review-only — never what gets approved/posted.
+  // "brain" = the Spark 35B wrote the posted caption (#272 B5);
+  // "reaction"/"quoted" = the 3B fallback path produced it.
+  caption_mode?: string;
+  // The DGX Spark brain's raw caption + its self-check JSON (#277). When
+  // caption_mode is "brain", `caption` above is this plus emoji rule + suffix.
   brain_caption?: string;
   brain?: Record<string, unknown>;
   _offset?: number;
