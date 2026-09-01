@@ -4237,9 +4237,16 @@ async def publish_gif_now(clip_id: str) -> dict:
 # KafkaTopic CR, so discover it once (a metadata fetch) and reuse on every poll.
 _processed_partitions: set[int] | None = None
 
+# Rolling cache of parsed processed_clips records, keyed (partition, offset) and
+# pruned to the seek window. It makes review stable across flaky polls: a Kafka
+# timeout or short getmany() drain serves the cached window (filtered fresh)
+# instead of a silent empty/partial list that "un-appears" clips (2026-09-01).
+_queue_records: dict[tuple[int, int], dict] = {}
+
 
 async def clip_queue(limit: int = 20) -> list[dict]:
-    """Peek the last `limit` records from processed_clips.
+    """Return every reviewable clip in the last-`limit`-records-per-partition
+    window of processed_clips (no newest-N cap — see the return comment).
 
     Uses getmany() (direct fetch) instead of the async iterator so that
     manual seek() works reliably — the async for iterator hangs after seek()
@@ -4276,8 +4283,15 @@ async def clip_queue(limit: int = 20) -> list[dict]:
         global _processed_partitions
         if not _processed_partitions:
             await asyncio.wait_for(consumer._client.force_metadata_update(), timeout=10.0)
-            _processed_partitions = set(consumer.partitions_for_topic(topic) or {0})
-        part_ids = _processed_partitions
+            found = consumer.partitions_for_topic(topic)
+            if found:
+                _processed_partitions = set(found)
+            else:
+                # Metadata flaked — use {0} for THIS call only, never cache it:
+                # caching the fallback would silently hide every other partition
+                # until the next pod restart (clips "appearing out of thin air").
+                print("[clip_queue] partition metadata unavailable — degraded single-partition poll")
+        part_ids = _processed_partitions or {0}
         tps = [TopicPartition(topic, p) for p in sorted(part_ids)]
         consumer.assign(tps)
 
@@ -4304,45 +4318,65 @@ async def clip_queue(limit: int = 20) -> list[dict]:
             # except swallows it and the queue comes back empty).
             if all([await consumer.position(tp) >= end_map.get(tp, 0) for tp in tps]):
                 break
+        else:
+            short = {tp.partition: (await consumer.position(tp), end_map.get(tp, 0))
+                     for tp in tps}
+            print(f"[clip_queue] short drain after 8 polls (position vs end): {short}")
 
-        skipped = get_skipped()
-        published = get_published()
-        pending = {p["clip_id"] for p in _load_pending()}
-        # Order by broker timestamp — offsets don't order across partitions.
-        for key in sorted(messages, key=lambda k: messages[k].timestamp):
-            msg = messages[key]
-            try:
-                record = json.loads(msg.value.decode("utf-8"))
-                clip_id = record.get("clip_id", "")
-                # Filter: missing file, skipped, pending, published, or disqualified/errored
-                clip_path = record.get("clip_path", "")
-                if not clip_path or not Path(clip_path).exists():
+        # Merge into the rolling record cache so one flaky poll can never make a
+        # previously-seen clip vanish from (or later "appear" in) review — the
+        # 2026-09-01 complaint. Records persist across polls and are pruned to
+        # the current seek window per partition.
+        for (part, off), msg in messages.items():
+            if (part, off) not in _queue_records:
+                try:
+                    record = json.loads(msg.value.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
-                # Gif-only streamers (clip=N) queue/publish under "{clip_id}-gif"
-                # with the base id never entering pending/published — without the
-                # gif-id check their card would reappear here forever.
-                gif_id = f"{clip_id}-gif"
-                if (clip_id in skipped or clip_id in published or clip_id in pending
-                        or gif_id in published or gif_id in pending):
-                    continue
-                caption = record.get("caption", "")
-                if not caption or caption.startswith("["):
-                    continue
-                record["_offset"] = msg.offset
-                record["_partition"] = msg.partition
+                record["_offset"] = off
+                record["_partition"] = part
                 record["_ts"] = msg.timestamp
-                record["x_handle"] = get_x_handle(record.get("streamer", ""))
-                clips.append(record)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                pass
-    except Exception:
-        pass
+                _queue_records[(part, off)] = record
+        floor = {tp.partition: max(0, end_map.get(tp, 0) - limit) for tp in tps}
+        for key in [k for k in _queue_records if k[0] in floor and k[1] < floor[k[0]]]:
+            del _queue_records[key]
+    except Exception as e:
+        # Never let a Kafka hiccup masquerade as an empty review queue (that
+        # was the silent `except: pass` here) — log it and serve the cache,
+        # filtered fresh below so approved/skipped clips still drop out.
+        print(f"[clip_queue] poll failed, serving {len(_queue_records)} cached records: {e!r}")
     finally:
         try:
             await asyncio.wait_for(consumer.stop(), timeout=5.0)
         except Exception:
             pass
-    return clips[-limit:]
+
+    skipped = get_skipped()
+    published = get_published()
+    pending = {p["clip_id"] for p in _load_pending()}
+    # Order by broker timestamp — offsets don't order across partitions.
+    for record in sorted(_queue_records.values(), key=lambda r: r["_ts"]):
+        clip_id = record.get("clip_id", "")
+        # Filter: missing file, skipped, pending, published, or disqualified/errored
+        clip_path = record.get("clip_path", "")
+        if not clip_path or not Path(clip_path).exists():
+            continue
+        # Gif-only streamers (clip=N) queue/publish under "{clip_id}-gif"
+        # with the base id never entering pending/published — without the
+        # gif-id check their card would reappear here forever.
+        gif_id = f"{clip_id}-gif"
+        if (clip_id in skipped or clip_id in published or clip_id in pending
+                or gif_id in published or gif_id in pending):
+            continue
+        caption = record.get("caption", "")
+        if not caption or caption.startswith("["):
+            continue
+        record["x_handle"] = get_x_handle(record.get("streamer", ""))
+        clips.append(record)
+    # No newest-20 cap (the old `clips[-limit:]`): the cap hid older unhandled
+    # clips until newer ones were cleared, then they "appeared out of thin air".
+    # Review now shows the WHOLE filtered window in one refresh.
+    return clips
 
 
 # ── X publish ─────────────────────────────────────────────────────────────────
