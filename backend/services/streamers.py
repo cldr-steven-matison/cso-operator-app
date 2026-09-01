@@ -3918,7 +3918,9 @@ async def _shadow_brain_caption(client: httpx.AsyncClient, clip: dict, title: st
         "X-Streamer": clip.get("streamer", ""),
         "X-Source": clip.get("source", "twitch"),
         # httpx headers must be latin-1; titles can carry emoji — strip to ascii
-        "X-Title": " ".join((title or "").split()).encode("ascii", "ignore").decode("ascii"),
+        # FIRST, then normalize whitespace (the reverse order left trailing/double
+        # spaces where emoji were removed → h11 "Illegal header value").
+        "X-Title": " ".join((title or "").encode("ascii", "ignore").decode("ascii").split()),
     }
     try:
         r = await client.post(settings.BRAIN_DOOR_URL, content=Path(clip_path).read_bytes(),
