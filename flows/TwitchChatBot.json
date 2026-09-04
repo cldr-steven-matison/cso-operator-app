@@ -4385,7 +4385,7 @@
         "bundle": {
           "group": "org.apache.nifi",
           "artifact": "python-extensions",
-          "version": "0.0.25-SNAPSHOT"
+          "version": "0.0.28-SNAPSHOT"
         },
         "properties": {
           "Bot Username": "tunastreettest",
