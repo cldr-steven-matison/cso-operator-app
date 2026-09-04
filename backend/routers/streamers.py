@@ -293,12 +293,20 @@ async def post_gif_now(clip_id: str):
         raise HTTPException(status_code=404, detail=f"No GIF indexed for {clip_id}")
     if not os.path.exists(entry.get("gif_path", "")):
         raise HTTPException(status_code=404, detail="GIF file is gone from the PVC")
-    try:
-        return await streamers.publish_gif_now(clip_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    # #298: go through the same one-retry wrapper the chat-trigger/approve paths
+    # use. Post Now previously called publish_gif_now directly, so a single
+    # transient upload hiccup (the "segments do not add up" byte mismatch) was
+    # reported as a hard failure with no retry. The wrapper catches publish_clip's
+    # raised X error, and on a transient marker waits and re-posts once - the
+    # re-post re-reads the still-stable gif and succeeds. A permanent rejection
+    # (duplicate, too long, bad creds) still fails once, unchanged.
+    result = await _publish_with_retry(lambda: streamers.publish_gif_now(clip_id))
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail=result.get("reason") or result.get("error") or "publish failed",
+        )
+    return result
 
 
 @router.get("/face-layouts")
@@ -552,6 +560,12 @@ _TRANSIENT_X_MARKERS = (
     "429", "rate limit", "too many requests", "timeout", "timed out",
     "connection", "reset by peer", "processing", "try again", "temporarily",
     "500", "502", "503", "504", "internal server error", "service unavailable",
+    # #298: X's chunked media FINALIZE rejects with "Segments do not add up to
+    # provided total file size" when the byte total it received across APPENDs
+    # doesn't match the size declared at INIT - a segment lost/duplicated on the
+    # wire, not bad content. The identical file re-uploads clean on a retry (the
+    # failing jasontheween gif was verified valid and byte-consistent on the PVC).
+    "segments do not add up", "total file size",
 )
 _PERMANENT_X_MARKERS = (
     "duplicate", "already posted", "too long", "duration", "credential",
