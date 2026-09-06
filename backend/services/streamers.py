@@ -3049,7 +3049,7 @@ async def streamer_exists(client: httpx.AsyncClient, entry: str) -> bool:
         return False
 
 
-async def fetch_clips_for_login(entry: str, clip_cap: int = 1) -> dict:
+async def fetch_clips_for_login(entry: str, clip_cap: int = 1, period: str = "month") -> dict:
     """Fetch, download and publish clips for ONE watch-list entry, right now.
 
     fetch_clips() is batch-only over a rotating slice of the watch list, so a
@@ -3059,12 +3059,17 @@ async def fetch_clips_for_login(entry: str, clip_cap: int = 1) -> dict:
     publishes to new_clips through _publish_clips_to_kafka just like the batch,
     so the clip goes through ProcessClips (Whisper + vLLM) normally.
 
-    Deliberate divergence from fetch_clips(): top_mode/period are forced to
-    top-of-the-month instead of inheriting get_fetch_mode(). Someone asking in
-    chat means "show us a good one", not "show us the most recent one" — and in
-    recency mode the window is the last 6 hours, which is frequently empty even
-    for a channel with hundreds of clips, so inheriting the mode would answer a
-    perfectly good request with "no clips".
+    Deliberate divergence from fetch_clips(): top_mode is forced on instead of
+    inheriting get_fetch_mode(). Someone asking in chat means "show us a good
+    one", not "show us the most recent one" — and in recency mode the window is
+    the last 6 hours, which is frequently empty even for a channel with hundreds
+    of clips, so inheriting the mode would answer a perfectly good request with
+    "no clips".
+
+    `period` defaults to top-of-the-month; the chat-trigger route calls again
+    with period="all" (all-time top clips, no time window) when the month window
+    comes back empty, so "no recent clips" falls back to the channel's best clip
+    rather than giving up (#299).
 
     Returns {"fetched", "clips", "records", "errors"}: same shape as
     fetch_clips() plus the full clip records, which the chat-trigger route feeds
@@ -3075,9 +3080,10 @@ async def fetch_clips_for_login(entry: str, clip_cap: int = 1) -> dict:
     seen = _load_seen()
     errors: list[str] = []
     fetched: list[dict] = []
-    # top_mode=True + period="month" — see the docstring. The 30-day `since`
-    # mirrors what fetch_clips() computes for that mode.
-    since = datetime.now(timezone.utc) - timedelta(days=30)
+    # top_mode=True — see the docstring. period="all" drops the time window
+    # entirely (since=None), mirroring what fetch_clips() computes for that mode;
+    # anything else uses the 30-day top-of-month window.
+    since = None if period == "all" else datetime.now(timezone.utc) - timedelta(days=30)
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         try:
@@ -3085,7 +3091,7 @@ async def fetch_clips_for_login(entry: str, clip_cap: int = 1) -> dict:
                 fetched = await _fetch_kick_clips(
                     client, login, clip_dir, seen, errors,
                     kick_token_getter=lambda: _kick_token_refresh(client),
-                    top_mode=True, period="month", clip_cap=clip_cap,
+                    top_mode=True, period=period, clip_cap=clip_cap,
                 )
             else:
                 token = await _twitch_token_refresh(client)

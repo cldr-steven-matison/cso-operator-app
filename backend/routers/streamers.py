@@ -692,10 +692,24 @@ async def chat_trigger_clip(body: ChatTriggerRequest, request: Request):
     if not records:
         errors = fetch.get("errors", [])
         failed = any("download" in e.lower() for e in errors)
-        return {"ok": False, "login": login,
-                "reason": "download_failed" if failed else "no_new_clips",
-                "message": (f"couldn't grab a clip for {login} just now"
-                            if failed else f"no new clips for {login} to post")}
+        # Nothing in the top-of-month window (or all of it already posted). A mod
+        # asking for a named streamer's clip wants the channel's best one, not
+        # "nothing recent" — so widen to all-time top clips before giving up
+        # (#299). Skip the retry on a download failure: we did find a clip, the
+        # grab itself failed, and a wider window won't fix that.
+        if not failed:
+            try:
+                fetch = await streamers.fetch_clips_for_login(entry, clip_cap=1, period="all")
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=str(e))
+            records = fetch.get("records", [])
+        if not records:
+            errors = fetch.get("errors", [])
+            failed = any("download" in e.lower() for e in errors)
+            return {"ok": False, "login": login,
+                    "reason": "download_failed" if failed else "no_new_clips",
+                    "message": (f"couldn't grab a clip for {login} just now"
+                                if failed else f"no new clips for {login} to post")}
 
     clip = records[0]
     try:
