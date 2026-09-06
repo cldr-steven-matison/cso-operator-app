@@ -6,6 +6,7 @@ import { Card, CardTitle } from "@/components/ui/Card";
 import {
   api,
   openSSE,
+  type CardPreview,
   type ChatActivitySnapshot,
   type ChatInspectResult,
   type InspectorChatter,
@@ -18,6 +19,8 @@ import {
   type StreamerClip,
   type StreamerFlows,
   type StreamerGif,
+  type StreamerKbCard,
+  type StreamerKbPoint,
   type StreamerTopics,
 } from "@/lib/api";
 import { TopicPeek } from "./TopicPeek";
@@ -739,6 +742,290 @@ function GifsPanel({
 
 // ── WatchList ──────────────────────────────────────────────────────────────
 
+// ── Streamers KB (#271 / #281) ───────────────────────────────────────────────
+//
+// A gallery of every active roster streamer's Knowledge Card: the GIF the card would
+// post, identity from the roster, and the Streamer KB's points from the Spark. The
+// selected card sits on top, large, with Generate → review → Post to X. Nothing is
+// posted without a preview the human has seen (agent/live-queues.md: review-first).
+
+function kindTone(kind: string): "ok" | "neutral" | "warn" {
+  if (kind === "research") return "ok";
+  if (kind === "prior") return "warn";
+  return "neutral";
+}
+
+function KbPointBlock({ p, collapsed }: { p: StreamerKbPoint; collapsed?: boolean }) {
+  const [open, setOpen] = useState(!collapsed);
+  const label = p.kind === "research" ? `research · ${p.source}` : p.kind;
+  return (
+    <div className="border border-border rounded p-2 bg-bg text-xs">
+      <button className="flex items-center gap-2 w-full text-left" onClick={() => setOpen((o) => !o)}>
+        <Badge tone={kindTone(p.kind)}>{label}</Badge>
+        {p.verified && <Badge tone="ok">verified</Badge>}
+        <span className="text-[10px] text-muted">
+          {(p.as_of || p.updated_at || "").slice(0, 10)}
+        </span>
+        <span className="ml-auto text-muted">{open ? "−" : "+"}</span>
+      </button>
+      {open && <p className="mt-1 whitespace-pre-wrap text-text leading-relaxed">{p.text}</p>}
+    </div>
+  );
+}
+
+function KbCardTile({ card, selected, onSelect }: { card: StreamerKbCard; selected: boolean; onSelect: () => void }) {
+  const id = card.identity;
+  const research = card.points.filter((p) => p.kind === "research");
+  return (
+    <button
+      onClick={onSelect}
+      className={`border rounded overflow-hidden bg-bg flex flex-col text-left transition-colors ${
+        selected ? "border-accent" : "border-border hover:border-muted"
+      }`}
+    >
+      {card.gif ? (
+        <img
+          src={`/api/streamers/gif/${encodeURIComponent(card.gif.clip_id)}?v=${encodeURIComponent(card.gif.indexed_at || "")}`}
+          alt={id.display_name}
+          loading="lazy"
+          className="w-full h-auto block bg-panel"
+        />
+      ) : (
+        <div className="w-full aspect-video bg-panel flex items-center justify-center text-[11px] text-muted">no GIF yet</div>
+      )}
+      <div className="p-2 space-y-1 min-w-0">
+        <div className="flex items-center gap-1.5 text-[11px] flex-wrap">
+          <PlatformBadge platform={id.platform} />
+          <span className="font-semibold text-text truncate">{id.display_name}</span>
+          {id.pronouns && <span className="text-muted">({id.pronouns})</span>}
+        </div>
+        <div className="flex items-center gap-1 flex-wrap text-[10px] text-muted">
+          <span>{card.points.length} KB points</span>
+          {research.length > 0 ? <Badge tone="ok">researched {card.kb_as_of}</Badge> : <Badge tone="neutral">no research yet</Badge>}
+          {card.card_tweet_url && (
+            <a href={card.card_tweet_url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
+              <Badge tone="ok">card posted</Badge>
+            </a>
+          )}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function KbSelectedCard({ card, enabled, gifs, onPosted }: {
+  card: StreamerKbCard; enabled: boolean; gifs: StreamerGif[]; onPosted: (url: string) => void;
+}) {
+  const id = card.identity;
+  const [gifId, setGifId] = useState<string>(card.gif?.clip_id ?? "");
+  const [preview, setPreview] = useState<CardPreview | null>(null);
+  const [text, setText] = useState("");
+  const [hook, setHook] = useState("");
+  const [busy, setBusy] = useState<"preview" | "publish" | null>(null);
+  const [result, setResult] = useState<{ ok: boolean; msg: string; url?: string } | null>(null);
+
+  // A new streamer selected → forget the previous draft.
+  useEffect(() => {
+    setGifId(card.gif?.clip_id ?? "");
+    setPreview(null); setText(""); setHook(""); setResult(null);
+  }, [id.streamer_key]);
+
+  const chosen = gifs.find((g) => g.clip_id === gifId) ?? card.gif;
+  const profile = card.points.filter((p) => p.kind === "profile");
+  const research = card.points.filter((p) => p.kind === "research");
+  const guidance = card.points.filter((p) => p.kind === "guidance");
+  const other = card.points.filter((p) => !["profile", "research", "guidance"].includes(p.kind));
+
+  async function generate() {
+    setBusy("preview"); setResult(null);
+    try {
+      const r = await api.streamersKbCardPreview(id.platform, id.login);
+      setPreview(r);
+      if (r.ok) { setText(r.card_text ?? ""); setHook(r.hook ?? ""); }
+      else setResult({ ok: false, msg: r.error || "preview failed" });
+    } catch (e) {
+      setResult({ ok: false, msg: String(e) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function publish() {
+    if (!chosen) { setResult({ ok: false, msg: "pick a GIF first" }); return; }
+    if (!window.confirm(`Post this Knowledge Card for ${id.display_name} to X with GIF ${chosen.clip_id}?\n\n${text.slice(0, 300)}${text.length > 300 ? "…" : ""}`)) return;
+    setBusy("publish"); setResult(null);
+    try {
+      const r = await api.streamersKbCardPublish(id.platform, id.login, text, hook, chosen.clip_id);
+      if (!r.ok) setResult({ ok: false, msg: r.error || "publish failed" });
+      else if (r.dry_run) setResult({ ok: true, msg: "Dry run on the Spark — nothing posted (PostToX Dry Run is on)." });
+      else { setResult({ ok: true, msg: `Posted${r.degraded === "short" ? " (short fallback — X rejected the long text)" : ""}`, url: r.tweet_url }); onPosted(r.tweet_url ?? ""); }
+    } catch (e) {
+      setResult({ ok: false, msg: String(e) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const hookLen = (text.split("\n")[0] || "").length;
+  return (
+    <Card>
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,320px)_1fr] gap-4">
+        <div className="space-y-2">
+          {chosen ? (
+            <img
+              src={`/api/streamers/gif/${encodeURIComponent(chosen.clip_id)}?v=${encodeURIComponent(chosen.indexed_at || "")}`}
+              alt={id.display_name}
+              className="w-full h-auto block rounded border border-border bg-panel"
+            />
+          ) : (
+            <div className="w-full aspect-video rounded border border-border bg-panel flex items-center justify-center text-xs text-muted">no GIF in the library for this streamer</div>
+          )}
+          {gifs.length > 1 && (
+            <select
+              value={gifId}
+              onChange={(e) => setGifId(e.target.value)}
+              className="w-full bg-bg border border-border rounded px-2 py-1 text-xs text-text"
+              title="Which GIF goes on the card"
+            >
+              {gifs.map((g) => (
+                <option key={g.clip_id} value={g.clip_id}>
+                  {(g.tweet_url ? "posted · " : "") + (g.title || g.clip_id).slice(0, 60)} · {(g.gif_bytes / 1048576).toFixed(1)} MB
+                </option>
+              ))}
+            </select>
+          )}
+          <div className="text-xs space-y-0.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <PlatformBadge platform={id.platform} />
+              <span className="font-semibold text-text text-sm">{id.display_name}</span>
+              <span className="font-mono text-muted">{id.login}</span>
+            </div>
+            <p className="text-muted">
+              pronouns: {id.pronouns ? <span className="text-text">{id.pronouns} (confirmed)</span> : "not confirmed — name only"}
+              {id.x_handle && <> · X: <span className="text-text">@{id.x_handle}</span></>}
+            </p>
+            {id.aliases && <p className="text-muted">aliases: {id.aliases}</p>}
+            {id.notes && <p className="text-muted">notes: {id.notes}</p>}
+            <p className="text-muted">{card.points.length} KB points · research as of {card.kb_as_of || "—"}</p>
+          </div>
+        </div>
+
+        <div className="space-y-3 min-w-0">
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <CardTitle>Knowledge Card</CardTitle>
+              <div className="flex items-center gap-2">
+                <Button className="text-xs" onClick={generate} disabled={!enabled || busy !== null}>
+                  {busy === "preview" ? "Generating…" : preview ? "Regenerate" : "Generate card"}
+                </Button>
+                <Button className="text-xs" onClick={publish} disabled={!enabled || busy !== null || !text.trim() || !chosen}>
+                  {busy === "publish" ? "Posting…" : "Post to X"}
+                </Button>
+              </div>
+            </div>
+            {!enabled && <p className="text-xs text-muted">BRAIN_CARD_URL is not set on this deployment — KB read-only.</p>}
+            {preview?.ok && (
+              <div className="flex items-center gap-2 text-[10px] text-muted flex-wrap mb-1">
+                <span>{text.length} chars</span>
+                <span className={hookLen > 280 ? "text-bad" : ""}>hook {hookLen}/280</span>
+                {preview.pronouns_ok === false && <Badge tone="warn">pronouns_ok false</Badge>}
+                {preview.grounded === false && <Badge tone="warn">grounded false</Badge>}
+                {preview.pronouns_ok && preview.grounded && <Badge tone="ok">self-check ok</Badge>}
+              </div>
+            )}
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder={enabled ? "Generate card, then review and edit before posting." : ""}
+              rows={12}
+              className="w-full bg-bg border border-border rounded p-2 text-xs text-text font-mono leading-relaxed"
+            />
+            {result && (
+              <p className={`text-xs mt-1 ${result.ok ? "text-accent" : "text-bad"}`}>
+                {result.msg}{" "}
+                {result.url && (
+                  <a href={result.url} target="_blank" rel="noopener noreferrer" className="underline break-all">{result.url}</a>
+                )}
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            {profile.map((p) => <KbPointBlock key={p.kind + p.source} p={p} />)}
+            {research.map((p) => <KbPointBlock key={p.kind + p.source} p={p} />)}
+            {guidance.map((p) => <KbPointBlock key={p.kind + p.source} p={p} collapsed />)}
+            {other.map((p) => <KbPointBlock key={p.kind + p.source} p={p} collapsed />)}
+            {card.points.length === 0 && <p className="text-xs text-muted">No KB points for this streamer yet.</p>}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function KbPanel({ target, onSelect }: { target: string | null; onSelect: (key: string) => void }) {
+  const [cards, setCards] = useState<StreamerKbCard[]>([]);
+  const [gifs, setGifs] = useState<StreamerGif[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [enabled, setEnabled] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const [r, g] = await Promise.all([api.streamersKbCards(), api.streamersGifs()]);
+      setCards(r.cards);
+      setGifs(g.gifs);
+      setEnabled(r.card_enabled);
+      setError(r.ok ? (r.kb_error || null) : r.reason || "roster unavailable");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { refresh(); }, []);
+
+  const selected = cards.find((c) => c.identity.streamer_key === target) ?? cards[0] ?? null;
+  const gifKey = (g: StreamerGif) => (g.source === "kick" ? `kick:${g.streamer}` : g.streamer);
+  const selectedGifs = selected ? gifs.filter((g) => gifKey(g) === selected.identity.streamer_key) : [];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <CardTitle>
+          Streamers KB
+          {cards.length > 0 && <span className="ml-2 text-xs text-muted font-normal">{cards.length} streamers</span>}
+        </CardTitle>
+        <Button className="text-xs" onClick={refresh} disabled={loading}>{loading ? "Loading…" : "Refresh"}</Button>
+      </div>
+      {error && <p className="text-xs text-bad">{error}</p>}
+      {selected && (
+        <KbSelectedCard
+          card={selected}
+          enabled={enabled}
+          gifs={selectedGifs}
+          onPosted={(url) => setCards((prev) => prev.map((c) => (c.identity.streamer_key === selected.identity.streamer_key ? { ...c, card_tweet_url: url } : c)))}
+        />
+      )}
+      {loading && cards.length === 0 ? (
+        <p className="text-muted text-sm">Loading the Streamer KB…</p>
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+          {cards.map((c) => (
+            <KbCardTile
+              key={c.identity.streamer_key}
+              card={c}
+              selected={selected?.identity.streamer_key === c.identity.streamer_key}
+              onSelect={() => onSelect(c.identity.streamer_key)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PlatformBadge({ platform }: { platform: "twitch" | "kick" }) {
   return (
     <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${
@@ -794,7 +1081,7 @@ function FlagPill({ on, label, editing, onToggle }: { on: boolean; label: string
   );
 }
 
-function RosterGrid() {
+function RosterGrid({ onOpenKb }: { onOpenKb?: (key: string) => void }) {
   const [rows, setRows] = useState<RosterRow[]>([]);
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1008,6 +1295,9 @@ function RosterGrid() {
                         ) : (
                           <>
                             <Button variant="ghost" disabled={busy !== null || !r.active} onClick={() => startEdit(r)}>Edit</Button>
+                            {onOpenKb && r.active && (
+                              <Button variant="ghost" onClick={() => onOpenKb(r.entry)} title="Open in the Streamers KB">KB →</Button>
+                            )}
                             {pinned ? (
                               <Button variant="ghost" disabled={busy !== null} onClick={() => run("unpin", k, async () => { await api.streamersWatchlistRemove(r.login, r.platform); return { ok: true, message: `${r.entry} unpinned from the feed list` }; })}>Unpin</Button>
                             ) : (
@@ -1047,7 +1337,7 @@ function RosterGrid() {
   );
 }
 
-function WatchList() {
+function WatchList({ onOpenKb }: { onOpenKb?: (key: string) => void }) {
   const [logins, setLogins] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const [platform, setPlatform] = useState<"twitch" | "kick">("twitch");
@@ -1200,6 +1490,16 @@ function WatchList() {
                     <Badge tone={liveStatus[login] ? "ok" : "neutral"}>
                       {liveStatus[login] ? "LIVE" : "offline"}
                     </Badge>
+                  )}
+                  {onOpenKb && (
+                    <button
+                      onClick={() => onOpenKb(login)}
+                      className="text-muted hover:text-accent ml-1"
+                      title={`Open ${displayName} in the Streamers KB`}
+                      aria-label={`Open ${login} in the Streamers KB`}
+                    >
+                      KB →
+                    </button>
                   )}
                   <button
                     onClick={() => remove(login)}
@@ -1844,8 +2144,11 @@ export function StreamersPage() {
   const [gifs, setGifs] = useState<StreamerGif[]>([]);
   const [gifsLoading, setGifsLoading] = useState(true);
   const [gifsIncludeHidden, setGifsIncludeHidden] = useState(false);
-  const [view, setView] = useState<"main" | "posted" | "inspector" | "usersbots" | "gifs" | "roster">("main");
+  const [view, setView] = useState<"main" | "posted" | "inspector" | "usersbots" | "gifs" | "roster" | "kb">("main");
   const [usersBotsTarget, setUsersBotsTarget] = useState<UsersBotsTarget | null>(null);
+  // Streamers KB tab (#281): the streamer_key preselected when a Watchlist/roster row links in.
+  const [kbTarget, setKbTarget] = useState<string | null>(null);
+  const openKb = (key: string) => { setKbTarget(key); setView("kb"); };
   const [approvingAll, setApprovingAll] = useState(false);
   const [approveAllResult, setApproveAllResult] = useState<string | null>(null);
   const [triggering, setTriggering] = useState<string | null>(null);
@@ -2096,6 +2399,12 @@ export function StreamersPage() {
         >
           Watchlist
         </button>
+        <button
+          onClick={() => setView("kb")}
+          className={`px-3 py-1 border-l border-border transition-colors ${view === "kb" ? "bg-accent text-bg" : "bg-bg text-muted hover:text-text"}`}
+        >
+          Streamers KB
+        </button>
       </div>
 
       {view === "main" && (
@@ -2126,7 +2435,7 @@ export function StreamersPage() {
       </Card>
 
       {/* ── Section 2: Watch List ──────────────────────────────────── */}
-      <WatchList />
+      <WatchList onOpenKb={openKb} />
 
       {/* ── Section 3: Kafka Topics ────────────────────────────────── */}
       <Card>
@@ -2312,7 +2621,9 @@ export function StreamersPage() {
       </Card>
       )}
 
-      {view === "roster" && <RosterGrid />}
+      {view === "roster" && <RosterGrid onOpenKb={openKb} />}
+
+      {view === "kb" && <KbPanel target={kbTarget} onSelect={setKbTarget} />}
 
     </div>
   );

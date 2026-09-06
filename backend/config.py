@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     # reply as `brain_caption` beside `caption` — never promoted, never blocking.
     BRAIN_DOOR_URL: str = ""
     BRAIN_DOOR_TIMEOUT: float = 60.0
+    # Streamer Knowledge Card (#281): base URL of the Spark's StreamerCard door
+    # (GET /kb, POST /card/preview, POST /card/publish). Empty = the Streamers KB
+    # tab shows roster + GIFs only, no KB content and no card buttons.
+    BRAIN_CARD_URL: str = ""
+    BRAIN_CARD_TIMEOUT: float = 120.0
 
     QDRANT_URL: str = "http://qdrant.default.svc.cluster.local:6333"
     QDRANT_COLLECTION: str = "my-rag-collection"

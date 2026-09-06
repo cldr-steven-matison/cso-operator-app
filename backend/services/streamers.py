@@ -7,6 +7,7 @@ X publishing is called directly from the Review UI Approve button.
 """
 
 import asyncio
+import base64
 import contextlib
 import fcntl
 import glob
@@ -4002,6 +4003,165 @@ async def _shadow_brain_caption(client: httpx.AsyncClient, clip: dict, title: st
     caption = str(body.get("caption") or body.get("brain_caption") or "").strip()
     print(f"{tag}: {'ok' if caption else 'empty caption'}")
     return {"brain_caption": caption, "brain": body}
+
+
+# ── Streamer KB + Knowledge Card (#271 / #281) ────────────────────────────────
+#
+# The Streamer KB lives on the DGX Spark (Qdrant `streamer-kb`); the app reads it and
+# generates/posts the per-streamer Knowledge Card through the Spark's StreamerCard
+# door (BRAIN_CARD_URL): GET /kb, POST /card/preview, POST /card/publish. Identity
+# comes from this app's own roster store (the streamer_brain contract — confirmed
+# pronouns/handles only); the GIF is shipped per request from /clips, storage never
+# moves. The door posts to X itself; the app records the result here. Every door
+# failure becomes an {"error": ...} return, never an exception into the UI, same as
+# _shadow_brain_caption.
+
+def _card_identity(s: "roster_store.Streamer") -> dict:
+    """The identity block the door receives — the streamer_brain view's contract:
+    pronouns and x_handle only when a human confirmed them, never inferred."""
+    return {
+        "streamer_key": s.entry, "platform": s.platform, "login": s.login,
+        "display_name": s.display_name or s.login, "aliases": ", ".join(s.aliases),
+        "pronouns": s.pronouns if s.pronouns_status == roster_store.PRONOUNS_CONFIRMED else "",
+        "x_handle": s.x_handle if s.x_handle_status == "confirmed" else "",
+        "notes": s.notes or "",
+    }
+
+
+def _b64_json(obj: dict) -> str:
+    # HTTP headers are latin-1; card text and display names carry emoji/UTF-8.
+    return base64.b64encode(json.dumps(obj, ensure_ascii=False).encode("utf-8")).decode("ascii")
+
+
+async def _door(client: httpx.AsyncClient, method: str, path: str, **kw) -> tuple[dict | None, str]:
+    """One call to the StreamerCard door → (json_body, error). Never raises."""
+    if not settings.BRAIN_CARD_URL:
+        return None, "BRAIN_CARD_URL not set"
+    url = settings.BRAIN_CARD_URL.rstrip("/") + path
+    try:
+        r = await client.request(method, url, timeout=settings.BRAIN_CARD_TIMEOUT, **kw)
+    except Exception as e:
+        return None, f"door request failed: {e!r}"
+    try:
+        body = r.json()
+        if not isinstance(body, dict):
+            raise ValueError("not a JSON object")
+    except Exception as e:
+        return None, f"door {r.status_code}: bad reply ({e!r}) {r.text[:300]}"
+    if r.status_code != 200:
+        return body, f"door {r.status_code}: {body.get('error') or body.get('x_error') or r.text[:300]}"
+    return body, ""
+
+
+def _gif_key(entry: dict) -> str:
+    return f"kick:{entry.get('streamer', '')}" if entry.get("source") == "kick" else entry.get("streamer", "")
+
+
+async def kb_cards(client: httpx.AsyncClient) -> dict:
+    """The Streamers KB tab: one card per active roster row — identity, that
+    streamer's KB points (profile / guidance / research), and the GIF the card
+    would post (latest posted GIF, else the latest good one)."""
+    rows = roster_store.list_all()
+    if rows is None:
+        return {"ok": False, "reason": "roster_store_unavailable", "cards": [], "kb_error": ""}
+    points_by_key: dict[str, list[dict]] = {}
+    body, err = await _door(client, "GET", "/kb")
+    for p in (body or {}).get("points", []) if body else []:
+        points_by_key.setdefault(p.get("streamer_key", ""), []).append(p)
+    gifs_by_key: dict[str, list[dict]] = {}
+    for g in list_gifs():                      # newest first, hidden already dropped
+        gifs_by_key.setdefault(_gif_key(g), []).append(g)
+    cards = []
+    for s in sorted(rows, key=lambda r: (r.platform, r.login)):
+        if not s.active:
+            continue
+        gifs = gifs_by_key.get(s.entry, [])
+        posted = [g for g in gifs if g.get("tweet_url")]
+        pts = sorted(points_by_key.get(s.entry, []), key=lambda p: (p.get("kind", ""), p.get("source", "")))
+        as_of = max((p.get("as_of") or p.get("updated_at") or "")[:10] for p in pts) if pts else ""
+        cards.append({
+            "identity": _card_identity(s),
+            "points": pts,
+            "kb_as_of": as_of,
+            "gif": (posted or gifs or [None])[0],
+            "gif_count": len(gifs),
+            "card_tweet_url": next((g.get("card_tweet_url") for g in gifs if g.get("card_tweet_url")), ""),
+        })
+    return {"ok": True, "cards": cards, "kb_error": err, "card_enabled": bool(settings.BRAIN_CARD_URL)}
+
+
+async def card_preview(client: httpx.AsyncClient, platform: str, login: str) -> dict:
+    s = roster_store.get(login, platform)
+    if s is None:
+        return {"ok": False, "error": f"{platform}:{login} is not on the roster"}
+    identity = _card_identity(s)
+    body, err = await _door(client, "POST", "/card/preview",
+                            headers={"X-Identity-B64": _b64_json(identity), "Content-Type": "application/json"},
+                            content=b"")
+    if err:
+        return {"ok": False, "error": err, "identity": identity, "door": body}
+    return {"ok": True, "identity": identity, **body}
+
+
+async def card_publish(client: httpx.AsyncClient, platform: str, login: str,
+                       text: str, hook: str, clip_id: str) -> dict:
+    """Post the reviewed card text + the chosen library GIF through the door. The
+    door does the X call (PostToX, Dry Run governed on the Spark); a real post is
+    recorded in published history as kind=card and stamped on the gif entry."""
+    s = roster_store.get(login, platform)
+    if s is None:
+        return {"ok": False, "error": f"{platform}:{login} is not on the roster"}
+    text = (text or "").strip()
+    if not text:
+        return {"ok": False, "error": "card text is empty"}
+    entry = get_gif_entry(clip_id) or {}
+    gif_path = entry.get("gif_path", "")
+    if not gif_path or not Path(gif_path).exists():
+        return {"ok": False, "error": f"no GIF on disk for {clip_id!r}"}
+    if gif_is_hidden(clip_id):
+        return {"ok": False, "error": f"GIF {clip_id} is hidden — pick another"}
+    identity = _card_identity(s)
+    headers = {
+        "Content-Type": "image/gif",
+        "X-Identity-B64": _b64_json(identity),
+        "X-Card-B64": _b64_json({"text": text, "hook": (hook or "")[:280], "clip_id": clip_id}),
+    }
+    body, err = await _door(client, "POST", "/card/publish", headers=headers,
+                            content=Path(gif_path).read_bytes())
+    if err:
+        return {"ok": False, "error": err, "door": body}
+    tweet_url = str(body.get("tweet_url") or "")
+    dry_run = body.get("dry_run") in (True, "true", "True")
+    if tweet_url and not dry_run:
+        mark_card_published(clip_id, s, text, str(body.get("tweet_id") or ""), tweet_url)
+    return {"ok": True, "published": bool(tweet_url and not dry_run), "dry_run": dry_run, **body}
+
+
+def mark_card_published(clip_id: str, s: "roster_store.Streamer", text: str,
+                        tweet_id: str, tweet_url: str) -> None:
+    """Same history file and locks as mark_published; kind=card tells the Posted
+    tab this was a Knowledge Card, not a clip."""
+    with _pending_lock():
+        p = _published_history_path()
+        history = []
+        if p.exists():
+            try:
+                history = json.loads(p.read_text())
+            except Exception:
+                history = []
+        history.append({
+            "clip_id": f"{clip_id}-card", "kind": "card", "title": text[:120],
+            "source": s.platform, "streamer": s.login, "url": "", "thumbnail_url": "",
+            "x_handle": s.x_handle, "tweet_id": tweet_id, "tweet_url": tweet_url,
+            "published_at": datetime.now(timezone.utc).isoformat(),
+        })
+        _atomic_write_json(p, history[-500:])
+    with _gif_index_lock():
+        index = _load_json_obj(_gif_index_path())
+        if clip_id in index:
+            index[clip_id]["card_tweet_url"] = tweet_url
+            index[clip_id]["card_posted_at"] = datetime.now(timezone.utc).isoformat()
+            _atomic_write_json(_gif_index_path(), index)
 
 
 # ── GIF branch ────────────────────────────────────────────────────────────────

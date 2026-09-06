@@ -277,6 +277,56 @@ export type PostedClip = {
   published_at?: string;
 };
 
+// Streamer KB + Knowledge Card (#271 / #281)
+export type StreamerKbPoint = {
+  streamer_key: string;
+  kind: "profile" | "guidance" | "research" | "prior" | string;
+  source: string;
+  verified: boolean;
+  text: string;
+  updated_at: string;
+  as_of?: string;
+  sources?: string[];
+};
+export type StreamerKbIdentity = {
+  streamer_key: string;
+  platform: "twitch" | "kick";
+  login: string;
+  display_name: string;
+  aliases: string;
+  pronouns: string;
+  x_handle: string;
+  notes: string;
+};
+export type StreamerKbCard = {
+  identity: StreamerKbIdentity;
+  points: StreamerKbPoint[];
+  kb_as_of: string;
+  gif: StreamerGif | null;
+  gif_count: number;
+  card_tweet_url: string;
+};
+export type CardPreview = {
+  ok: boolean;
+  error?: string;
+  card_text?: string;
+  hook?: string;
+  char_count?: number;
+  hook_chars?: number;
+  pronouns_ok?: boolean | null;
+  grounded?: boolean | null;
+  kb_as_of?: string[];
+};
+export type CardPublishResult = {
+  ok: boolean;
+  error?: string;
+  published?: boolean;
+  dry_run?: boolean;
+  tweet_id?: string;
+  tweet_url?: string;
+  degraded?: string;
+};
+
 export type TopicRecord = {
   offset: number;
   source?: string;
@@ -476,6 +526,20 @@ export const api = {
   streamersGifPostNow: (clip_id: string) =>
     jpost<{ ok?: boolean; published?: boolean; tweet_id?: string; url?: string; reason?: string }>(
       `/api/streamers/gifs/${encodeURIComponent(clip_id)}/post-now`,
+    ),
+  // Streamer KB + Knowledge Card (#271 / #281)
+  streamersKbCards: () =>
+    jget<{ ok: boolean; reason?: string; cards: StreamerKbCard[]; kb_error: string; card_enabled: boolean }>(
+      "/api/streamers/kb/cards",
+    ),
+  streamersKbCardPreview: (platform: string, login: string) =>
+    jpost<CardPreview>(
+      `/api/streamers/kb/${encodeURIComponent(platform)}/${encodeURIComponent(login)}/card/preview`,
+    ),
+  streamersKbCardPublish: (platform: string, login: string, text: string, hook: string, clip_id: string) =>
+    jpost<CardPublishResult>(
+      `/api/streamers/kb/${encodeURIComponent(platform)}/${encodeURIComponent(login)}/card/publish`,
+      { text, hook, clip_id },
     ),
 };
 

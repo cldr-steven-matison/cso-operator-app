@@ -1008,6 +1008,36 @@ async def roster_delete(platform: str, login: str, hard: bool = False):
     return {"ok": True, "login": login, "removed": removed, "hard": hard}
 
 
+# ── Streamer KB + Knowledge Card (#271 / #281) ────────────────────────────────
+
+class CardPublish(BaseModel):
+    text: str
+    hook: str = ""
+    clip_id: str
+
+
+@router.get("/kb/cards")
+async def kb_cards(request: Request):
+    """One card per active roster streamer: identity + KB points + the GIF it would post."""
+    return await streamers.kb_cards(request.app.state.http)
+
+
+@router.post("/kb/{platform}/{login}/card/preview")
+async def kb_card_preview(platform: str, login: str, request: Request):
+    """Have the Spark write the Knowledge Card text (nothing is posted)."""
+    login, platform = _norm_login_platform(login, platform)
+    return await streamers.card_preview(request.app.state.http, platform, login)
+
+
+@router.post("/kb/{platform}/{login}/card/publish")
+async def kb_card_publish(platform: str, login: str, body: CardPublish, request: Request):
+    """Post the reviewed card + chosen GIF to X through the Spark door (its Dry Run
+    parameter decides whether X is really called)."""
+    login, platform = _norm_login_platform(login, platform)
+    return await streamers.card_publish(request.app.state.http, platform, login,
+                                        body.text, body.hook, body.clip_id)
+
+
 # ── Fetch mode ────────────────────────────────────────────────────────────────
 
 @router.get("/fetch-mode")
