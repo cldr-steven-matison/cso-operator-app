@@ -1037,9 +1037,11 @@ def _probe_video_duration(path: Path) -> float | None:
 
 _GIF_SECONDS = 5.0            # #173 round-3 recuts settled on ~5s arcs
 _GIF_FPS = 18
-_GIF_WIDTHS = (480, 400, 320)  # retry narrower if the encode lands over the cap;
-                              # square crops carry ~2.4x the pixels of the old wide
-                              # ones, so the ladder needs a lower rung to stay under 14MB
+_GIF_WIDTHS = (720, 600, 480)  # #305: X displays reaction gifs large and warns when
+                              # the source is low-res, so lead at 720 and retry narrower
+                              # only if the encode lands over the 14MB cap (busy/wide crops).
+                              # Every rung still gets the full-palette + fine-bayer encode
+                              # below, so even a fallback to 480 beats the old 480 default.
 _GIF_MAX_BYTES = 14_000_000   # X's animated-GIF hard cap is 15MB; leave headroom
 _GIF_RMS_HOP_SECONDS = 0.25
 
@@ -1061,7 +1063,7 @@ _FACE_PAD_TOP = 0.40          # headroom above the face box, in face heights
 _FACE_PAD_BOTTOM = 0.55       # chin/shoulders below the face box
 _FACE_MAX_CROP = 3.2          # crop extent cap, in face widths/heights
 _BAR_GUARD_PX = 4             # keep this far below the overlay bar (rounding)
-_GIF_MAX_UPSCALE = 1.6        # a tight crop may be scaled up this much to 480
+_GIF_MAX_UPSCALE = 2.2        # a tight crop may be scaled up this much toward the 720 rung
 
 
 def _face_refs_dir() -> Path:
@@ -1698,8 +1700,13 @@ def _cut_reaction_gif(
         filtergraph = (
             f"crop={cw}:{ch}:{cx}:{cy},"
             f"fps={_GIF_FPS},scale={out_w}:-2:flags=lanczos,"
-            "split[a][b];[a]palettegen=stats_mode=diff[p];"
-            "[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle"
+            # #305: full-clip palette (stats_mode=full) + fine ordered dither
+            # (bayer_scale=1) — the old stats_mode=diff / bayer_scale=4 banded and
+            # laid a coarse cross-hatch over flat darks (car interiors, walls) that
+            # X's upscale made obvious. Fine bayer stays temporally stable on the
+            # moving face crop where error-diffusion dithers would boil frame-to-frame.
+            "split[a][b];[a]palettegen=stats_mode=full[p];"
+            "[b][p]paletteuse=dither=bayer:bayer_scale=1:diff_mode=rectangle"
         )
         try:
             # Serialized on the GIF lock, not _overlay_lock: this runs on the
