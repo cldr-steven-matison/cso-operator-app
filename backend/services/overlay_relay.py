@@ -23,6 +23,7 @@ pump that reconnects on drop and on every target change.
 import asyncio
 import json
 import logging
+import re
 import time
 
 from config import settings
@@ -89,6 +90,62 @@ def is_kick(target: str) -> bool:
     return target.startswith("kick:")
 
 
+# ── Emotes (#311) ───────────────────────────────────────────────────────────
+# The overlay renders ``segments`` — text runs and emote images — resolved here
+# so the page needs no CDN knowledge and no position math. ``text`` is left
+# exactly as received: the overlay's dedup/collapse keys on it.
+
+_TWITCH_EMOTE_URL = "https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0"
+_KICK_EMOTE_URL = "https://files.kick.com/emotes/{id}/fullsize"
+_KICK_EMOTE_RE = re.compile(r"\[emote:(\d+):([^\]]*)\]")
+
+
+def twitch_segments(text: str, emotes_tag: str) -> list[dict]:
+    """Split ``text`` on the IRCv3 ``emotes`` tag (``id:s-e,s-e/id:s-e``).
+    Offsets are Unicode code-point indexes into the message, inclusive."""
+    spans: list[tuple[int, int, str]] = []
+    for part in (emotes_tag or "").split("/"):
+        emote_id, _, ranges = part.partition(":")
+        if not emote_id or not ranges:
+            continue
+        for rng in ranges.split(","):
+            start, _, end = rng.partition("-")
+            if start.isdigit() and end.isdigit():
+                spans.append((int(start), int(end), emote_id))
+    if not spans:
+        return [{"t": "txt", "v": text}] if text else []
+    spans.sort()
+    segments: list[dict] = []
+    pos = 0
+    for start, end, emote_id in spans:
+        if start < pos or end >= len(text):
+            continue  # overlapping or out-of-range tag — keep the text as text
+        if start > pos:
+            segments.append({"t": "txt", "v": text[pos:start]})
+        name = text[start:end + 1]
+        segments.append({"t": "em", "id": emote_id, "v": name,
+                         "url": _TWITCH_EMOTE_URL.format(id=emote_id)})
+        pos = end + 1
+    if pos < len(text):
+        segments.append({"t": "txt", "v": text[pos:]})
+    return segments
+
+
+def kick_segments(text: str) -> list[dict]:
+    """Split Kick chat content on its inline ``[emote:<id>:<name>]`` tokens."""
+    segments: list[dict] = []
+    pos = 0
+    for m in _KICK_EMOTE_RE.finditer(text):
+        if m.start() > pos:
+            segments.append({"t": "txt", "v": text[pos:m.start()]})
+        segments.append({"t": "em", "id": m.group(1), "v": m.group(2) or m.group(1),
+                         "url": _KICK_EMOTE_URL.format(id=m.group(1))})
+        pos = m.end()
+    if pos < len(text):
+        segments.append({"t": "txt", "v": text[pos:]})
+    return segments
+
+
 def parse_privmsg(line: str) -> "dict | None":
     """Parse one raw Twitch IRC line into the overlay message shape, or None if
     it isn't a chat PRIVMSG. ``channel`` is the source login (from the PRIVMSG
@@ -119,6 +176,7 @@ def parse_privmsg(line: str) -> "dict | None":
         "color": tags.get("color", "") or "",
         "badges": badges,
         "text": text,
+        "segments": twitch_segments(text, tags.get("emotes", "")),
         "ts": time.time(),
         "channel": channel or _target,
     }
@@ -149,6 +207,7 @@ def parse_kick_event(raw: str, slug: str) -> "dict | None":
         "color": identity.get("color", "") or "",
         "badges": badges,
         "text": text,
+        "segments": kick_segments(text),
         "ts": time.time(),
         "channel": f"kick:{slug}",
     }

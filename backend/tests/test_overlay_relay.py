@@ -115,3 +115,63 @@ if __name__ == "__main__":
         fn()
         print("ok", fn.__name__)
     print(f"\n{len(fns)} passed")
+
+
+# ── Emotes (#311) ───────────────────────────────────────────────────────────
+
+def test_twitch_segments_from_emotes_tag():
+    # "Kappa" at 0-4 and 12-16, "LUL" (id 425618) at 6-8; offsets are code points.
+    text = "Kappa LUL x Kappa"
+    segs = R.twitch_segments(text, "25:0-4,12-16/425618:6-8")
+    assert [s["t"] for s in segs] == ["em", "txt", "em", "txt", "em"]
+    assert segs[0] == {"t": "em", "id": "25", "v": "Kappa",
+                       "url": "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0"}
+    assert segs[1] == {"t": "txt", "v": " "}
+    assert segs[2]["id"] == "425618" and segs[2]["v"] == "LUL"
+    assert segs[3] == {"t": "txt", "v": " x "}
+    assert segs[4]["v"] == "Kappa"
+    assert "".join(s["v"] for s in segs) == text
+
+
+def test_twitch_segments_code_point_offsets_past_an_emoji():
+    # Twitch counts code points: the astral 🐟 is ONE position, not two UTF-16 units.
+    text = "🐟 Kappa"
+    segs = R.twitch_segments(text, "25:2-6")
+    assert segs == [{"t": "txt", "v": "🐟 "},
+                    {"t": "em", "id": "25", "v": "Kappa",
+                     "url": "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0"}]
+
+
+def test_twitch_segments_no_tag_and_bad_tag():
+    assert R.twitch_segments("plain words", "") == [{"t": "txt", "v": "plain words"}]
+    # out-of-range / garbage ranges never eat text
+    assert R.twitch_segments("hi", "25:0-40") == [{"t": "txt", "v": "hi"}]
+    assert R.twitch_segments("hi", "garbage") == [{"t": "txt", "v": "hi"}]
+
+
+def test_kick_segments_inline_tokens():
+    text = "gg [emote:37221:KEKW] wow [emote:1730752:catJAM]"
+    segs = R.kick_segments(text)
+    assert [s["t"] for s in segs] == ["txt", "em", "txt", "em"]
+    assert segs[1] == {"t": "em", "id": "37221", "v": "KEKW",
+                       "url": "https://files.kick.com/emotes/37221/fullsize"}
+    assert segs[3]["v"] == "catJAM"
+    assert R.kick_segments("no emotes here") == [{"t": "txt", "v": "no emotes here"}]
+
+
+def test_parse_privmsg_carries_segments_and_untouched_text():
+    line = ("@badges=;color=;display-name=V;emotes=25:3-7 "
+            ":v!v@v.tmi.twitch.tv PRIVMSG #xqc :gg Kappa")
+    msg = R.parse_privmsg(line)
+    assert msg["text"] == "gg Kappa"                      # dedup key unchanged
+    assert msg["segments"][1]["t"] == "em" and msg["segments"][1]["v"] == "Kappa"
+
+
+def test_parse_kick_event_carries_segments():
+    import json
+    inner = {"content": "[emote:37221:KEKW] lol",
+             "sender": {"username": "k", "identity": {"badges": []}}}
+    frame = json.dumps({"event": "App\\Events\\ChatMessageEvent", "data": json.dumps(inner)})
+    msg = R.parse_kick_event(frame, "bbjess")
+    assert msg["text"] == "[emote:37221:KEKW] lol"
+    assert msg["segments"][0]["t"] == "em" and msg["segments"][1] == {"t": "txt", "v": " lol"}
