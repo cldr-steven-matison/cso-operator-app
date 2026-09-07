@@ -131,6 +131,9 @@ class Streamer:
 _pool: asyncpg.Pool | None = None
 _cache: dict[tuple[str, str], Streamer] | None = None   # None = never loaded
 _lock = asyncio.Lock()
+_reconnect_task: asyncio.Task | None = None
+# Backoff for the reconnect loop: 2s, 4s, 8s, 16s, then every 30s until it lands.
+_RETRY_MIN_S, _RETRY_MAX_S = 2.0, 30.0
 
 
 def enabled() -> bool:
@@ -143,29 +146,65 @@ def loaded() -> bool:
 
 # ── Lifecycle ───────────────────────────────────────────────────────────────
 
+async def _connect(seed: dict) -> None:
+    """Open the pool, ensure the schema, seed, and load the cache — atomically
+    from the caller's point of view: ``_pool`` is only left set once the cache
+    has actually loaded, so a half-open pool never shadows the fallback."""
+    global _pool
+    pool = await asyncpg.create_pool(
+        host=settings.STREAMERS_DB_HOST, port=settings.STREAMERS_DB_PORT,
+        database=settings.STREAMERS_DB_NAME, user=settings.STREAMERS_DB_USER,
+        password=settings.STREAMERS_DB_PASSWORD, min_size=0, max_size=2,
+    )
+    _pool = pool
+    try:
+        await ensure_schema_and_seed(seed)
+        await reload()
+    except Exception:
+        _pool = None
+        await pool.close()
+        raise
+    log.info("roster_store loaded %d streamers from Postgres", len(_cache or {}))
+
+
+async def _reconnect_loop(seed: dict) -> None:
+    """Keep retrying ``_connect`` with backoff until it lands. Runs in the
+    background so a Postgres/DNS race at boot (the app container coming up
+    before CoreDNS or ``ssb-postgresql`` after a host reboot) heals itself
+    instead of pinning the app to the hardcoded roster until a restart."""
+    delay = _RETRY_MIN_S
+    while True:
+        await asyncio.sleep(delay)
+        try:
+            await _connect(seed)
+            return
+        except Exception as e:  # noqa: BLE001 — keep trying
+            log.warning("roster_store still unavailable, retrying in %.0fs: %s", delay, e)
+            delay = min(delay * 2, _RETRY_MAX_S)
+
+
 async def start(seed: dict) -> None:
     """Open the pool, ensure the schema, seed from the hardcoded constants if
-    needed, and load the cache. Never raises: a DB problem logs and leaves the
-    cache unloaded, so every reader falls back to the constants."""
-    global _pool
+    needed, and load the cache. Never raises and never blocks startup: a DB
+    problem logs, leaves the cache unloaded so every reader falls back to the
+    constants, and hands off to ``_reconnect_loop`` to recover in the background."""
+    global _reconnect_task
     if not enabled():
         log.info("roster_store disabled (STREAMERS_DB_USER unset) — using hardcoded roster")
         return
     try:
-        _pool = await asyncpg.create_pool(
-            host=settings.STREAMERS_DB_HOST, port=settings.STREAMERS_DB_PORT,
-            database=settings.STREAMERS_DB_NAME, user=settings.STREAMERS_DB_USER,
-            password=settings.STREAMERS_DB_PASSWORD, min_size=0, max_size=2,
-        )
-        await ensure_schema_and_seed(seed)
-        await reload()
-        log.info("roster_store loaded %d streamers from Postgres", len(_cache or {}))
+        await _connect(seed)
     except Exception as e:  # noqa: BLE001 — degrade to the constants, never fail startup
-        log.error("roster_store unavailable, falling back to hardcoded roster: %s", e)
+        log.error("roster_store unavailable, falling back to hardcoded roster "
+                  "until it reconnects: %s", e)
+        _reconnect_task = asyncio.create_task(_reconnect_loop(seed))
 
 
 async def stop() -> None:
-    global _pool
+    global _pool, _reconnect_task
+    if _reconnect_task is not None:
+        _reconnect_task.cancel()
+        _reconnect_task = None
     if _pool is not None:
         await _pool.close()
         _pool = None
