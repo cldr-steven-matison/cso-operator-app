@@ -159,6 +159,35 @@ def test_kick_segments_inline_tokens():
     assert R.kick_segments("no emotes here") == [{"t": "txt", "v": "no emotes here"}]
 
 
+def test_twitch_segments_thirdparty_whole_token_match():
+    tp = {"KEKW": "https://cdn.7tv.app/emote/01F/2x.webp",
+          "monkaS": "https://cdn.frankerfacez.com/emoticon/1/2"}
+    segs = R.twitch_segments("lol KEKW yes monkaS", "", tp)
+    assert [s["t"] for s in segs] == ["txt", "em", "txt", "em"]
+    assert segs[1] == {"t": "em", "id": "", "v": "KEKW",
+                       "url": "https://cdn.7tv.app/emote/01F/2x.webp"}
+    assert segs[2] == {"t": "txt", "v": " yes "}
+    assert segs[3]["v"] == "monkaS"
+    assert "".join(s["v"] for s in segs) == "lol KEKW yes monkaS"
+    # only whole tokens match — a substring like KEKW inside a word is left alone
+    assert R.twitch_segments("aKEKWb", "", tp) == [{"t": "txt", "v": "aKEKWb"}]
+
+
+def test_twitch_segments_thirdparty_after_firstparty():
+    # first-party Kappa (id 25) at 0-4, then 7TV KEKW as a plain token
+    tp = {"KEKW": "https://cdn.7tv.app/emote/01F/2x.webp"}
+    segs = R.twitch_segments("Kappa KEKW", "25:0-4", tp)
+    assert segs[0]["v"] == "Kappa" and segs[0]["url"].startswith("https://static-cdn.jtvnw.net/")
+    assert segs[1] == {"t": "txt", "v": " "}
+    assert segs[2] == {"t": "em", "id": "", "v": "KEKW",
+                       "url": "https://cdn.7tv.app/emote/01F/2x.webp"}
+
+
+def test_twitch_segments_no_thirdparty_map_is_noop():
+    assert R.twitch_segments("KEKW here", "") == [{"t": "txt", "v": "KEKW here"}]
+    assert R.twitch_segments("KEKW here", "", {}) == [{"t": "txt", "v": "KEKW here"}]
+
+
 def test_parse_privmsg_carries_segments_and_untouched_text():
     line = ("@badges=;color=;display-name=V;emotes=25:3-7 "
             ":v!v@v.tmi.twitch.tv PRIVMSG #xqc :gg Kappa")
