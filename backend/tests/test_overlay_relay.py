@@ -22,9 +22,44 @@ def test_normalize_target_other_channel():
     assert R.normalize_target("@dishwasher ") == "dishwasher"
 
 
-def test_normalize_target_kick_falls_back_to_own():
-    # v1 is Twitch-only; a kick: target must not try to JOIN a bogus IRC channel.
-    assert R.normalize_target("kick:trainwreck") == OWN
+def test_normalize_target_kick():
+    # v2: kick: and the k: short form are real targets (not a fallback to own).
+    assert R.normalize_target("kick:trainwreck") == "kick:trainwreck"
+    assert R.normalize_target("k:Roshtein") == "kick:roshtein"
+    assert R.normalize_target("KICK:#BBJess ") == "kick:bbjess"
+    assert R.is_kick("kick:trainwreck") is True
+    assert R.is_kick("xqc") is False
+    # an empty slug is not a channel — fall back to own chat.
+    assert R.normalize_target("kick:") == OWN
+    assert R.normalize_target("k:") == OWN
+
+
+def test_parse_kick_event():
+    import json
+    inner = json.dumps({
+        "content": "KEKW that clip",
+        "sender": {"username": "Roshtein_fan",
+                   "identity": {"color": "#E9113C",
+                                "badges": [{"type": "subscriber", "count": 5},
+                                           {"type": "moderator"}]}},
+    })
+    frame = json.dumps({"event": "App\\Events\\ChatMessageEvent", "data": inner})
+    msg = R.parse_kick_event(frame, "roshtein")
+    assert msg["user"] == "Roshtein_fan"
+    assert msg["color"] == "#E9113C"
+    assert msg["badges"] == ["subscriber", "moderator"]
+    assert msg["text"] == "KEKW that clip"
+    assert msg["channel"] == "kick:roshtein"
+
+
+def test_parse_kick_event_ignores_non_chat():
+    import json
+    for frame in (
+        json.dumps({"event": "pusher:ping", "data": {}}),
+        json.dumps({"event": "App\\Events\\SubscriptionEvent", "data": "{}"}),
+        "not json",
+    ):
+        assert R.parse_kick_event(frame, "roshtein") is None
 
 
 def test_parse_privmsg_full_tags():
