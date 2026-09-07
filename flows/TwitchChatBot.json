@@ -876,6 +876,7 @@
               "gif_request": "${chat_action:equals('gif_request')}",
               "Routing Strategy": "Route to Property name",
               "roster_edit": "${chat_action:startsWith('roster_')}",
+              "overlay_relay": "${command:equals('overlay_relay')}",
               "watchlist_add": "${chat_action:equals('watchlist_add')}",
               "clip_request": "${chat_action:equals('clip_request')}"
             },
@@ -897,6 +898,13 @@
               "roster_edit": {
                 "name": "roster_edit",
                 "displayName": "roster_edit",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": true
+              },
+              "overlay_relay": {
+                "name": "overlay_relay",
+                "displayName": "overlay_relay",
                 "identifiesControllerService": false,
                 "sensitive": false,
                 "dynamic": true
@@ -1382,6 +1390,333 @@
             "groupIdentifier": "98c4dd0d-c4e0-3eac-964b-55f932aba853"
           },
           {
+            "identifier": "f14ffdc7-db30-3b1c-82fe-d698844d56db",
+            "instanceIdentifier": "78d02d5b-01a0-1000-ffff-ffffbfdd4d8e",
+            "name": "InvokeOverlayRelay",
+            "comments": "",
+            "position": {
+              "x": 1100.0,
+              "y": 400.0
+            },
+            "type": "org.apache.nifi.processors.standard.InvokeHTTP",
+            "bundle": {
+              "group": "org.apache.nifi",
+              "artifact": "nifi-standard-nar",
+              "version": "2.6.0.4.3.4.0-234"
+            },
+            "properties": {
+              "Request Content-Encoding": "DISABLED",
+              "proxy-configuration-service": null,
+              "Request Multipart Form-Data Filename Enabled": "true",
+              "Request Chunked Transfer-Encoding Enabled": "false",
+              "Response Header Request Attributes Prefix": null,
+              "HTTP/2 Disabled": "False",
+              "Connection Timeout": "5 secs",
+              "Response Cookie Strategy": "DISABLED",
+              "Socket Read Timeout": "15 secs",
+              "Socket Idle Connections": "5",
+              "Request Body Enabled": "true",
+              "OAuth2 Access Token Refresh Strategy": "ON_TOKEN_EXPIRATION",
+              "HTTP URL": "http://cso-operator-app.default.svc.cluster.local:8090/api/overlay/relay",
+              "Request OAuth2 Access Token Provider": null,
+              "Socket Idle Timeout": "5 mins",
+              "Response Redirects Enabled": "True",
+              "Socket Write Timeout": "15 secs",
+              "Request Header Attributes Pattern": null,
+              "Response FlowFile Naming Strategy": "RANDOM",
+              "Response Cache Enabled": "false",
+              "Request Date Header Enabled": "True",
+              "Request Failure Penalization Enabled": "false",
+              "Response Body Attribute Size": "256",
+              "SSL Context Service": null,
+              "Response Generation Required": "false",
+              "Request User-Agent": null,
+              "Response Header Request Attributes Enabled": "false",
+              "HTTP Method": "POST",
+              "Request Username": null,
+              "Request Content-Type": "application/json",
+              "Response Body Attribute Name": null,
+              "Request Digest Authentication Enabled": "false",
+              "Request Multipart Form-Data Name": null,
+              "Response Cache Size": "10MB",
+              "Response Body Ignored": "false"
+            },
+            "propertyDescriptors": {
+              "Request Content-Encoding": {
+                "name": "Request Content-Encoding",
+                "displayName": "Request Content-Encoding",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "proxy-configuration-service": {
+                "name": "proxy-configuration-service",
+                "displayName": "Proxy Configuration Service",
+                "identifiesControllerService": true,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Multipart Form-Data Filename Enabled": {
+                "name": "Request Multipart Form-Data Filename Enabled",
+                "displayName": "Request Multipart Form-Data Filename Enabled",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Chunked Transfer-Encoding Enabled": {
+                "name": "Request Chunked Transfer-Encoding Enabled",
+                "displayName": "Request Chunked Transfer-Encoding Enabled",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response Header Request Attributes Prefix": {
+                "name": "Response Header Request Attributes Prefix",
+                "displayName": "Response Header Request Attributes Prefix",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "HTTP/2 Disabled": {
+                "name": "HTTP/2 Disabled",
+                "displayName": "HTTP/2 Disabled",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Connection Timeout": {
+                "name": "Connection Timeout",
+                "displayName": "Connection Timeout",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response Cookie Strategy": {
+                "name": "Response Cookie Strategy",
+                "displayName": "Response Cookie Strategy",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Password": {
+                "name": "Request Password",
+                "displayName": "Request Password",
+                "identifiesControllerService": false,
+                "sensitive": true,
+                "dynamic": false
+              },
+              "Socket Read Timeout": {
+                "name": "Socket Read Timeout",
+                "displayName": "Socket Read Timeout",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Socket Idle Connections": {
+                "name": "Socket Idle Connections",
+                "displayName": "Socket Idle Connections",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Body Enabled": {
+                "name": "Request Body Enabled",
+                "displayName": "Request Body Enabled",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "OAuth2 Access Token Refresh Strategy": {
+                "name": "OAuth2 Access Token Refresh Strategy",
+                "displayName": "OAuth2 Access Token Refresh Strategy",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "HTTP URL": {
+                "name": "HTTP URL",
+                "displayName": "HTTP URL",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request OAuth2 Access Token Provider": {
+                "name": "Request OAuth2 Access Token Provider",
+                "displayName": "Request OAuth2 Access Token Provider",
+                "identifiesControllerService": true,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Socket Idle Timeout": {
+                "name": "Socket Idle Timeout",
+                "displayName": "Socket Idle Timeout",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response Redirects Enabled": {
+                "name": "Response Redirects Enabled",
+                "displayName": "Response Redirects Enabled",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Socket Write Timeout": {
+                "name": "Socket Write Timeout",
+                "displayName": "Socket Write Timeout",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Header Attributes Pattern": {
+                "name": "Request Header Attributes Pattern",
+                "displayName": "Request Header Attributes Pattern",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response FlowFile Naming Strategy": {
+                "name": "Response FlowFile Naming Strategy",
+                "displayName": "Response FlowFile Naming Strategy",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response Cache Enabled": {
+                "name": "Response Cache Enabled",
+                "displayName": "Response Cache Enabled",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Date Header Enabled": {
+                "name": "Request Date Header Enabled",
+                "displayName": "Request Date Header Enabled",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Failure Penalization Enabled": {
+                "name": "Request Failure Penalization Enabled",
+                "displayName": "Request Failure Penalization Enabled",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response Body Attribute Size": {
+                "name": "Response Body Attribute Size",
+                "displayName": "Response Body Attribute Size",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "SSL Context Service": {
+                "name": "SSL Context Service",
+                "displayName": "SSL Context Service",
+                "identifiesControllerService": true,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response Generation Required": {
+                "name": "Response Generation Required",
+                "displayName": "Response Generation Required",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request User-Agent": {
+                "name": "Request User-Agent",
+                "displayName": "Request User-Agent",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response Header Request Attributes Enabled": {
+                "name": "Response Header Request Attributes Enabled",
+                "displayName": "Response Header Request Attributes Enabled",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "HTTP Method": {
+                "name": "HTTP Method",
+                "displayName": "HTTP Method",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Username": {
+                "name": "Request Username",
+                "displayName": "Request Username",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Content-Type": {
+                "name": "Request Content-Type",
+                "displayName": "Request Content-Type",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response Body Attribute Name": {
+                "name": "Response Body Attribute Name",
+                "displayName": "Response Body Attribute Name",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Digest Authentication Enabled": {
+                "name": "Request Digest Authentication Enabled",
+                "displayName": "Request Digest Authentication Enabled",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Request Multipart Form-Data Name": {
+                "name": "Request Multipart Form-Data Name",
+                "displayName": "Request Multipart Form-Data Name",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response Cache Size": {
+                "name": "Response Cache Size",
+                "displayName": "Response Cache Size",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              },
+              "Response Body Ignored": {
+                "name": "Response Body Ignored",
+                "displayName": "Response Body Ignored",
+                "identifiesControllerService": false,
+                "sensitive": false,
+                "dynamic": false
+              }
+            },
+            "style": {},
+            "schedulingPeriod": "0 sec",
+            "schedulingStrategy": "TIMER_DRIVEN",
+            "executionNode": "ALL",
+            "penaltyDuration": "30 sec",
+            "yieldDuration": "1 sec",
+            "bulletinLevel": "WARN",
+            "runDurationMillis": 0,
+            "concurrentlySchedulableTaskCount": 1,
+            "autoTerminatedRelationships": [
+              "Response",
+              "Original"
+            ],
+            "scheduledState": "ENABLED",
+            "retryCount": 10,
+            "retriedRelationships": [],
+            "backoffMechanism": "PENALIZE_FLOWFILE",
+            "maxBackoffPeriod": "10 mins",
+            "componentType": "PROCESSOR",
+            "groupIdentifier": "98c4dd0d-c4e0-3eac-964b-55f932aba853"
+          },
+          {
             "identifier": "bffe34a3-b4d6-3708-9dd8-dcb61a49d9b5",
             "instanceIdentifier": "99466a3f-f775-3b37-90b9-202818fa49ca",
             "name": "InvokeWatchlistAdd",
@@ -1729,6 +2064,40 @@
         "outputPorts": [],
         "connections": [
           {
+            "identifier": "8784124f-d023-3081-a2e1-d143e1742834",
+            "instanceIdentifier": "78d14f0f-01a0-1000-0000-000068cd24c1",
+            "source": {
+              "id": "f14ffdc7-db30-3b1c-82fe-d698844d56db",
+              "type": "PROCESSOR",
+              "groupId": "98c4dd0d-c4e0-3eac-964b-55f932aba853",
+              "name": "InvokeOverlayRelay",
+              "comments": "",
+              "instanceIdentifier": "78d02d5b-01a0-1000-ffff-ffffbfdd4d8e"
+            },
+            "destination": {
+              "id": "51a828c8-3246-34f7-807c-cc1de9481393",
+              "type": "PROCESSOR",
+              "groupId": "98c4dd0d-c4e0-3eac-964b-55f932aba853",
+              "name": "LogChatTriggerFailure",
+              "comments": "",
+              "instanceIdentifier": "fa1572a7-6cdf-3703-9f8d-1d1006bc5418"
+            },
+            "labelIndex": 1,
+            "zIndex": 0,
+            "selectedRelationships": [
+              "No Retry"
+            ],
+            "backPressureObjectThreshold": 10000,
+            "backPressureDataSizeThreshold": "1 GB",
+            "flowFileExpiration": "0 sec",
+            "prioritizers": [],
+            "bends": [],
+            "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+            "loadBalanceCompression": "DO_NOT_COMPRESS",
+            "componentType": "CONNECTION",
+            "groupIdentifier": "98c4dd0d-c4e0-3eac-964b-55f932aba853"
+          },
+          {
             "identifier": "b2f7e414-3f21-3ff7-be86-e69ee8382ee7",
             "instanceIdentifier": "7d4e759f-6c12-3172-a072-303aa06fe247",
             "name": "clip-fail",
@@ -1835,6 +2204,40 @@
             "groupIdentifier": "98c4dd0d-c4e0-3eac-964b-55f932aba853"
           },
           {
+            "identifier": "8abb31d2-62ed-3462-84c3-963c72cb60a7",
+            "instanceIdentifier": "78d14cd6-01a0-1000-ffff-ffff8629c99d",
+            "source": {
+              "id": "f14ffdc7-db30-3b1c-82fe-d698844d56db",
+              "type": "PROCESSOR",
+              "groupId": "98c4dd0d-c4e0-3eac-964b-55f932aba853",
+              "name": "InvokeOverlayRelay",
+              "comments": "",
+              "instanceIdentifier": "78d02d5b-01a0-1000-ffff-ffffbfdd4d8e"
+            },
+            "destination": {
+              "id": "51a828c8-3246-34f7-807c-cc1de9481393",
+              "type": "PROCESSOR",
+              "groupId": "98c4dd0d-c4e0-3eac-964b-55f932aba853",
+              "name": "LogChatTriggerFailure",
+              "comments": "",
+              "instanceIdentifier": "fa1572a7-6cdf-3703-9f8d-1d1006bc5418"
+            },
+            "labelIndex": 1,
+            "zIndex": 0,
+            "selectedRelationships": [
+              "Failure"
+            ],
+            "backPressureObjectThreshold": 10000,
+            "backPressureDataSizeThreshold": "1 GB",
+            "flowFileExpiration": "0 sec",
+            "prioritizers": [],
+            "bends": [],
+            "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+            "loadBalanceCompression": "DO_NOT_COMPRESS",
+            "componentType": "CONNECTION",
+            "groupIdentifier": "98c4dd0d-c4e0-3eac-964b-55f932aba853"
+          },
+          {
             "identifier": "60a17e6c-98bc-3838-8d79-78b42a1da124",
             "instanceIdentifier": "1957269d-8918-3ff1-b607-f2d237310339",
             "name": "clip-retry",
@@ -1897,6 +2300,40 @@
             "backPressureObjectThreshold": 10000,
             "backPressureDataSizeThreshold": "1 GB",
             "flowFileExpiration": "0 sec",
+            "prioritizers": [],
+            "bends": [],
+            "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+            "loadBalanceCompression": "DO_NOT_COMPRESS",
+            "componentType": "CONNECTION",
+            "groupIdentifier": "98c4dd0d-c4e0-3eac-964b-55f932aba853"
+          },
+          {
+            "identifier": "c87b46f0-793a-3f61-873b-3868a3769a4a",
+            "instanceIdentifier": "78d14a6f-01a0-1000-ffff-ffffbf5f56e9",
+            "source": {
+              "id": "f14ffdc7-db30-3b1c-82fe-d698844d56db",
+              "type": "PROCESSOR",
+              "groupId": "98c4dd0d-c4e0-3eac-964b-55f932aba853",
+              "name": "InvokeOverlayRelay",
+              "comments": "",
+              "instanceIdentifier": "78d02d5b-01a0-1000-ffff-ffffbfdd4d8e"
+            },
+            "destination": {
+              "id": "f14ffdc7-db30-3b1c-82fe-d698844d56db",
+              "type": "PROCESSOR",
+              "groupId": "98c4dd0d-c4e0-3eac-964b-55f932aba853",
+              "name": "InvokeOverlayRelay",
+              "comments": "",
+              "instanceIdentifier": "78d02d5b-01a0-1000-ffff-ffffbfdd4d8e"
+            },
+            "labelIndex": 1,
+            "zIndex": 0,
+            "selectedRelationships": [
+              "Retry"
+            ],
+            "backPressureObjectThreshold": 10000,
+            "backPressureDataSizeThreshold": "1 GB",
+            "flowFileExpiration": "10 mins",
             "prioritizers": [],
             "bends": [],
             "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
@@ -2032,6 +2469,40 @@
             "zIndex": 0,
             "selectedRelationships": [
               "gif_request"
+            ],
+            "backPressureObjectThreshold": 10000,
+            "backPressureDataSizeThreshold": "1 GB",
+            "flowFileExpiration": "0 sec",
+            "prioritizers": [],
+            "bends": [],
+            "loadBalanceStrategy": "DO_NOT_LOAD_BALANCE",
+            "loadBalanceCompression": "DO_NOT_COMPRESS",
+            "componentType": "CONNECTION",
+            "groupIdentifier": "98c4dd0d-c4e0-3eac-964b-55f932aba853"
+          },
+          {
+            "identifier": "dbea672d-cc6b-3375-bcb1-b96667f4aa07",
+            "instanceIdentifier": "78d14827-01a0-1000-0000-00005d40c4be",
+            "source": {
+              "id": "e58f23e7-465b-3631-82ee-f4a4d4665b78",
+              "type": "PROCESSOR",
+              "groupId": "98c4dd0d-c4e0-3eac-964b-55f932aba853",
+              "name": "RouteChatAction",
+              "comments": "",
+              "instanceIdentifier": "238b5cf0-3720-369f-8ce4-9ae1e53754f8"
+            },
+            "destination": {
+              "id": "f14ffdc7-db30-3b1c-82fe-d698844d56db",
+              "type": "PROCESSOR",
+              "groupId": "98c4dd0d-c4e0-3eac-964b-55f932aba853",
+              "name": "InvokeOverlayRelay",
+              "comments": "",
+              "instanceIdentifier": "78d02d5b-01a0-1000-ffff-ffffbfdd4d8e"
+            },
+            "labelIndex": 1,
+            "zIndex": 0,
+            "selectedRelationships": [
+              "overlay_relay"
             ],
             "backPressureObjectThreshold": 10000,
             "backPressureDataSizeThreshold": "1 GB",
@@ -4385,7 +4856,7 @@
         "bundle": {
           "group": "org.apache.nifi",
           "artifact": "python-extensions",
-          "version": "0.0.28-SNAPSHOT"
+          "version": "0.0.29-SNAPSHOT"
         },
         "properties": {
           "Bot Username": "tunastreettest",
@@ -4400,6 +4871,7 @@
           "Refresh Token": "#{twitch-bot-refresh-token}",
           "Watchlist API URL": "http://cso-operator-app.default.svc.cluster.local:8090/api/streamers/watchlist",
           "Cooldown Seconds": "10",
+          "Overlay Command": "!chat",
           "Trigger Vote Count": "3",
           "Watchlist Cooldown Seconds": "60",
           "Clip Trigger Enabled": "true",
@@ -4492,6 +4964,13 @@
           "Cooldown Seconds": {
             "name": "Cooldown Seconds",
             "displayName": "Cooldown Seconds",
+            "identifiesControllerService": false,
+            "sensitive": false,
+            "dynamic": false
+          },
+          "Overlay Command": {
+            "name": "Overlay Command",
+            "displayName": "Overlay Command",
             "identifiesControllerService": false,
             "sensitive": false,
             "dynamic": false

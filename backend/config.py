@@ -120,6 +120,13 @@ class Settings(BaseSettings):
     PROCESSED_CLIPS_TOPIC: str = "processed_clips"
     TOPIC_CHAT_ACTIVITY: str = "twitch_chat_activity"
 
+    # Overlay chat relay (#300) — the left-side colorful chat column for
+    # @tunastarlink. The relay holds one anon Twitch IRC socket, defaults to the
+    # own channel below, and publishes each relayed message to this topic (mirror
+    # twitch_chat_activity's short retention via Surveyor after first produce).
+    OVERLAY_RELAY_TOPIC: str = "overlay_chat_relay"
+    OVERLAY_OWN_CHANNEL: str = "tunastarlink"
+
     # Toggle for the glitch-intro burn in _fetch_twitch_clips/_fetch_kick_clips.
     # Set false to pause it without touching the ffmpeg pipeline itself.
     GLITCH_INTRO_ENABLED: bool = True
