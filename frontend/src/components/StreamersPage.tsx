@@ -1337,7 +1337,7 @@ function RosterGrid({ onOpenKb }: { onOpenKb?: (key: string) => void }) {
   );
 }
 
-function WatchList({ onOpenKb }: { onOpenKb?: (key: string) => void }) {
+function WatchList() {
   const [logins, setLogins] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const [platform, setPlatform] = useState<"twitch" | "kick">("twitch");
@@ -1490,16 +1490,6 @@ function WatchList({ onOpenKb }: { onOpenKb?: (key: string) => void }) {
                     <Badge tone={liveStatus[login] ? "ok" : "neutral"}>
                       {liveStatus[login] ? "LIVE" : "offline"}
                     </Badge>
-                  )}
-                  {onOpenKb && (
-                    <button
-                      onClick={() => onOpenKb(login)}
-                      className="text-muted hover:text-accent ml-1"
-                      title={`Open ${displayName} in the Streamers KB`}
-                      aria-label={`Open ${login} in the Streamers KB`}
-                    >
-                      KB →
-                    </button>
                   )}
                   <button
                     onClick={() => remove(login)}
@@ -2435,7 +2425,7 @@ export function StreamersPage() {
       </Card>
 
       {/* ── Section 2: Watch List ──────────────────────────────────── */}
-      <WatchList onOpenKb={openKb} />
+      <WatchList />
 
       {/* ── Section 3: Kafka Topics ────────────────────────────────── */}
       <Card>
