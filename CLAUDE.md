@@ -2,6 +2,8 @@
 
 This is Steven's live production app — real X posts go out from here. Read `DesktopShare/CLAUDE.md` first (project-wide rules — the repo is wherever DesktopShare is checked out on this device, see `DesktopShare/CLAUDE-CHECKIN.md`); this file is app-specific detail on top of it.
 
+**Commit directly to `main` — don't auto-branch.** This repo works entirely on `main` (no feature branches); the harness's "branch first on the default branch" default is overridden here. Commit/push discipline otherwise follows `DesktopShare/agent/workflow.md` (only when asked, or the issue-finish ritual; no `Co-Authored-By` trailers).
+
 ## Before touching backend/services/streamers.py
 
 This file (2000+ lines) is where every real incident in this project has originated (credential wipes, duration/OOM bugs, caption regressions). Before adding anything to it:
