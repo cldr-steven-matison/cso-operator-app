@@ -1059,8 +1059,13 @@ _FACE_UI_STATIC_PX = 1.5      # center stddev below this = static UI element, dr
 # streamer's own burned-in captions / HUD scoreboard, and source pillarbox
 # black into the earlier cuts.
 _FACE_PAD_X = 0.30            # side padding, in median face widths
-_FACE_PAD_TOP = 0.40          # headroom above the face box, in face heights
-_FACE_PAD_BOTTOM = 0.55       # chin/shoulders below the face box
+# Vertical padding is near-balanced (was 0.40/0.55): the old bottom-heavy pair
+# pulled the square's centre below the face and inflated its side, so a full-
+# facecam clip (no webcam-box border to clamp against) framed the face high with
+# a slab of chest/neck below — read as "cropped too low" (jynxzi customerservice
+# / dent of hell, 2026-09-14). Slight top-lead keeps headroom without the drop.
+_FACE_PAD_TOP = 0.45          # headroom above the face box, in face heights
+_FACE_PAD_BOTTOM = 0.30       # chin/shoulders below the face box
 _FACE_MAX_CROP = 3.2          # crop extent cap, in face widths/heights
 _BAR_GUARD_PX = 4             # keep this far below the overlay bar (rounding)
 _GIF_MAX_UPSCALE = 2.2        # a tight crop may be scaled up this much toward the 720 rung
