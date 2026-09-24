@@ -89,7 +89,7 @@ async def _ping_kafka() -> dict:
 
 
 async def _ping_kb(client: httpx.AsyncClient) -> dict:
-    """The DesktopShare KB on kb-do: its MCP endpoint answers 400/405 to a bare
+    """The BrainShare KB on kb-do: its MCP endpoint answers 400/405 to a bare
     authenticated GET and 302s to the main site without the bearer, so
     'reachable and the bearer is accepted' is any answer that is not a
     redirect, a 401/403 or a server error."""
