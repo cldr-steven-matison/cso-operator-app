@@ -224,6 +224,20 @@ async def serve_clip(clip_id: str):
     return FileResponse(path, media_type="video/mp4")
 
 
+@router.get("/srt/{clip_id}")
+async def serve_srt(clip_id: str):
+    """The clip's subtitle file, written by process_clip beside the mp4. The home
+    DOBridge tap ships it to streamers-do so a tweet posted there keeps its
+    subtitles (_publish_sync attaches {clip_id}.srt when it sits beside the mp4).
+    404 when the clip had no transcript."""
+    if not re.match(r'^[A-Za-z0-9_\-]+$', clip_id):
+        raise HTTPException(status_code=400, detail="Invalid clip_id")
+    path = Path(settings.CLIP_STORAGE_PATH) / f"{clip_id}.srt"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No subtitles for this clip")
+    return FileResponse(path, media_type="text/srt")
+
+
 # ── NiFi-callable pipeline endpoints ─────────────────────────────────────────
 # These are called by the FetchClips and ProcessClips NiFi flows.
 
@@ -360,7 +374,7 @@ async def reset_kafka():
 # review queue already hides a record whose file isn't there yet, so a card
 # appears only once both have landed. Surface role only.
 
-_INGEST_EXT = {"clip": ".mp4", "gif": ".gif"}
+_INGEST_EXT = {"clip": ".mp4", "gif": ".gif", "srt": ".srt"}  # srt: media only
 
 
 def _producer_only() -> None:
@@ -394,6 +408,8 @@ async def ingest_record(request: Request, kind: str = "clip"):
         raise HTTPException(status_code=400, detail="Expected a JSON object")
     clip_id = record.get("clip_id", "")
     _check_ingest(request, kind, clip_id)
+    if kind == "srt":
+        raise HTTPException(status_code=400, detail="srt is media only; PUT /ingest/media")
     from services import clip_store
 
     dest = Path(settings.CLIP_STORAGE_PATH) / f"{clip_id}{_INGEST_EXT[kind]}"
