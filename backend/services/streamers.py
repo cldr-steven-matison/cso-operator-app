@@ -1015,7 +1015,7 @@ _OVERLAY_LOGO_HEIGHT_RATIO = {"kick": 0.13, "twitch": 0.16}
 
 # Tiny tuna mascot, placed right before the PLATFORM.COM/HANDLE label. Sized off
 # font_size (not bar_h) so it scales with the text rather than the bar. Ratios
-# tuned against a mockup on DesktopShare issue #87 (Steven: "perfect, ship that").
+# tuned against a mockup on BrainShare issue #87 (Steven: "perfect, ship that").
 _TUNA_ICON = _ASSETS_DIR / "icons" / "tuna.png"
 _TUNA_ICON_HEIGHT_RATIO = 1.7
 _TUNA_ICON_GAP_RATIO = 0.4
@@ -1859,7 +1859,7 @@ def _burn_platform_overlay(dest: Path, source: str, streamer: str) -> int:
 
     # Shrink the font (down to a floor) if the label would otherwise run into
     # the logo — long streamer names at the fixed base size overflowed past
-    # the available width (DesktopShare issue #135). Both the label text and
+    # the available width (BrainShare issue #135). Both the label text and
     # the tuna icon scale ~linearly with font_size, so measuring once at the
     # base size and scaling by the overflow ratio gets the fit right without
     # iterating.
@@ -2329,7 +2329,7 @@ def set_fetch_mode(mode: str, period: str) -> dict:
 
 
 # Catalog: bare login (lowercase) → X handle (no @ prefix).
-# Source of truth: DesktopShare/streamers.md — keep both in sync when adding streamers.
+# Source of truth: BrainShare/streamers.md — keep both in sync when adding streamers.
 _STREAMER_CATALOG: dict[str, str] = {
     # Twitch
     "xqc":            "xQc",
@@ -2475,7 +2475,7 @@ async def resolve_x_handle(client: httpx.AsyncClient, platform: str, login: str)
 
 
 # Per-streamer paths — mirrors the Clip/GIF/GIF→X columns in
-# DesktopShare/streamers/streamers.md; keep both in sync when changing a streamer.
+# BrainShare/streamers/streamers.md; keep both in sync when changing a streamer.
 #
 # clip     = caption the clip and post the MP4 to X (the original path).
 # gif      = cut a reaction GIF from the clip. Defaults ON for everyone (#195):
@@ -2715,7 +2715,7 @@ def approve_clip(
     """Queue a clip for X publishing. Returns immediately — NiFi drains the queue.
 
     One approval fans out per the streamer's posting paths (streamer_paths /
-    DesktopShare/streamers.md): clip=Y queues the MP4 as before; gif=Y also
+    BrainShare/streamers.md): clip=Y queues the MP4 as before; gif=Y also
     queues the reaction GIF process_clip cut next to it, as its own pending
     entry under "{clip_id}-gif" with the same tweet text. A gif-only streamer
     (clip=N) queues just the GIF — the MP4 is never posted.

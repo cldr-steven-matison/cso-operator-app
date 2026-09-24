@@ -23,7 +23,7 @@ spec:
             - configMapRef:
                 name: cso-operator-app-config
           env:
-            # mTLS to the userCertAuth prod NiFi (DesktopShare files/cso-prod-1/user-cso-operator-app.yaml
+            # mTLS to the userCertAuth prod NiFi (BrainShare files/cso-prod-1/user-cso-operator-app.yaml
             # mints the cert + declares the NiFi User). Unset on a singleUserAuth cluster.
             - name: NIFI_CLIENT_CERT
               value: /etc/nifi-client/tls.crt

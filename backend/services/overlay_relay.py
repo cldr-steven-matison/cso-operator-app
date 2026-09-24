@@ -2,7 +2,7 @@
 SSE subscribers and Kafka ``overlay_chat_relay``.
 
 Feeds the left-side colorful chat column in
-``overlays/tunastarlink/overlay.html`` (DesktopShare). The idle target is
+``overlays/tunastarlink/overlay.html`` (BrainShare). The idle target is
 @tunastarlink's own Twitch chat; ``POST /api/overlay/relay {"channel": ...}``
 repoints it at another streamer for raids/collabs.
 

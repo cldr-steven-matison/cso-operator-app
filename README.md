@@ -17,7 +17,7 @@ One screen drives, depending on which [modules](#modules) are enabled:
   (`samples/efm-demos.json`). The catalog is per-`agentClass`; each entry
   declares a Kafka topic + `expect` block, so the panel verifies
   end-to-end and shows a `PASS / FAIL` badge.
-- **Streamers** — fetches Twitch/Kick clips on a watch list, transcribes (Whisper) and captions (vLLM) them, queues them for review, and publishes approved ones to X with commentary. Also runs `LiveStreamerAlert` (NiFi-native, posts "streamer is live" to X/Twitch chat) and a watchlist chat-join bot. Real X/Twitch/Kick credentials, real posts — not a demo. Full detail: [DesktopShare/streamers/](https://github.com/cldr-steven-matison/DesktopShare/blob/main/streamers/README.md) — start at that README, it carries the live process-group inventory and the operating rules.
+- **Streamers** — fetches Twitch/Kick clips on a watch list, transcribes (Whisper) and captions (vLLM) them, queues them for review, and publishes approved ones to X with commentary. Also runs `LiveStreamerAlert` (NiFi-native, posts "streamer is live" to X/Twitch chat) and a watchlist chat-join bot. Real X/Twitch/Kick credentials, real posts — not a demo. Full detail: [BrainShare/streamers/](https://github.com/cldr-steven-matison/BrainShare/blob/main/streamers/README.md) — start at that README, it carries the live process-group inventory and the operating rules.
 
 The Operator/RAG/EFM pieces are a local demo only — no auth, no production hardening. The Streamers module is real: real accounts, real posts, real credentials injected via `kubectl set env` (never in YAML/ConfigMaps).
 
@@ -48,9 +48,9 @@ make deploy MODULES=                      # Operator only, explicit bare minimum
 
 ## Sources
 
-- Plan: [DesktopShare/cso-operator-app-plan.md](https://github.com/cldr-steven-matison/DesktopShare/blob/main/cso-operator-app-plan.md)
-- Streamers module — front door, live PG inventory, operating runbook: [DesktopShare/streamers/README.md](https://github.com/cldr-steven-matison/DesktopShare/blob/main/streamers/README.md)
-- Streamers module — full spec, API endpoints, NiFi flow configs, session history: [DesktopShare/streamers/cso-operator-app-streamers.md](https://github.com/cldr-steven-matison/DesktopShare/blob/main/streamers/cso-operator-app-streamers.md)
+- Plan: [BrainShare/cso-operator-app-plan.md](https://github.com/cldr-steven-matison/BrainShare/blob/main/cso-operator-app-plan.md)
+- Streamers module — front door, live PG inventory, operating runbook: [BrainShare/streamers/README.md](https://github.com/cldr-steven-matison/BrainShare/blob/main/streamers/README.md)
+- Streamers module — full spec, API endpoints, NiFi flow configs, session history: [BrainShare/streamers/cso-operator-app-streamers.md](https://github.com/cldr-steven-matison/BrainShare/blob/main/streamers/cso-operator-app-streamers.md)
 - Blog — [RAG with Cloudera Streaming Operators](https://cldr-steven-matison.github.io/blog/RAG-with-Cloudera-Streaming-Operators/)
 - Blog — [Insanely Fast Audio Transcription with Cloudera Streaming Operators](https://cldr-steven-matison.github.io/blog/Audio-Transcription-with-Cloudera-Streaming-Operators/)
 - Backing YAMLs — [ClouderaStreamingOperators](https://github.com/cldr-steven-matison/ClouderaStreamingOperators)
@@ -68,7 +68,7 @@ flows/      CSOOperatorApp.json — RAG/ingest flow export, three process groups
             actually named CSOOperatorAppWindows in this NiFi instance, not
             CSOOperatorApp — file kept at its established name, just flagging
             the mismatch. Also TwitchChatBot.json — the Twitch chat-command
-            stream-loader bot (see DesktopShare/streamers-twitch-bot.md);
+            stream-loader bot (see BrainShare/streamers-twitch-bot.md);
             doesn't call this app's backend at all, lives here rather than
             streamers/ since it's not really a Streamers-module flow
 streamers/  StreamersApp.json (NiFi flow export), WatchlistChatJoiner.json
@@ -116,7 +116,7 @@ make frontend                # unchanged
 ```
 
 Switch back with `make bootstrap STACK=gpu`. See
-[DesktopShare/cso-operator-app-plan.md → CPU variant](https://github.com/cldr-steven-matison/DesktopShare/blob/main/cso-operator-app-plan.md#cpu-variant-mac-no-gpu)
+[BrainShare/cso-operator-app-plan.md → CPU variant](https://github.com/cldr-steven-matison/BrainShare/blob/main/cso-operator-app-plan.md#cpu-variant-mac-no-gpu)
 for details and performance ceilings.
 
 ## Quick start (Windows)
