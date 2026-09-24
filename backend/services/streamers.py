@@ -33,7 +33,14 @@ from services import roster_store
 
 logger = logging.getLogger(__name__)
 
-STREAMER_PG_NAMES = ("FetchClips", "ProcessClips", "PublishClipOffPeakDay", "PublishClipPeakTimeCron")
+# Home keeps the clip pipeline and the posting crons (the archive lives there);
+# the DO twins on nifi-do are the bots and the alert/watch-list posters (#382).
+# The surface resolves DO_FLOWS on nifi-do directly and shows HOME_FLOWS from
+# home's flow_state push, relaying start/stop over the bridge.
+HOME_FLOWS = ("FetchClips", "ProcessClips", "PublishClipOffPeakDay", "PublishClipPeakTimeCron")
+DO_FLOWS = ("LiveStreamerAlert", "PostWatchList", "TwitchChatBot", "WatchlistChatJoiner",
+            "TopStreamerJoiner", "OnScreenAnnouncer", "KickOnScreenAnnouncer", "WatchlistSync")
+STREAMER_PG_NAMES = DO_FLOWS if settings.ROLE == "surface" else HOME_FLOWS
 
 # LiveStreamerAlert's PollTimer (GenerateFlowFile) is CRON_DRIVEN and RUNNING as
 # its normal resting state (0 0/30 20-23,0-3 * * ? as of 2026-07-23 — Steven's
@@ -326,6 +333,38 @@ async def _fetch_clips_state(client: httpx.AsyncClient, pg_id: str) -> str:
         return "UNKNOWN"
 
 
+# The surface's view of the home flows: home NiFi pushes GET /flows over the
+# bridge every 60 s (flow_state, #382); the surface serves it with its age.
+_home_flow_state: dict = {}
+_home_services: dict = {}
+_home_flow_state_at: float = 0.0
+
+
+def set_home_flow_state(payload: dict) -> dict:
+    """Two shapes: the bare /flows dict, or /home-state's {"flows": …, "services": …}."""
+    global _home_flow_state, _home_services, _home_flow_state_at
+    if isinstance(payload.get("flows"), dict):
+        _home_flow_state = {k: v for k, v in payload["flows"].items() if isinstance(v, dict)}
+        _home_services = {k: v for k, v in (payload.get("services") or {}).items() if isinstance(v, dict)}
+    else:
+        _home_flow_state = {k: v for k, v in payload.items() if isinstance(v, dict)}
+    _home_flow_state_at = time.time()
+    return {"ok": True, "flows": sorted(_home_flow_state), "services": sorted(_home_services)}
+
+
+def home_flow_state() -> tuple[dict, float | None]:
+    """(cached home flows, seconds since the last push) — (∅, None) before the first."""
+    if not _home_flow_state_at:
+        return {}, None
+    return _home_flow_state, time.time() - _home_flow_state_at
+
+
+def home_services() -> tuple[dict, float | None]:
+    if not _home_flow_state_at:
+        return {}, None
+    return _home_services, time.time() - _home_flow_state_at
+
+
 async def flows_state(client: httpx.AsyncClient) -> dict:
     try:
         groups = await _resolve_streamer_groups(client)
@@ -349,6 +388,14 @@ async def flows_state(client: httpx.AsyncClient) -> dict:
         if name not in states:
             states[name] = {"id": None, "version": 0, "state": "NOT_INSTALLED"}
 
+    if settings.ROLE == "surface":
+        # Home's flows as home last reported them, so one card shows both sides.
+        home, age = home_flow_state()
+        for name in HOME_FLOWS:
+            entry = home.get(name) or {"id": None, "version": 0, "state": "UNKNOWN"}
+            states[name] = {**entry, "home": True, "age_s": None if age is None else round(age)}
+        for name in DO_FLOWS:
+            states[name]["home"] = False
     return states
 
 
@@ -628,6 +675,36 @@ async def trigger_flow(client: httpx.AsyncClient, request_name: str) -> dict:
     )
     r.raise_for_status()
     return {"ok": True, "request": request_name, "status": r.status_code}
+
+
+# The streamers-do surface relays every action that must run at home (posting
+# from the archive, home flow control) through the same Trigger listener, with
+# the action as X-Trigger-Request and the payload as the JSON body. nifi-do
+# routes it home over S2S (StreamersCloud -> DOBridge -> StreamersCloud-Home),
+# and home lands on the matching endpoint below. Fire-and-forget: the answer
+# comes back on its own via published_sync / flow_state.
+RELAY_REQUESTS = ("PublishApproved", "PublishDirect", "PublishClip", "PublishNow",
+                  "CancelPending", "GifPostNow", "FlowControl")
+
+
+async def relay_home(client: httpx.AsyncClient, request_name: str, body: dict | None = None) -> dict:
+    if request_name not in RELAY_REQUESTS:
+        raise ValueError(f"Unknown relay request '{request_name}', expected one of {RELAY_REQUESTS}")
+    r = await client.post(
+        settings.NIFI_TRIGGER_URL,
+        headers={"X-Trigger-Request": request_name, "Content-Type": "application/json"},
+        content=json.dumps(body or {}),
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    return {"ok": True, "relayed": request_name, "status": r.status_code}
+
+
+def home_media_path(clip_id: str, clip_path: str) -> str:
+    """A relayed entry carries the droplet's path; home keeps the same
+    `{clip_id}.mp4|.gif` names under its own CLIP_STORAGE_PATH."""
+    suffix = ".gif" if clip_path.endswith(".gif") or clip_id.endswith("-gif") else ".mp4"
+    return str(Path(settings.CLIP_STORAGE_PATH) / f"{clip_id.removesuffix('-gif')}{suffix}")
 
 
 # ── Watch list helpers ────────────────────────────────────────────────────────
@@ -2454,6 +2531,10 @@ def _save_pending(pending: list[dict]) -> None:
     _atomic_write_json(_pending_path(), pending)
 
 
+def get_skipped_ids() -> set[str]:
+    return _load_id_set(_skipped_path())
+
+
 def mark_skipped(clip_id: str) -> None:
     ids = _load_id_set(_skipped_path())
     ids.add(clip_id)
@@ -2496,6 +2577,41 @@ def get_published_history(limit: int = 60) -> list[dict]:
     except Exception:
         return []
     return list(reversed(history))[:limit]
+
+
+def merge_published(entries: list[dict]) -> dict:
+    """The surface's copy of home's published history (published_sync, #382).
+
+    Home posts the clips now; every couple of minutes its last 60 published
+    entries arrive here. New clip_ids are appended in published_at order, the
+    id set gains them, and a matching entry leaves the surface's own pending
+    list (the approval was relayed home, so home's post is the real one).
+    """
+    added: list[str] = []
+    with _pending_lock():
+        p = _published_history_path()
+        history: list[dict] = []
+        if p.exists():
+            try:
+                history = json.loads(p.read_text())
+            except Exception:
+                history = []
+        known = {h.get("clip_id") for h in history}
+        fresh = [e for e in entries if e.get("clip_id") and e["clip_id"] not in known]
+        if fresh:
+            fresh.sort(key=lambda e: e.get("published_at", ""))
+            history.extend(fresh)
+            history.sort(key=lambda e: e.get("published_at", ""))
+            _atomic_write_json(p, history[-500:])
+            added = [e["clip_id"] for e in fresh]
+            ids = _load_id_set(_published_path())
+            ids.update(added)
+            _save_id_set(_published_path(), ids)
+            pending = _load_pending()
+            remaining = [c for c in pending if c["clip_id"] not in added]
+            if len(remaining) != len(pending):
+                _save_pending(remaining)
+    return {"ok": True, "added": added, "received": len(entries)}
 
 
 def _patch_missing_metadata(entry: dict, meta: dict) -> bool:
@@ -4344,13 +4460,53 @@ def list_gifs(include_hidden: bool = False) -> list[dict]:
         reviews = _load_json_obj(_gif_review_path())
     out = []
     for clip_id, entry in index.items():
-        verdict = (reviews.get(clip_id) or {}).get("verdict")
+        review = reviews.get(clip_id) or {}
+        verdict = review.get("verdict")
         if not include_hidden and verdict == "hidden":
             continue
         if not Path(entry.get("gif_path", "")).exists():
             continue
-        out.append({**entry, "verdict": verdict})
+        out.append({**entry, "verdict": verdict, "retain": bool(review.get("retain")),
+                    "shipped_at": review.get("shipped_at")})
     out.sort(key=lambda e: e.get("indexed_at", ""), reverse=True)
+    return out
+
+
+def set_gif_retain(clip_id: str, retain: bool) -> dict:
+    """The Retain checkbox (home, #382): only retained gifs ship to the
+    streamers-do surface. Ticking it (again) clears shipped_at so the next
+    poll ships it; unticking never deletes the surface's copy."""
+    with _gif_index_lock():
+        reviews = _load_json_obj(_gif_review_path())
+        review = dict(reviews.get(clip_id) or {})
+        review["retain"] = retain
+        review["retain_at"] = datetime.now(timezone.utc).isoformat()
+        if retain:
+            review.pop("shipped_at", None)
+        reviews[clip_id] = review
+        _atomic_write_json(_gif_review_path(), reviews)
+    return {"ok": True, "clip_id": clip_id, "retain": retain}
+
+
+def retained_gifs_pending() -> list[dict]:
+    """Index entries marked retain and not yet shipped, stamped shipped_at as
+    served. The home NiFi poller ships each as the same gif record + media
+    the processed_gifs tap sends; re-tick Retain to ship one again."""
+    now = datetime.now(timezone.utc).isoformat()
+    out = []
+    with _gif_index_lock():
+        index = _load_json_obj(_gif_index_path())
+        reviews = _load_json_obj(_gif_review_path())
+        for clip_id, review in reviews.items():
+            entry = index.get(clip_id)
+            if not review.get("retain") or review.get("shipped_at") or not entry:
+                continue
+            if not Path(entry.get("gif_path", "")).exists():
+                continue
+            out.append({**entry, "clip_id": clip_id})
+            review["shipped_at"] = now
+        if out:
+            _atomic_write_json(_gif_review_path(), reviews)
     return out
 
 

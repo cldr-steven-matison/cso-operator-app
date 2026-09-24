@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # (GET /kb, POST /card/preview, POST /card/publish). Empty = the Streamers KB
     # tab shows roster + GIFs only, no KB content and no card buttons.
     BRAIN_CARD_URL: str = ""
+    # streamers-do surface (#382): the DesktopShare KB on kb-do, for the header light.
+    KB_URL: str = ""
+    KB_BEARER: str = ""
     BRAIN_CARD_TIMEOUT: float = 120.0
 
     QDRANT_URL: str = "http://qdrant.default.svc.cluster.local:6333"

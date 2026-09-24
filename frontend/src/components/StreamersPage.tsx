@@ -21,6 +21,7 @@ import {
   type StreamerGif,
   type StreamerKbCard,
   type StreamerKbPoint,
+  type StreamerStore,
   type StreamerTopics,
 } from "@/lib/api";
 import { TopicPeek } from "./TopicPeek";
@@ -61,11 +62,15 @@ function stateTone(state: string): "ok" | "bad" | "warn" | "neutral" {
 function FlowCard({
   name,
   state,
+  home,
+  ageS,
   onStart,
   onStop,
 }: {
   name: string;
   state: string;
+  home?: boolean;
+  ageS?: number | null;
   onStart: () => void;
   onStop: () => void;
 }) {
@@ -82,6 +87,9 @@ function FlowCard({
   }
 
   const notInstalled = state === "NOT_INSTALLED";
+  // On the surface a home flow's state arrives over the bridge; the control is
+  // relayed the same way, so the badge follows on the next push (~60 s).
+  const relayed = home === true;
 
   return (
     <div className="border border-border rounded p-4 bg-bg flex flex-col gap-2">
@@ -89,6 +97,11 @@ function FlowCard({
         <span className="font-mono text-sm text-text">{name}</span>
         <Badge tone={stateTone(state)}>{state}</Badge>
       </div>
+      {home !== undefined && (
+        <span className="text-[10px] text-muted">
+          {relayed ? `home · as of ${ageS == null ? "never" : `${ageS}s ago`}` : "DO"}
+        </span>
+      )}
       <Button
         onClick={toggle}
         disabled={busy || notInstalled}
@@ -358,6 +371,47 @@ function ClipCard({
   );
 }
 
+// ── ClipStoreCard (streamers-do surface) ───────────────────────────────────
+// Replaces the Kafka Topics card where there is no Kafka: what the Postgres
+// clips table and the JSON queues hold, and how full the block volume is.
+
+function ClipStoreCard({ store, onRefresh }: { store: StreamerStore | null; onRefresh: () => void }) {
+  const stat = (label: string, value: string | number, bad = false) => (
+    <div className="border border-border rounded p-3">
+      <div className="text-xs text-muted">{label}</div>
+      <div className={`text-lg font-semibold ${bad ? "text-bad" : "text-text"}`}>{value}</div>
+    </div>
+  );
+  return (
+    <Card>
+      <div className="flex items-center justify-between mb-3">
+        <CardTitle>Clip Store</CardTitle>
+        <Button className="text-xs" onClick={onRefresh}>Refresh</Button>
+      </div>
+      {!store ? (
+        <p className="text-xs text-muted">Loading…</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+            {stat("clips", store.records.clip)}
+            {stat("gifs", store.records.gif)}
+            {stat("media missing", store.records.media_missing, store.records.media_missing > 0)}
+            {stat("pending", store.queues.pending)}
+            {stat("published", store.queues.published)}
+            {stat("skipped", store.queues.skipped)}
+            {stat("volume", `${store.volume.pct}%`, store.volume.alert)}
+            {stat("used / total", `${store.volume.used_gb} / ${store.volume.total_gb} GB`)}
+          </div>
+          <p className="text-[10px] text-muted mt-2">
+            {store.volume.path} · last record {store.records.last_received ?? "never"}
+            {store.volume.alert && <span className="text-bad"> · volume over 80%, nothing is pruned automatically</span>}
+          </p>
+        </>
+      )}
+    </Card>
+  );
+}
+
 // ── TopicPanel ─────────────────────────────────────────────────────────────
 
 function TopicPanel({ label, stats }: { label: string; stats?: StreamerTopics["new_clips"] }) {
@@ -595,13 +649,29 @@ function GifsPanel({
   loading,
   onReviewed,
   onPosted,
+  canRetain,
+  onRetained,
 }: {
   items: StreamerGif[];
   loading: boolean;
   onReviewed: (clip_id: string, verdict: "good" | "hidden") => void;
   onPosted: (clip_id: string) => void;
+  canRetain?: boolean;
+  onRetained?: (clip_id: string, retain: boolean) => void;
 }) {
   const [reviewingId, setReviewingId] = useState<string | null>(null);
+  const [retainingId, setRetainingId] = useState<string | null>(null);
+
+  // Home only (#382): which gifs ship to the streamers-do surface. Most won't.
+  async function doRetain(clip_id: string, retain: boolean) {
+    setRetainingId(clip_id);
+    try {
+      await api.streamersGifRetain(clip_id, retain);
+      onRetained?.(clip_id, retain);
+    } catch {} finally {
+      setRetainingId(null);
+    }
+  }
   const [postingId, setPostingId] = useState<string | null>(null);
   const [postResult, setPostResult] = useState<Record<string, { ok: boolean; url?: string; error?: string }>>({});
 
@@ -690,7 +760,19 @@ function GifsPanel({
                     <Badge tone="ok">posted</Badge>
                   </a>
                 )}
+                {g.retain && <Badge tone="ok">{g.shipped_at ? "on DO" : "shipping"}</Badge>}
               </div>
+              {canRetain && (
+                <label className="flex items-center gap-1 text-[11px] text-muted cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={!!g.retain}
+                    disabled={retainingId === g.clip_id}
+                    onChange={(e) => doRetain(g.clip_id, e.target.checked)}
+                  />
+                  retain (ship to DO)
+                </label>
+              )}
               {g.crop_why && <p className="text-[10px] text-muted line-clamp-2">{g.crop_why}</p>}
               {g.gif_error && <p className="text-[10px] text-bad line-clamp-2">{g.gif_error}</p>}
               <div className="flex items-center gap-1 flex-wrap pt-1 mt-auto">
@@ -2155,6 +2237,21 @@ export function StreamersPage() {
     } catch {}
   };
 
+  // producer (home) or surface (streamers-do): picks the Kafka vs Clip Store card.
+  const [role, setRole] = useState<string>("producer");
+  const [store, setStore] = useState<StreamerStore | null>(null);
+  const refreshStore = async () => {
+    try {
+      setStore(await api.streamersStore());
+    } catch {}
+  };
+  useEffect(() => {
+    api.streamersRole().then((r) => {
+      setRole(r.role);
+      if (r.role === "surface") refreshStore();
+    }).catch(() => {});
+  }, []);
+
   const refreshPending = async () => {
     try {
       const r = await api.streamersPending();
@@ -2181,6 +2278,9 @@ export function StreamersPage() {
       setGifsLoading(false);
     }
   };
+
+  const onGifRetained = (clip_id: string, retain: boolean) =>
+    setGifs((prev) => prev.map((g) => (g.clip_id === clip_id ? { ...g, retain, shipped_at: retain ? null : g.shipped_at } : g)));
 
   const onGifReviewed = (clip_id: string, verdict: "good" | "hidden") => {
     setGifs((prev) =>
@@ -2346,7 +2446,11 @@ export function StreamersPage() {
     };
   }, []);
 
-  const flowNames = ["FetchClips", "ProcessClips", "PublishClipOffPeakDay", "PublishClipPeakTimeCron"] as const;
+  // Home lists its four; the surface lists home's four (relayed) plus the DO
+  // twins, in the order the backend returns them.
+  const flowNames = Object.keys(flows).length
+    ? Object.keys(flows).sort((a, b) => Number(flows[b].home === true) - Number(flows[a].home === true))
+    : ["FetchClips", "ProcessClips", "PublishClipOffPeakDay", "PublishClipPeakTimeCron"];
   const visibleClips = clips.filter((c) => !dismissed.has(c.clip_id ?? ""));
 
   return (
@@ -2410,6 +2514,8 @@ export function StreamersPage() {
                 key={name}
                 name={name}
                 state={flow.state}
+                home={role === "surface" ? flow.home === true : undefined}
+                ageS={flow.age_s}
                 onStart={async () => {
                   await api.streamersFlowStart(name);
                   await refreshFlows();
@@ -2427,7 +2533,10 @@ export function StreamersPage() {
       {/* ── Section 2: Watch List ──────────────────────────────────── */}
       <WatchList />
 
-      {/* ── Section 3: Kafka Topics ────────────────────────────────── */}
+      {/* ── Section 3: Kafka Topics (home) / Clip Store (surface) ───── */}
+      {role === "surface" ? (
+        <ClipStoreCard store={store} onRefresh={refreshStore} />
+      ) : (
       <Card>
         <div className="flex items-center justify-between mb-3">
           <CardTitle>Kafka Topics</CardTitle>
@@ -2464,6 +2573,7 @@ export function StreamersPage() {
           ))}
         </div>
       </Card>
+      )}
 
       {/* ── Section 4: Clip Review Queue ───────────────────────────── */}
       <Card>
@@ -2607,6 +2717,8 @@ export function StreamersPage() {
           loading={gifsLoading}
           onReviewed={onGifReviewed}
           onPosted={onGifPosted}
+          canRetain={role !== "surface"}
+          onRetained={onGifRetained}
         />
       </Card>
       )}

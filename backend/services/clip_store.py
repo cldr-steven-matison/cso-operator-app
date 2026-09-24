@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import logging
 
 import asyncpg
@@ -114,6 +115,26 @@ async def upsert(clip_id: str, kind: str, record: dict) -> None:
              SET kind = EXCLUDED.kind, record = EXCLUDED.record, updated_at = now()""",
         clip_id, kind, json.dumps(record),
     )
+
+
+async def stats() -> dict:
+    """Counts by kind, the newest arrival, and how many records point at media
+    that is not on the volume (the review queue hides those) — for the
+    surface's Clip Store card."""
+    rows = await _require_pool().fetch(
+        "SELECT kind, record, received_at FROM clips ORDER BY received_at")
+    counts = {"clip": 0, "gif": 0}
+    missing = 0
+    last = None
+    for row in rows:
+        counts[row["kind"]] = counts.get(row["kind"], 0) + 1
+        record = json.loads(row["record"])
+        path = record.get("gif_path") if row["kind"] == "gif" else record.get("clip_path")
+        if not path or not os.path.exists(path):
+            missing += 1
+        last = row["received_at"]
+    return {**counts, "media_missing": missing,
+            "last_received": last.isoformat() if last else None}
 
 
 async def review_records(kind: str = "clip") -> list[dict]:

@@ -22,8 +22,55 @@ async def flows(request: Request):
     return await streamers.flows_state(request.app.state.http)
 
 
+@router.get("/home-state")
+async def home_state(request: Request):
+    """What the home NiFi poller ships to the surface every 60 s: the home
+    flows plus the services the surface reports on but cannot reach."""
+    _producer_only()
+    from routers.health import home_state_services
+    flows, services = await asyncio.gather(
+        streamers.flows_state(request.app.state.http), home_state_services(request.app.state.http))
+    return {"flows": flows, "services": services}
+
+
+@router.get("/role")
+async def role():
+    """Which side of the split this box is, for the UI to pick its cards."""
+    return {"role": settings.ROLE}
+
+
+@router.get("/store")
+async def store():
+    """The surface's Clip Store card: Postgres record counts, the JSON queues,
+    and the block volume, flagged at 80 % (nothing is pruned, #382)."""
+    if settings.ROLE != "surface":
+        raise HTTPException(status_code=404, detail="the clip store is the streamers-do surface only")
+    from services import clip_store
+    import shutil
+    try:
+        records = await clip_store.stats()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"clip store unavailable: {e}")
+    usage = shutil.disk_usage(settings.CLIP_STORAGE_PATH)
+    # df's "Use%": used against used+available, so the filesystem's reserved
+    # blocks don't show up as 5% of "clips".
+    pct = round(100 * usage.used / (usage.used + usage.free), 1) if usage.used + usage.free else 0
+    return {
+        "role": settings.ROLE,
+        "records": records,
+        "queues": {"pending": len(streamers.get_pending()),
+                   "published": len(streamers.get_published_history(limit=100000)),
+                   "skipped": len(streamers.get_skipped_ids())},
+        "volume": {"path": settings.CLIP_STORAGE_PATH,
+                   "used_gb": round(usage.used / 1e9, 1),
+                   "total_gb": round(usage.total / 1e9, 1), "pct": pct, "alert": pct >= 80},
+    }
+
+
 @router.post("/flows/{name}/start")
 async def flow_start(name: str, request: Request):
+    if settings.ROLE == "surface" and name in streamers.HOME_FLOWS:
+        return await _relay(request, "FlowControl", {"name": name, "state": "start"})
     try:
         return await streamers.flow_set_state(request.app.state.http, name, running=True)
     except ValueError as e:
@@ -32,6 +79,8 @@ async def flow_start(name: str, request: Request):
 
 @router.post("/flows/{name}/stop")
 async def flow_stop(name: str, request: Request):
+    if settings.ROLE == "surface" and name in streamers.HOME_FLOWS:
+        return await _relay(request, "FlowControl", {"name": name, "state": "stop"})
     try:
         if name == "FetchClips":
             # Asymmetric with start: only pause the GenerateFlowFile timer so an
@@ -104,23 +153,42 @@ class PublishRequest(BaseModel):
     created_at: str = ""
 
 
+# Posting runs at home (the archive lives there, #382). On the surface every
+# post-shaped call is relayed over the bridge instead, and the surface keeps
+# its own pending list only so the Pending panel shows what was approved; the
+# entry leaves it when home's published_sync says the post went out.
+_SURFACE = settings.ROLE == "surface"
+
+
+async def _relay(request: Request, name: str, body: dict | None = None) -> dict:
+    try:
+        return await streamers.relay_home(request.app.state.http, name, body)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"relay {name} failed: {e}")
+
+
 @router.post("/approve")
-async def approve(body: PublishRequest):
+async def approve(body: PublishRequest, request: Request):
     """Queue a clip for publishing. Returns immediately; NiFi drains the queue every 2 min."""
     if not body.clip_path or not body.tweet_text:
         raise HTTPException(status_code=400, detail="clip_path and tweet_text are required")
     if not os.path.exists(body.clip_path):
         raise HTTPException(status_code=404, detail=f"Clip file not found: {body.clip_path} — re-fetch clips first")
-    return streamers.approve_clip(
+    result = streamers.approve_clip(
         body.clip_id, body.clip_path, body.tweet_text, body.title,
         body.source, body.streamer, body.url, body.thumbnail_url, body.x_handle,
         body.view_count, body.duration, body.created_at,
     )
+    if _SURFACE and result.get("queued"):
+        result["relay"] = await _relay(request, "PublishApproved", body.model_dump())
+    return result
 
 
 @router.post("/publish-next")
-async def publish_next():
+async def publish_next(request: Request):
     """Pop and publish the next queued clip. Called by NiFi GenerateFlowFile timer every 2 min."""
+    if _SURFACE:
+        return await _relay(request, "PublishClip")
     try:
         return await streamers.publish_next()
     except Exception as e:
@@ -134,14 +202,19 @@ async def pending_queue():
 
 
 @router.post("/pending/{clip_id}/cancel")
-async def cancel_pending(clip_id: str):
+async def cancel_pending(clip_id: str, request: Request):
     """Remove a clip from the publish queue before NiFi drains it."""
-    return streamers.cancel_pending(clip_id)
+    result = streamers.cancel_pending(clip_id)
+    if _SURFACE:
+        result["relay"] = await _relay(request, "CancelPending", {"clip_id": clip_id})
+    return result
 
 
 @router.post("/pending/{clip_id}/publish-now")
-async def pending_publish_now(clip_id: str):
+async def pending_publish_now(clip_id: str, request: Request):
     """Publish one specific pending clip immediately, regardless of its queue position."""
+    if _SURFACE:
+        return await _relay(request, "PublishNow", {"clip_id": clip_id})
     try:
         return await streamers.publish_pending(clip_id)
     except Exception as e:
@@ -149,12 +222,18 @@ async def pending_publish_now(clip_id: str):
 
 
 @router.post("/publish")
-async def publish(body: PublishRequest):
+async def publish(body: PublishRequest, request: Request):
     """Direct publish (bypasses queue). Kept for manual/debug use."""
     if not body.clip_path or not body.tweet_text:
         raise HTTPException(status_code=400, detail="clip_path and tweet_text are required")
     if not os.path.exists(body.clip_path):
         raise HTTPException(status_code=404, detail=f"Clip file not found: {body.clip_path} — re-fetch clips first")
+    if _SURFACE:
+        return await _relay(request, "PublishDirect", body.model_dump())
+    return await _publish_direct(body)
+
+
+async def _publish_direct(body: PublishRequest) -> dict:
     # Gif-only streamers (clip=N in streamer_paths / streamers.md) never post
     # the MP4 — the review card's Post Now button hits this endpoint with the
     # clip path, so redirect it to the reaction GIF the same way approve does.
@@ -176,6 +255,37 @@ async def publish(body: PublishRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+# ── Relayed from the surface (producer only) ─────────────────────────────────
+# What nifi-do sends home for the surface's approve / Post Now: the same
+# PublishRequest the surface UI built, with the droplet's clip_path swapped for
+# home's copy of the same file.
+
+def _home_request(body: PublishRequest) -> PublishRequest:
+    if _SURFACE:
+        raise HTTPException(status_code=404, detail="relay targets run at home only")
+    path = streamers.home_media_path(body.clip_id, body.clip_path)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"home has no media for {body.clip_id}: {path}")
+    return body.model_copy(update={"clip_path": path})
+
+
+@router.post("/ingest/approved")
+async def ingest_approved(body: PublishRequest):
+    """A surface approval: queue it here, where the crons post from the archive."""
+    home = _home_request(body)
+    return streamers.approve_clip(
+        home.clip_id, home.clip_path, home.tweet_text, home.title,
+        home.source, home.streamer, home.url, home.thumbnail_url, home.x_handle,
+        home.view_count, home.duration, home.created_at,
+    )
+
+
+@router.post("/ingest/publish-direct")
+async def ingest_publish_direct(body: PublishRequest):
+    """A surface Post Now on a review card: post it now from the archive."""
+    return await _publish_direct(_home_request(body))
 
 
 @router.get("/published")
@@ -299,8 +409,28 @@ async def review_gif(clip_id: str, body: GifReviewRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class GifRetainRequest(BaseModel):
+    retain: bool = True
+
+
+@router.post("/gifs/{clip_id}/retain")
+async def retain_gif(clip_id: str, body: GifRetainRequest):
+    """The Retain checkbox: this gif ships to the streamers-do surface (home only)."""
+    _producer_only()
+    if not streamers.get_gif_entry(clip_id):
+        raise HTTPException(status_code=404, detail=f"No GIF indexed for {clip_id}")
+    return streamers.set_gif_retain(clip_id, body.retain)
+
+
+@router.get("/gifs/retained-pending")
+async def retained_pending():
+    """Retained gifs not shipped yet, for the home NiFi poller (stamps them shipped)."""
+    _producer_only()
+    return {"gifs": streamers.retained_gifs_pending()}
+
+
 @router.post("/gifs/{clip_id}/post-now")
-async def post_gif_now(clip_id: str):
+async def post_gif_now(clip_id: str, request: Request):
     """Post one GIF to X immediately, tagging the streamer and referencing the
     clip context. Called by the GIFs panel's Post Now button."""
     entry = streamers.get_gif_entry(clip_id)
@@ -308,6 +438,8 @@ async def post_gif_now(clip_id: str):
         raise HTTPException(status_code=404, detail=f"No GIF indexed for {clip_id}")
     if not os.path.exists(entry.get("gif_path", "")):
         raise HTTPException(status_code=404, detail="GIF file is gone from the PVC")
+    if _SURFACE:
+        return await _relay(request, "GifPostNow", {"clip_id": clip_id})
     # #298: go through the same one-retry wrapper the chat-trigger/approve paths
     # use. Post Now previously called publish_gif_now directly, so a single
     # transient upload hiccup (the "segments do not add up" byte mismatch) was
@@ -382,12 +514,16 @@ def _producer_only() -> None:
         raise HTTPException(status_code=410, detail="Kafka-only endpoint; not on the streamers-do surface")
 
 
-def _check_ingest(request: Request, kind: str, clip_id: str) -> None:
+def _check_surface_ingest(request: Request) -> None:
     if settings.ROLE != "surface":
         raise HTTPException(status_code=404, detail="ingest runs on the streamers-do surface only")
     token = settings.STREAMERS_INGEST_TOKEN
     if token and request.headers.get("authorization") != f"Bearer {token}":
         raise HTTPException(status_code=401, detail="bad ingest token")
+
+
+def _check_ingest(request: Request, kind: str, clip_id: str) -> None:
+    _check_surface_ingest(request)
     if kind not in _INGEST_EXT:
         raise HTTPException(status_code=400, detail="kind must be clip or gif")
     if not re.match(r'^[A-Za-z0-9_\-]+$', clip_id or ""):
@@ -456,6 +592,35 @@ async def ingest_media(clip_id: str, request: Request, kind: str = "clip"):
         if entry:
             _late_queue_gif(entry)
     return {"ok": True, "clip_id": clip_id, "kind": kind, "bytes": size}
+
+
+@router.post("/ingest/published")
+async def ingest_published(request: Request):
+    """Home's last 60 published entries (published_sync, every 2 min): new ones
+    join this box's history and leave its pending list."""
+    _check_surface_ingest(request)
+    try:
+        body = json.loads(await request.body())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON")
+    entries = body.get("published") if isinstance(body, dict) else body
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="Expected {published: [...]}")
+    return streamers.merge_published([e for e in entries if isinstance(e, dict)])
+
+
+@router.post("/ingest/flow-state")
+async def ingest_flow_state(request: Request):
+    """Home's /flows payload (flow_state, every 60 s), cached for the surface's
+    Pipeline Status card."""
+    _check_surface_ingest(request)
+    try:
+        body = json.loads(await request.body())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    return streamers.set_home_flow_state(body)
 
 
 def _late_queue_gif(entry: dict) -> None:

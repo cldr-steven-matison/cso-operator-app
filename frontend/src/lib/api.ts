@@ -3,6 +3,7 @@ export type HealthService = {
   status?: number;
   error?: string;
   topics?: number;
+  age_s?: number;
   // vLLM-specific: configured model and the list reported by /v1/models.
   configured?: string;
   loaded?: string[];
@@ -10,7 +11,8 @@ export type HealthService = {
 export type Health = {
   ok: boolean;
   // Partial: /api/health only includes keys for services owned by an active MODULES flag.
-  services: Partial<Record<"vllm" | "qdrant" | "embedding" | "whisper" | "nifi" | "kafka" | "efm", HealthService>>;
+  // home / kb / streamer_kb only on the streamers-do surface (home = the bridge link, vllm/whisper as home pushed them).
+  services: Partial<Record<"home" | "vllm" | "qdrant" | "embedding" | "whisper" | "nifi" | "kafka" | "efm" | "kb" | "streamer_kb", HealthService>>;
 };
 
 export type EfmAgentClass = { name: string; agentCount: number };
@@ -86,8 +88,17 @@ export type PodInfo = {
 
 // ── Streamers module types ──────────────────────────────────────────────────
 
-export type StreamerFlowState = { id: string | null; version: number; state: string };
+// home/age_s only on the streamers-do surface: a home flow's state is what home
+// last pushed over the bridge (flow_state), age_s seconds ago.
+export type StreamerFlowState = { id: string | null; version: number; state: string; home?: boolean; age_s?: number | null };
 export type StreamerFlows = Record<string, StreamerFlowState>;
+
+export type StreamerStore = {
+  role: string;
+  records: { clip: number; gif: number; media_missing: number; last_received: string | null };
+  queues: { pending: number; published: number; skipped: number };
+  volume: { path: string; used_gb: number; total_gb: number; pct: number; alert: boolean };
+};
 
 export type StreamerClip = {
   clip_id?: string;
@@ -188,6 +199,10 @@ export type StreamerGif = {
   tweet_url?: string;
   tweet_id?: string;
   posted_at?: string;
+  // Home only: the Retain checkbox decides which gifs ship to streamers-do;
+  // shipped_at is stamped when the home NiFi poller picks it up.
+  retain?: boolean;
+  shipped_at?: string | null;
 };
 
 export type InspectorClip = {
@@ -417,6 +432,8 @@ export const api = {
 
   // Streamers module
   streamersFlows: () => jget<StreamerFlows>("/api/streamers/flows"),
+  streamersRole: () => jget<{ role: string }>("/api/streamers/role"),
+  streamersStore: () => jget<StreamerStore>("/api/streamers/store"),
   streamersFlowStart: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/start`),
   streamersFlowStop: (name: string) => jpost(`/api/streamers/flows/${encodeURIComponent(name)}/stop`),
   streamersTrigger: (name: string) => jpost<{ ok: boolean; request: string; status: number }>(`/api/streamers/flows/trigger/${encodeURIComponent(name)}`),
@@ -522,6 +539,11 @@ export const api = {
     jpost<{ ok: boolean; clip_id: string; verdict: string }>(
       `/api/streamers/gifs/${encodeURIComponent(clip_id)}/review`,
       { verdict },
+    ),
+  streamersGifRetain: (clip_id: string, retain: boolean) =>
+    jpost<{ ok: boolean; clip_id: string; retain: boolean }>(
+      `/api/streamers/gifs/${encodeURIComponent(clip_id)}/retain`,
+      { retain },
     ),
   streamersGifPostNow: (clip_id: string) =>
     jpost<{ ok?: boolean; published?: boolean; tweet_id?: string; url?: string; reason?: string }>(

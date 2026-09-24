@@ -7,7 +7,8 @@ import { cn } from "@/lib/utils";
 // Full known set — filtered per-render to whichever ones the backend actually
 // reports, since /api/health only pings services owned by an active MODULES flag
 // (e.g. no "efm" key at all when the EFM module isn't baked into this image).
-const ORDER: (keyof Health["services"])[] = ["vllm", "embedding", "qdrant", "whisper", "nifi", "kafka", "efm"];
+const ORDER: (keyof Health["services"])[] = ["home", "vllm", "whisper", "kb", "streamer_kb", "embedding", "qdrant", "nifi", "kafka", "efm"];
+const LABEL: Partial<Record<keyof Health["services"], string>> = { streamer_kb: "streamer kb", home: "home link", kb: "kb" };
 
 export function HealthBar() {
   const [h, setH] = useState<Health | null>(null);
@@ -51,11 +52,12 @@ export function HealthBar() {
         {ORDER.filter((k) => !h || k in h.services).map((k) => {
           const s = h?.services[k];
           const tone = !s ? "neutral" : s.ok ? "ok" : "bad";
-          const label = `${k}${s && !s.ok && s.error ? `: ${s.error.slice(0, 40)}` : ""}`;
+          const name = LABEL[k] ?? k;
+          const label = `${name}${s && !s.ok && s.error ? `: ${s.error.slice(0, 40)}` : ""}${s?.ok && s.age_s != null ? ` (${s.age_s}s ago)` : ""}`;
           return (
             <span key={k} className={cn("flex items-center gap-1.5")} title={label}>
               <Dot tone={tone} />
-              <span className="text-muted">{k}</span>
+              <span className="text-muted">{name}</span>
             </span>
           );
         })}
