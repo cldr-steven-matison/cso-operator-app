@@ -141,5 +141,16 @@ class Settings(BaseSettings):
     X_ACCESS_TOKEN: str = ""
     X_ACCESS_TOKEN_SECRET: str = ""
 
+    # Deployment role (#382). "producer" is the home/minikube app exactly as it
+    # has always run: Kafka review queue, cluster-internal routers, the overlay
+    # relay and chat-activity tasks. "surface" is the streamers-do droplet: the
+    # review queue comes from Postgres (services/clip_store.py), fed by the
+    # home NiFi tap over S2S through /api/streamers/ingest/*, and every router
+    # or task that needs a cluster-internal service is left off.
+    ROLE: str = "producer"
+    # Optional bearer for /api/streamers/ingest/* on the surface. Empty = no
+    # check (the ingest port is bound to the tailnet and Caddy refuses the path).
+    STREAMERS_INGEST_TOKEN: str = ""
+
 
 settings = Settings()

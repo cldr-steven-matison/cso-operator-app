@@ -4440,11 +4440,18 @@ async def clip_queue(limit: int = 20) -> list[dict]:
     immediately. Loop until the consumer's position catches up to the known
     end offset (or a bounded number of polls, in case something's actually
     stalled) instead of trusting one call to have delivered everything.
+
+    On the streamers-do surface (ROLE=surface, #382) there is no Kafka: the
+    same records arrive through /ingest/record into clip_store, and only the
+    source differs — the filters in _filter_review_records are shared.
     """
+    if settings.ROLE == "surface":
+        from services import clip_store
+        return _filter_review_records(await clip_store.review_records("clip"))
+
     from aiokafka import AIOKafkaConsumer, TopicPartition
 
     topic = settings.PROCESSED_CLIPS_TOPIC
-    clips: list[dict] = []
     consumer = AIOKafkaConsumer(
         bootstrap_servers=settings.KAFKA_BOOTSTRAP,
         enable_auto_commit=False,
@@ -4529,11 +4536,18 @@ async def clip_queue(limit: int = 20) -> list[dict]:
         except Exception:
             pass
 
+    # Order by broker timestamp — offsets don't order across partitions.
+    return _filter_review_records(sorted(_queue_records.values(), key=lambda r: r["_ts"]))
+
+
+def _filter_review_records(records: list[dict]) -> list[dict]:
+    """The review filters, shared by the Kafka (producer) and Postgres
+    (surface) sources of clip_queue. ``records`` arrive in display order."""
+    clips: list[dict] = []
     skipped = get_skipped()
     published = get_published()
     pending = {p["clip_id"] for p in _load_pending()}
-    # Order by broker timestamp — offsets don't order across partitions.
-    for record in sorted(_queue_records.values(), key=lambda r: r["_ts"]):
+    for record in records:
         clip_id = record.get("clip_id", "")
         # Filter: missing file, skipped, pending, published, or disqualified/errored
         clip_path = record.get("clip_path", "")

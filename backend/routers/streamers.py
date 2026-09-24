@@ -189,6 +189,7 @@ async def backfill_metadata():
     """One-time repair for pending/published entries that predate source/streamer/
     url/thumbnail_url/x_handle being added to approve_clip()/mark_published().
     Safe to re-run — a no-op once every entry already has its fields."""
+    _producer_only()
     try:
         return await streamers.backfill_metadata()
     except Exception as e:
@@ -339,6 +340,7 @@ async def serve_gif(clip_id: str):
 @router.get("/topics")
 async def topic_stats():
     """Message counts and sample records for new_clips and processed_clips."""
+    _producer_only()
     return await streamers.topic_stats()
 
 
@@ -347,7 +349,104 @@ async def topic_stats():
 @router.post("/reset")
 async def reset_kafka():
     """Delete Strimzi KafkaTopic CRDs and wipe /clips. Topics auto-recreate on next fetch."""
+    _producer_only()  # on the surface /clips is the droplet volume, never wipe it
     return await streamers.reset_kafka()
+
+
+# ── streamers-do ingest (#382) ────────────────────────────────────────────────
+# The home NiFi DOBridge PG taps processed_clips / processed_gifs and ships each
+# record, then its mp4/gif, over S2S; nifi-do's DOIngest PG calls these two
+# endpoints. Record and media arrive as separate calls in either order: the
+# review queue already hides a record whose file isn't there yet, so a card
+# appears only once both have landed. Surface role only.
+
+_INGEST_EXT = {"clip": ".mp4", "gif": ".gif"}
+
+
+def _producer_only() -> None:
+    if settings.ROLE == "surface":
+        raise HTTPException(status_code=410, detail="Kafka-only endpoint; not on the streamers-do surface")
+
+
+def _check_ingest(request: Request, kind: str, clip_id: str) -> None:
+    if settings.ROLE != "surface":
+        raise HTTPException(status_code=404, detail="ingest runs on the streamers-do surface only")
+    token = settings.STREAMERS_INGEST_TOKEN
+    if token and request.headers.get("authorization") != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="bad ingest token")
+    if kind not in _INGEST_EXT:
+        raise HTTPException(status_code=400, detail="kind must be clip or gif")
+    if not re.match(r'^[A-Za-z0-9_\-]+$', clip_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid clip_id")
+
+
+@router.post("/ingest/record")
+async def ingest_record(request: Request, kind: str = "clip"):
+    """One processed_clips (kind=clip) or processed_gifs (kind=gif) record.
+    Its paths are home-PVC paths; they are rewritten to this box's
+    CLIP_STORAGE_PATH under the same `{clip_id}.mp4|.gif` names, which is where
+    /ingest/media writes the bytes."""
+    try:
+        record = json.loads(await request.body())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON record")
+    if not isinstance(record, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    clip_id = record.get("clip_id", "")
+    _check_ingest(request, kind, clip_id)
+    from services import clip_store
+
+    dest = Path(settings.CLIP_STORAGE_PATH) / f"{clip_id}{_INGEST_EXT[kind]}"
+    if kind == "clip":
+        record["clip_path"] = str(dest)
+        await clip_store.upsert(clip_id, "clip", record)
+        return {"ok": True, "clip_id": clip_id, "kind": kind, "media_present": dest.exists()}
+
+    # processed_gifs also carries the gif branch's skips/failures (empty
+    # gif_path); only a real cut belongs in the index — same rule as _record_gif.
+    if record.get("gif_error") or not record.get("gif_path"):
+        return {"ok": True, "clip_id": clip_id, "kind": kind, "indexed": False,
+                "reason": record.get("gif_error") or "no gif cut"}
+    record["gif_path"] = str(dest)
+    await clip_store.upsert(f"{clip_id}-gif", "gif", record)
+    streamers._record_gif(record)
+    if dest.exists():
+        _late_queue_gif(record)
+    return {"ok": True, "clip_id": clip_id, "kind": kind, "indexed": True,
+            "media_present": dest.exists()}
+
+
+@router.put("/ingest/media/{clip_id}")
+async def ingest_media(clip_id: str, request: Request, kind: str = "clip"):
+    """The mp4/gif bytes for one clip, streamed to a temp file and renamed into
+    place so a reader never sees a half-written file."""
+    _check_ingest(request, kind, clip_id)
+    dest = Path(settings.CLIP_STORAGE_PATH) / f"{clip_id}{_INGEST_EXT[kind]}"
+    tmp = dest.with_name(f".{dest.name}.part")
+    size = 0
+    try:
+        with open(tmp, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+                size += len(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="empty body")
+        os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    if kind == "gif":
+        entry = streamers.get_gif_entry(clip_id)
+        if entry:
+            _late_queue_gif(entry)
+    return {"ok": True, "clip_id": clip_id, "kind": kind, "bytes": size}
+
+
+def _late_queue_gif(entry: dict) -> None:
+    """Whichever of record/media lands second queues a gif_post streamer's gif
+    if its parent clip is already approved — process_gif's own race rule."""
+    if streamers.streamer_paths(entry.get("streamer", ""))["gif_post"]:
+        streamers._queue_gif_if_parent_approved(entry)
 
 
 # ── Watch list ────────────────────────────────────────────────────────────────
