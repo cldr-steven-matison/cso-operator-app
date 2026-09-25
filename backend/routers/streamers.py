@@ -964,7 +964,7 @@ async def chat_trigger_clip(body: ChatTriggerRequest, request: Request):
                 "message": f"{login}'s clips only go out as reaction GIFs, not video"}
 
     try:
-        fetch = await streamers.fetch_clips_for_login(entry, clip_cap=1)
+        fetch = await streamers.fetch_clips_for_login(entry, clip_cap=1, publish=False)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -979,7 +979,7 @@ async def chat_trigger_clip(body: ChatTriggerRequest, request: Request):
         # grab itself failed, and a wider window won't fix that.
         if not failed:
             try:
-                fetch = await streamers.fetch_clips_for_login(entry, clip_cap=1, period="all")
+                fetch = await streamers.fetch_clips_for_login(entry, clip_cap=1, period="all", publish=False)
             except Exception as e:
                 raise HTTPException(status_code=502, detail=str(e))
             records = fetch.get("records", [])
@@ -1067,7 +1067,7 @@ async def chat_trigger_gif(body: ChatTriggerRequest, request: Request):
                 "message": f"{login} doesn't get reaction GIFs"}
 
     try:
-        fetch = await streamers.fetch_clips_for_login(entry, clip_cap=1)
+        fetch = await streamers.fetch_clips_for_login(entry, clip_cap=1, publish=False)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 

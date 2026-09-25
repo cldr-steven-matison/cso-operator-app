@@ -3178,15 +3178,20 @@ async def streamer_exists(client: httpx.AsyncClient, entry: str) -> bool:
         return False
 
 
-async def fetch_clips_for_login(entry: str, clip_cap: int = 1, period: str = "month") -> dict:
+async def fetch_clips_for_login(entry: str, clip_cap: int = 1, period: str = "month",
+                                publish: bool = True) -> dict:
     """Fetch, download and publish clips for ONE watch-list entry, right now.
 
     fetch_clips() is batch-only over a rotating slice of the watch list, so a
     viewer's !clip request would otherwise wait out a whole rotation. This is a
     thin per-login wrapper over the same _fetch_twitch_clips/_fetch_kick_clips
-    the batch uses — no second discovery path, no second download path — and it
-    publishes to new_clips through _publish_clips_to_kafka just like the batch,
-    so the clip goes through ProcessClips (Whisper + vLLM) normally.
+    the batch uses — no second discovery path, no second download path. With
+    publish=True it also publishes to new_clips through _publish_clips_to_kafka
+    like the batch, so ProcessClips (Whisper + vLLM) picks the clip up. The
+    chat-trigger routes pass publish=False: they process the records inline
+    (process_clip / process_gif) and post right away, and a second ProcessClips
+    run on the same clip rewrites the .gif under the X upload ("segments don't
+    add up to the file size") and drops a duplicate into the review queue.
 
     Deliberate divergence from fetch_clips(): top_mode is forced on instead of
     inheriting get_fetch_mode(). Someone asking in chat means "show us a good
@@ -3232,7 +3237,8 @@ async def fetch_clips_for_login(entry: str, clip_cap: int = 1, period: str = "mo
             errors.append(str(e))
 
     if fetched:
-        await _publish_clips_to_kafka(fetched)
+        if publish:
+            await _publish_clips_to_kafka(fetched)
         # Same union-under-lock as fetch_clips(): the fetchers already added
         # every id they touched to `seen`, the comprehension mirrors the batch
         # path's belt-and-braces pass over what actually came back.
