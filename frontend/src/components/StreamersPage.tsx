@@ -135,6 +135,55 @@ function fallbackCaption() {
   return FALLBACK_CAPTIONS[Math.floor(Math.random() * FALLBACK_CAPTIONS.length)];
 }
 
+// A Post Now result. `pending`: relayed home, link not back yet.
+type PostNowResult = { ok: boolean; url?: string; error?: string; pending?: boolean };
+
+// On the DO surface (#382) a Post Now is relayed home and answers only
+// {relayed}: home posts a moment later and the tweet link reaches the surface
+// with the next published_sync (every 2 min). Poll /published for this clip —
+// under its own id or the "-gif" id a gif post is recorded as — until a link
+// newer than the click shows up. Undefined on timeout.
+async function awaitPostedUrl(clipId: string, since: number, timeoutMs = 240_000): Promise<string | undefined> {
+  const base = clipId.endsWith("-gif") ? clipId.slice(0, -4) : clipId;
+  const ids = new Set([base, `${base}-gif`]);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10_000));
+    try {
+      const { published } = await api.streamersPublished();
+      // 60 s of slack for browser/server clock skew; an older post of the same
+      // clip ("Post GIF again") is still excluded.
+      const hit = published.find(
+        (p) => ids.has(p.clip_id) && p.tweet_url && (!p.published_at || Date.parse(p.published_at) >= since - 60_000),
+      );
+      if (hit) return hit.tweet_url;
+    } catch {
+      // transient — keep polling until the deadline
+    }
+  }
+  return undefined;
+}
+
+// How long a posted card stays up once its link shows, so it can be clicked.
+const RELAYED_LINK_HOLD_MS = 60_000;
+
+function PostNowStatus({ result, className }: { result: PostNowResult; className: string }) {
+  if (!result.ok) return <span className={`text-bad ${className}`}>{result.error}</span>;
+  if (result.pending) return <span className={`text-muted ${className}`}>Sent to home — posting… (link in ~2 min)</span>;
+  return (
+    <span className={`text-accent ${className}`}>
+      Posted ✓{" "}
+      {result.url ? (
+        <a href={result.url} target="_blank" rel="noopener noreferrer" className="underline break-all">
+          {result.url}
+        </a>
+      ) : (
+        "— link not synced yet, see Posted Clips"
+      )}
+    </span>
+  );
+}
+
 function ClipCard({
   clip,
   onPublished,
@@ -150,7 +199,7 @@ function ClipCard({
   const [publishing, setPublishing] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; position?: number; error?: string } | null>(null);
   const [postingNow, setPostingNow] = useState(false);
-  const [postNowResult, setPostNowResult] = useState<{ ok: boolean; url?: string; error?: string } | null>(null);
+  const [postNowResult, setPostNowResult] = useState<PostNowResult | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
 
   const tweetText = caption;
@@ -178,13 +227,21 @@ function ClipCard({
     if (!clip.clip_path || !tweetText.trim()) return;
     setPostingNow(true);
     setPostNowResult(null);
+    const since = Date.now();
     try {
       const r = await api.streamersPublish(
         clip.clip_path, tweetText, clip.clip_id, clip.title,
         clip.source, clip.streamer, clip.url, clip.thumbnail_url, clip.x_handle,
       );
-      setPostNowResult({ ok: true, url: r.url });
-      setTimeout(() => onPostNow(clip.clip_id ?? ""), 6000);
+      if (r.relayed && clip.clip_id) {
+        setPostNowResult({ ok: true, pending: true });
+        const url = await awaitPostedUrl(clip.clip_id, since);
+        setPostNowResult({ ok: true, url });
+        setTimeout(() => onPostNow(clip.clip_id ?? ""), RELAYED_LINK_HOLD_MS);
+      } else {
+        setPostNowResult({ ok: true, url: r.url });
+        setTimeout(() => onPostNow(clip.clip_id ?? ""), 6000);
+      }
     } catch (e) {
       setPostNowResult({ ok: false, error: String(e) });
     } finally {
@@ -352,20 +409,7 @@ function ClipCard({
               : result.error}
           </span>
         )}
-        {postNowResult && (
-          <span className={postNowResult.ok ? "text-accent text-xs" : "text-bad text-xs"}>
-            {postNowResult.ok ? (
-              <>
-                Posted ✓{" "}
-                <a href={postNowResult.url} target="_blank" rel="noopener noreferrer" className="underline">
-                  {postNowResult.url}
-                </a>
-              </>
-            ) : (
-              postNowResult.error
-            )}
-          </span>
-        )}
+        {postNowResult && <PostNowStatus result={postNowResult} className="text-xs" />}
       </div>
     </div>
   );
@@ -470,7 +514,10 @@ function PendingPanel({
 }) {
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [postingId, setPostingId] = useState<string | null>(null);
-  const [postResult, setPostResult] = useState<Record<string, { ok: boolean; url?: string; error?: string }>>({});
+  const [postResult, setPostResult] = useState<Record<string, PostNowResult>>({});
+  // Relayed posts held on screen: the 30 s /pending refresh drops an entry as
+  // soon as published_sync clears it, which is the same moment its link lands.
+  const [held, setHeld] = useState<Record<string, PendingClip>>({});
 
   async function doCancel(clip_id: string) {
     setCancelingId(clip_id);
@@ -484,10 +531,21 @@ function PendingPanel({
 
   async function doPostNow(clip_id: string) {
     setPostingId(clip_id);
+    const since = Date.now();
+    const entry = pending.find((p) => p.clip_id === clip_id);
     try {
       const r = await api.streamersPendingPublishNow(clip_id);
       if (r.published === false) {
         setPostResult((prev) => ({ ...prev, [clip_id]: { ok: false, error: r.reason || "not in queue" } }));
+      } else if (r.relayed) {
+        if (entry) setHeld((prev) => ({ ...prev, [clip_id]: entry }));
+        setPostResult((prev) => ({ ...prev, [clip_id]: { ok: true, pending: true } }));
+        const url = await awaitPostedUrl(clip_id, since);
+        setPostResult((prev) => ({ ...prev, [clip_id]: { ok: true, url } }));
+        setTimeout(() => {
+          setHeld(({ [clip_id]: _gone, ...rest }) => rest);
+          onPostedNow(clip_id);
+        }, RELAYED_LINK_HOLD_MS);
       } else {
         setPostResult((prev) => ({ ...prev, [clip_id]: { ok: true, url: r.url } }));
         setTimeout(() => onPostedNow(clip_id), 6000);
@@ -499,12 +557,14 @@ function PendingPanel({
     }
   }
 
+  const rows = [...pending, ...Object.values(held).filter((h) => !pending.some((p) => p.clip_id === h.clip_id))];
+
   if (loading) return <p className="text-muted text-sm">Loading pending publish queue…</p>;
-  if (pending.length === 0) return <p className="text-muted text-sm">Queue empty — nothing waiting to post.</p>;
+  if (rows.length === 0) return <p className="text-muted text-sm">Queue empty — nothing waiting to post.</p>;
 
   return (
     <div className="space-y-2">
-      {pending.map((p, i) => {
+      {rows.map((p, i) => {
         const result = postResult[p.clip_id];
         // A gif-path entry (#280): approve_clip queues it as "{clip_id}-gif" → .gif,
         // so show the GIF itself, not the clip's video thumbnail.
@@ -567,20 +627,7 @@ function PendingPanel({
                 <p className="text-xs font-semibold text-text truncate">{p.title || p.clip_id || "unknown clip"}</p>
               )}
               <p className="text-xs text-text whitespace-pre-wrap">{p.tweet_text}</p>
-              {result && (
-                <span className={result.ok ? "text-accent text-xs" : "text-bad text-xs"}>
-                  {result.ok ? (
-                    <>
-                      Posted ✓{" "}
-                      <a href={result.url} target="_blank" rel="noopener noreferrer" className="underline">
-                        {result.url}
-                      </a>
-                    </>
-                  ) : (
-                    result.error
-                  )}
-                </span>
-              )}
+              {result && <PostNowStatus result={result} className="text-xs" />}
             </div>
             <div className="flex flex-col gap-1 shrink-0">
               <Button
@@ -673,7 +720,7 @@ function GifsPanel({
     }
   }
   const [postingId, setPostingId] = useState<string | null>(null);
-  const [postResult, setPostResult] = useState<Record<string, { ok: boolean; url?: string; error?: string }>>({});
+  const [postResult, setPostResult] = useState<Record<string, PostNowResult>>({});
 
   async function doReview(clip_id: string, verdict: "good" | "hidden") {
     setReviewingId(clip_id);
@@ -687,10 +734,16 @@ function GifsPanel({
 
   async function doPostNow(clip_id: string) {
     setPostingId(clip_id);
+    const since = Date.now();
     try {
       const r = await api.streamersGifPostNow(clip_id);
       if (r.published === false) {
         setPostResult((prev) => ({ ...prev, [clip_id]: { ok: false, error: r.reason || "not published" } }));
+      } else if (r.relayed) {
+        setPostResult((prev) => ({ ...prev, [clip_id]: { ok: true, pending: true } }));
+        const url = await awaitPostedUrl(clip_id, since);
+        setPostResult((prev) => ({ ...prev, [clip_id]: { ok: true, url } }));
+        onPosted(clip_id);
       } else {
         setPostResult((prev) => ({ ...prev, [clip_id]: { ok: true, url: r.url } }));
         // Deliberately does NOT drop the card: the library is the archive of
@@ -800,20 +853,7 @@ function GifsPanel({
                   {postingId === g.clip_id ? "Posting…" : g.tweet_url ? "Post GIF again" : "Post GIF"}
                 </Button>
               </div>
-              {result && (
-                <span className={result.ok ? "text-accent text-[11px]" : "text-bad text-[11px]"}>
-                  {result.ok ? (
-                    <>
-                      Posted ✓{" "}
-                      <a href={result.url} target="_blank" rel="noopener noreferrer" className="underline break-all">
-                        {result.url}
-                      </a>
-                    </>
-                  ) : (
-                    result.error
-                  )}
-                </span>
-              )}
+              {result && <PostNowStatus result={result} className="text-[11px]" />}
             </div>
           </div>
         );

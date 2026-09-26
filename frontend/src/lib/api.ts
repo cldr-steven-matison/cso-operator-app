@@ -128,7 +128,8 @@ export type StreamerClip = {
   _ts?: number;
 };
 
-export type StreamerPublishResult = { ok: boolean; tweet_id: string; url: string };
+// relayed: set by the DO surface (#382), which hands the post to home and has no link yet.
+export type StreamerPublishResult = { ok: boolean; tweet_id: string; url: string; relayed?: string };
 export type WatchlistResponse = { logins: string[] };
 
 // One row of the Postgres `streamer` table (roster_store.Streamer.as_dict) — #279.
@@ -498,7 +499,7 @@ export const api = {
   streamersCancelPending: (clip_id: string) =>
     jpost<{ ok: boolean; clip_id: string }>(`/api/streamers/pending/${encodeURIComponent(clip_id)}/cancel`),
   streamersPendingPublishNow: (clip_id: string) =>
-    jpost<{ published: boolean; ok?: boolean; url?: string; queue_remaining?: number; reason?: string }>(
+    jpost<{ published: boolean; ok?: boolean; url?: string; queue_remaining?: number; reason?: string; relayed?: string }>(
       `/api/streamers/pending/${encodeURIComponent(clip_id)}/publish-now`,
     ),
   streamersPublished: () => jget<{ published: PostedClip[] }>("/api/streamers/published"),
@@ -546,7 +547,7 @@ export const api = {
       { retain },
     ),
   streamersGifPostNow: (clip_id: string) =>
-    jpost<{ ok?: boolean; published?: boolean; tweet_id?: string; url?: string; reason?: string }>(
+    jpost<{ ok?: boolean; published?: boolean; tweet_id?: string; url?: string; reason?: string; relayed?: string }>(
       `/api/streamers/gifs/${encodeURIComponent(clip_id)}/post-now`,
     ),
   // Streamer KB + Knowledge Card (#271 / #281)
