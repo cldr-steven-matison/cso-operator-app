@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 echo "==> Building app image into Minikube docker daemon"
 eval "$(minikube docker-env)"
-MODULES="${MODULES:-streamers}"
+MODULES="${MODULES:-rag,efm}"
 echo "==> MODULES=${MODULES}"
 docker build -t cso-operator-app:latest --build-arg MODULES="${MODULES}" .
 

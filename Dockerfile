@@ -19,7 +19,7 @@ WORKDIR /app
 # System deps for aiokafka (librdkafka not required for pure-Python aiokafka,
 # but a build base is handy for any future native deps).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ffmpeg \
+    && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt ./
@@ -31,7 +31,6 @@ ENV MODULES=${MODULES}
 COPY backend/ ./
 COPY scripts/ ./scripts/
 COPY samples/ ./samples/
-COPY streamers/ ./streamers/
 COPY --from=frontend /app/dist ./static
 
 EXPOSE 8000

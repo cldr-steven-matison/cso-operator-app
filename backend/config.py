@@ -7,27 +7,12 @@ class Settings(BaseSettings):
     VLLM_URL: str = "http://vllm-service.default.svc.cluster.local:8000"
     # Must match what vLLM is actually serving — check `GET /v1/models`.
     VLLM_MODEL: str = "Qwen/Qwen2.5-3B-Instruct"
-    # Shadow mode (#277): the DGX Spark caption brain's HTTP door. Empty = off
-    # (default). When set, process_clip also POSTs each clip there and stores the
-    # reply as `brain_caption` beside `caption` — never promoted, never blocking.
-    BRAIN_DOOR_URL: str = ""
-    BRAIN_DOOR_TIMEOUT: float = 60.0
-    # Streamer Knowledge Card (#281): base URL of the Spark's StreamerCard door
-    # (GET /kb, POST /card/preview, POST /card/publish). Empty = the Streamers KB
-    # tab shows roster + GIFs only, no KB content and no card buttons.
-    BRAIN_CARD_URL: str = ""
-    # streamers-do surface (#382): the BrainShare KB on kb-do, for the header light.
-    KB_URL: str = ""
-    KB_BEARER: str = ""
-    BRAIN_CARD_TIMEOUT: float = 120.0
 
     QDRANT_URL: str = "http://qdrant.default.svc.cluster.local:6333"
     QDRANT_COLLECTION: str = "my-rag-collection"
 
     EMBED_URL: str = "http://embedding-server-service.default.svc.cluster.local:80"
     EMBED_DIM: int = 768
-
-    WHISPER_URL: str = "http://whisper-service.default.svc.cluster.local:8001"
 
     NIFI_URL: str = "https://mynifi-web.cfm-streaming.svc.cluster.local"
     NIFI_VERIFY_TLS: bool = False
@@ -71,12 +56,6 @@ class Settings(BaseSettings):
     # The flow's RouteOnAttribute branches docs vs audio by Content-Type / mime.
     NIFI_INGEST_URL: str = "http://mynifi.cfm-streaming.svc.cluster.local:9000/contentListener"
 
-    # StreamersApp's shared on-demand entry point: a single ListenHTTP ("Trigger")
-    # feeds RouteOnAttribute, which branches on the X-Trigger-Request header to
-    # LiveStreamerAlert / FetchClips / PublishClipPeakTimeCron's TriggerInput port.
-    # One flowfile through, bypassing each flow's own top-level scheduler.
-    NIFI_TRIGGER_URL: str = "http://mynifi.cfm-streaming.svc.cluster.local:9080/contentListener"
-
     EFM_URL: str = "http://efm.cld-streaming.svc:10090"
 
     # EFM's own Postgres — direct read of the agent/device tables for a real
@@ -91,18 +70,6 @@ class Settings(BaseSettings):
     EFM_DB_USER: str = ""
     EFM_DB_PASSWORD: str = ""
 
-    # Streamers roster/catalog store (#275) — a dedicated `streamers` database on
-    # the same ssb-postgresql server, its own role. Replaces the hardcoded
-    # _TWITCH_LOGINS/_KICK_LOGINS/_STREAMER_CATALOG/_STREAMER_PATH_OVERRIDES in
-    # services/streamers.py as the source of truth; those constants remain the
-    # seed and the fallback when this DB is unreachable. Creds arrive via
-    # `kubectl set env`, never YAML. An empty user disables the store entirely.
-    STREAMERS_DB_HOST: str = "ssb-postgresql.cld-streaming.svc.cluster.local"
-    STREAMERS_DB_PORT: int = 5432
-    STREAMERS_DB_NAME: str = "streamers"
-    STREAMERS_DB_USER: str = ""
-    STREAMERS_DB_PASSWORD: str = ""
-
     # URL for "Use sample audio" — proxied through the backend to dodge CORS.
     SAMPLE_AUDIO_URL: str = (
         "https://www.voiptroubleshooter.com/open_speech/american/OSR_us_000_0010_8k.wav"
@@ -112,48 +79,9 @@ class Settings(BaseSettings):
     RAG_TOP_K: int = 4
     RAG_MAX_TOKENS: int = 512
 
-    # Optional modules baked into this image (comma-separated, e.g. "streamers")
+    # Optional modules baked into this image (comma-separated, e.g. "rag,efm").
+    # Gates which frontend tabs render (VITE_MODULES) and which health checks run.
     MODULES: str = ""
-
-    # Streamers module — Twitch clip pipeline
-    TWITCH_CLIENT_ID: str = ""
-    TWITCH_CLIENT_SECRET: str = ""
-    CLIP_STORAGE_PATH: str = "/clips"
-    NEW_CLIPS_TOPIC: str = "new_clips"
-    PROCESSED_CLIPS_TOPIC: str = "processed_clips"
-    TOPIC_CHAT_ACTIVITY: str = "twitch_chat_activity"
-
-    # Overlay chat relay (#300) — the left-side colorful chat column for
-    # @tunastarlink. The relay holds one anon Twitch IRC socket, defaults to the
-    # own channel below, and publishes each relayed message to this topic (mirror
-    # twitch_chat_activity's short retention via Surveyor after first produce).
-    OVERLAY_RELAY_TOPIC: str = "overlay_chat_relay"
-    OVERLAY_OWN_CHANNEL: str = "tunastarlink"
-
-    # Toggle for the glitch-intro burn in _fetch_twitch_clips/_fetch_kick_clips.
-    # Set false to pause it without touching the ffmpeg pipeline itself.
-    GLITCH_INTRO_ENABLED: bool = True
-
-    # Kick API — OAuth2 client credentials
-    KICK_CLIENT_ID: str = ""
-    KICK_CLIENT_SECRET: str = ""
-
-    # X (Twitter) API — OAuth 1.0a, @TunaStreetTest
-    X_API_KEY: str = ""
-    X_API_SECRET: str = ""
-    X_ACCESS_TOKEN: str = ""
-    X_ACCESS_TOKEN_SECRET: str = ""
-
-    # Deployment role (#382). "producer" is the home/minikube app exactly as it
-    # has always run: Kafka review queue, cluster-internal routers, the overlay
-    # relay and chat-activity tasks. "surface" is the streamers-do droplet: the
-    # review queue comes from Postgres (services/clip_store.py), fed by the
-    # home NiFi tap over S2S through /api/streamers/ingest/*, and every router
-    # or task that needs a cluster-internal service is left off.
-    ROLE: str = "producer"
-    # Optional bearer for /api/streamers/ingest/* on the surface. Empty = no
-    # check (the ingest port is bound to the tailnet and Caddy refuses the path).
-    STREAMERS_INGEST_TOKEN: str = ""
 
 
 settings = Settings()

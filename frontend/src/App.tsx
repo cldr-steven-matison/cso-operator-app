@@ -11,20 +11,17 @@ import { Operators } from "@/components/Operators";
 import { PodSummary } from "@/components/PodSummary";
 import { QdrantPanel } from "@/components/QdrantPanel";
 import { RagQuery } from "@/components/RagQuery";
-import { StreamersPage } from "@/components/StreamersPage";
 import { cn } from "@/lib/utils";
 
 const _modules = (import.meta.env.VITE_MODULES ?? "").split(",").map((s: string) => s.trim());
 const _has = (m: string) => _modules.includes(m) || _modules.includes("all");
 const _efm = _has("efm");
 const _rag = _has("rag");
-const _streamers = _has("streamers");
 
-type Tab = "operator" | "efm" | "rag" | "streamers";
+type Tab = "operator" | "efm" | "rag";
 
-// Operator is always present. EFM, RAG, Streamers require the matching MODULES flag.
+// Operator is always present. EFM and RAG require the matching MODULES flag.
 const TABS: { id: Tab; label: string }[] = [
-  ...(_streamers ? [{ id: "streamers" as Tab, label: "Streamers" }] : []),
   ...(_rag ? [{ id: "rag" as Tab, label: "RAG" }] : []),
   { id: "operator", label: "Operator" },
   ...(_efm ? [{ id: "efm" as Tab, label: "EFM" }] : []),
@@ -59,7 +56,6 @@ export default function App() {
           </>
         )}
         {tab === "efm" && _efm && <EfmPage />}
-        {tab === "streamers" && _streamers && <StreamersPage />}
         {tab === "rag" && (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             <DemoMode />

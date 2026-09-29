@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-KNOWN_MODULES = ["streamers"]
+KNOWN_MODULES = ["rag", "efm"]
 
 arg = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("MODULES", "")
 arg = arg.strip()

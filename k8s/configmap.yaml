@@ -9,7 +9,6 @@ data:
   QDRANT_COLLECTION: "my-rag-collection"
   EMBED_URL: "http://embedding-server-service.default.svc.cluster.local:80"
   EMBED_DIM: "768"
-  WHISPER_URL: "http://whisper-service.default.svc.cluster.local:8001"
   # mynifi-web Service publishes 8443, not 443 — omitting the port makes
   # every NiFi call hang on TCP connect to :443. Include it explicitly.
   NIFI_URL: "https://mynifi-web.cfm-streaming.svc.cluster.local:8443"
@@ -20,19 +19,5 @@ data:
   TOPIC_AUDIO: "new_audio"
   TOPIC_DOCS: "new_documents"
   # Active modules — controls which tabs and backend routes are enabled.
-  # Operator is always on. Add/remove: efm, rag, streamers
+  # Operator is always on. Add/remove: efm, rag
   MODULES: "rag,efm"
-  CLIP_STORAGE_PATH: "/clips"
-  NEW_CLIPS_TOPIC: "new_clips"
-  PROCESSED_CLIPS_TOPIC: "processed_clips"
-  # Pause the glitch-intro burn on ingested clips without touching code. Flip
-  # back to "true" to resume.
-  GLITCH_INTRO_ENABLED: "false"
-  # Kick API (values injected via kubectl set env / Secret)
-  KICK_CLIENT_ID: ""
-  KICK_CLIENT_SECRET: ""
-  # X (Twitter) API — OAuth 1.0a (values injected via kubectl set env / Secret)
-  X_API_KEY: ""
-  X_API_SECRET: ""
-  X_ACCESS_TOKEN: ""
-  X_ACCESS_TOKEN_SECRET: ""

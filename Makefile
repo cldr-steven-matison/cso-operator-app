@@ -11,10 +11,10 @@ IMAGE := cso-operator-app:latest
 STACK ?= gpu
 
 # MODULES controls which optional tabs/routes are enabled.
-# Operator tab is always on. Add any combination of: efm, rag, streamers
-#   MODULES=efm,rag,streamers   — full install (matches configmap default)
-#   MODULES=streamers           — Operator + Streamers only
-#   MODULES=                    — Operator only (bare minimum)
+# Operator tab is always on. Add any combination of: efm, rag
+#   MODULES=rag,efm   — full install (matches configmap default)
+#   MODULES=rag       — Operator + RAG only
+#   MODULES=          — Operator only (bare minimum)
 MODULES ?=
 
 help:
@@ -29,8 +29,8 @@ help:
 	@echo ""
 	@echo "Override the stack:         make bootstrap STACK=cpu"
 	@echo "Operator only (default):    make deploy MODULES="
-	@echo "Full install (all modules): make deploy MODULES=efm,rag,streamers"
-	@echo "Streamers only:             make deploy MODULES=streamers"
+	@echo "Full install (all modules): make deploy MODULES=rag,efm"
+	@echo "RAG only:                   make deploy MODULES=rag"
 
 bootstrap:
 	STACK=$(STACK) bash scripts/bootstrap-stack.sh
