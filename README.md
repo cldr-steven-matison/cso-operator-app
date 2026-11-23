@@ -1,5 +1,7 @@
 # CSO Operator App
 
+> **Decommissioned 2026-11-23.** The app is no longer run or maintained. The repo stays as the record of the demo; `flows/CSOOperatorApp.json` is the NiFi flow it used.
+
 ![CSO Operator App Control Plane](/CSO_Operator_Control_Plane.png)
 
 A control panel for the **Cloudera Streaming Operators** stack on Minikube — a RAG + Audio Transcription demo with EFM agent control. See [Modules](#modules) below.

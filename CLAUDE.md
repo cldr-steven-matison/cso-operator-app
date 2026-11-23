@@ -1,5 +1,7 @@
 # Read this first. Every session.
 
+**Decommissioned 2026-11-23.** The app's NiFi process group `CSOOperatorAppWindows` is off the `mynifi` canvas on WindowsDesktop; `flows/CSOOperatorApp.json` is its flow definition, and the last live export is on that box in `~/BrainShare-archive/nifi-local-cleanup-2026-11-23/`. No deploy, redeploy or flow upload unless Steven brings the app back. Everything below is how it ran.
+
 This is Steven's CSO Operator demo app — Operator controls, the EFM test kit, and the RAG/audio-transcription stack. Read `BrainShare/CLAUDE.md` first (project-wide rules — the repo is wherever BrainShare is checked out on this device, see `BrainShare/CLAUDE-CHECKIN.md`); this file is app-specific detail on top of it.
 
 **Commit directly to `main` — don't auto-branch.** This repo works entirely on `main` (no feature branches); the harness's "branch first on the default branch" default is overridden here. Commit/push discipline otherwise follows `BrainShare/agent/workflow.md` (only when asked, or the issue-finish ritual; no `Co-Authored-By` trailers).
